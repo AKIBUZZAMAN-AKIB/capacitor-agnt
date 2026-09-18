@@ -374,3 +374,34 @@ describe('shell plugins — Java imports', () => {
     }
   });
 });
+
+describe('agent — BackgroundTasks API usage (iOS)', () => {
+  const raw = () => read('plugins/native-agent/ios/Sources/NativeAgentPlugin/NativeAgentBackgroundTask.swift');
+  // Strip comments: the explanatory notes mention the very APIs we assert against.
+  const src = () => raw()
+    .split('\n')
+    .filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('///'))
+    .join('\n');
+
+  it('submits requests with submit(_:), which throws', () => {
+    // BGTaskScheduler has no schedule() -> Bool.
+    expect(src()).toContain('try BGTaskScheduler.shared.submit(request)');
+    expect(src()).not.toMatch(/BGTaskScheduler\.shared\.schedule\(/);
+  });
+
+  it('cancels by identifier, not by request object', () => {
+    // There is no synchronous `pendingRequests` property.
+    expect(src()).toContain('cancelTaskRequest(withIdentifier: taskIdentifier)');
+    expect(src()).not.toContain('pendingRequests');
+  });
+
+  it('downcasts the BGTask handed to the register closure', () => {
+    expect(src()).toContain('as? BGProcessingTask');
+  });
+
+  it('completes tasks with setTaskCompleted(success:) only', () => {
+    // setTaskCompleted(hadError:) does not exist on BGTask.
+    expect(src()).toContain('setTaskCompleted(success:');
+    expect(src()).not.toContain('hadError');
+  });
+});

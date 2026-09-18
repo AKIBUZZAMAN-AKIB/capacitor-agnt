@@ -49,21 +49,27 @@ enum NativeAgentBackgroundTask {
         request.requiresNetworkConnectivity = true
         request.requiresExternalPower = false
         request.earliestBeginDate = Date(timeIntervalSinceNow: TimeInterval(intervalMinutes) * 60)
-        // schedule() returns false (rather than throwing) when the system
-        // refuses; treat refusal as a normal error the JS caller can inspect.
-        guard BGTaskScheduler.shared.schedule(request) else {
+        // The API is submit(_:) and it THROWS when the system refuses (there is
+        // no schedule() -> Bool). Rethrow as a descriptive error so the JS
+        // caller sees why the wake could not be queued.
+        do {
+            try BGTaskScheduler.shared.submit(request)
+        } catch {
             throw NSError(
                 domain: "NativeAgent",
                 code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "BGTaskScheduler refused to schedule the wake request"]
+                userInfo: [NSLocalizedDescriptionKey:
+                    "BGTaskScheduler refused to schedule the wake request: \(error.localizedDescription)"
+                ]
             )
         }
     }
 
     static func cancel() {
-        BGTaskScheduler.shared.pendingRequests
-            .filter { $0.taskIdentifier == taskIdentifier }
-            .forEach { BGTaskScheduler.shared.cancel($0) }
+        // There is no synchronous `pendingRequests` property, and cancel takes
+        // an identifier String (cancelTaskRequest(withIdentifier:)) rather than
+        // a request object.
+        BGTaskScheduler.shared.cancelTaskRequest(withIdentifier: taskIdentifier)
     }
 
     // ── internals ─────────────────────────────────────────────────────
@@ -72,8 +78,14 @@ enum NativeAgentBackgroundTask {
         lock.lock()
         defer { lock.unlock() }
         guard !registered else { return }
-        BGTaskScheduler.shared.register(forTaskWithIdentifier: taskIdentifier, using: nil) { request in
-            handle(task: request)
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: taskIdentifier, using: nil) { task in
+            // The closure is handed a BGTask; this identifier is always
+            // submitted as a BGProcessingTaskRequest, but fail safe anyway.
+            guard let task = task as? BGProcessingTask else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            handle(task: task)
         }
         registered = true
     }
@@ -98,11 +110,10 @@ enum NativeAgentBackgroundTask {
                 NSLog("[NativeAgent] background wake failed: \(error.localizedDescription)")
                 ok = false
             }
-            if #available(iOS 15.0, *) {
-                task.setTaskCompleted(success: ok)
-            } else {
-                task.setTaskCompleted(hadError: !ok)
-            }
+            // setTaskCompleted(success:) is the only variant and has existed
+            // since iOS 13 (BackgroundTasks' minimum), so no availability
+            // branch is needed; setTaskCompleted(hadError:) does not exist.
+            task.setTaskCompleted(success: ok)
         }
     }
 
