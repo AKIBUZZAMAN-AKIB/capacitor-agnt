@@ -261,13 +261,20 @@ describe('agent — Android Gradle toolchain', () => {
     expect(read('android/variables.gradle')).toMatch(/kotlinVersion\s*=/);
   });
 
-  it('loads variables.gradle before buildscript{} so kotlinVersion resolves', () => {
+  it('pins the Kotlin classpath version as a literal, not a buildscript variable', () => {
+    // buildscript{} is evaluated in its own scope BEFORE variables.gradle is
+    // applied, so `$kotlinVersion` there fails with
+    // "Could not get unknown property 'kotlinVersion'" (this actually broke CI).
     const root = read('android/build.gradle');
-    const applyAt = root.indexOf('apply from: "variables.gradle"');
-    const buildscriptAt = root.indexOf('buildscript {');
-    expect(applyAt).toBeGreaterThan(-1);
-    // Gradle evaluates buildscript{} first; the ext values must already exist.
-    expect(applyAt).toBeLessThan(buildscriptAt);
+    const line = root.split('\n').find((l) => l.includes('kotlin-gradle-plugin'))!;
+    expect(line).toMatch(/kotlin-gradle-plugin:\d+\.\d+\.\d+'/);
+    expect(line).not.toContain('$');
+  });
+
+  it('keeps the inlined Kotlin version in sync with variables.gradle', () => {
+    const literal = read('android/build.gradle').match(/kotlin-gradle-plugin:([\d.]+)'/)![1];
+    const declared = read('android/variables.gradle').match(/kotlinVersion = '([\d.]+)'/)![1];
+    expect(literal).toBe(declared);
   });
 
   it('keeps the plugin minSdk at or below the app minSdk', () => {

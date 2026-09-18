@@ -1,9 +1,5 @@
 // Top-level build file where you can add configuration options common to all sub-projects/modules.
 
-// Loaded before buildscript{} so that variables.gradle values (kotlinVersion)
-// are available when resolving classpath dependencies below.
-apply from: "variables.gradle"
-
 buildscript {
     repositories {
         google()
@@ -16,12 +12,18 @@ buildscript {
         // 'kotlin-android'). Every other plugin in this shell is pure Java, so
         // the Kotlin toolchain was never on the classpath and Gradle failed at
         // CONFIGURATION time with "Plugin with id 'kotlin-android' not found".
-        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlinVersion"
+        // The version is a literal on purpose: buildscript{} is evaluated in
+        // its own scope before variables.gradle is applied, so reading
+        // $kotlinVersion here fails with "Could not get unknown property".
+        // Keep it in sync with kotlinVersion in variables.gradle (unit-tested).
+        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:2.0.21'
 
         // NOTE: Do not place your application dependencies here; they belong
         // in the individual module build.gradle files
     }
 }
+
+apply from: "variables.gradle"
 
 allprojects {
     repositories {
