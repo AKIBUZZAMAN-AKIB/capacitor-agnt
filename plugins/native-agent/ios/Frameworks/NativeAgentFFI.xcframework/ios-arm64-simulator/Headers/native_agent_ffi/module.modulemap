@@ -1,0 +1,4 @@
+module native_agent_ffiFFI {
+    header "native_agent_ffiFFI.h"
+    export *
+}

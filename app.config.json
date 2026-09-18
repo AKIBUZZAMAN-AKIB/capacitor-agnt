@@ -56,7 +56,8 @@
     "inAppBrowser": true,
     "preferences": true,
     "nearby": true,
-    "widget": true
+    "widget": true,
+    "agent": true
   },
   "permissions": {
     "camera": "ছবি বা ভিডিও সংযুক্ত করতে ক্যামেরা ব্যবহারের অনুমতি প্রয়োজন।",

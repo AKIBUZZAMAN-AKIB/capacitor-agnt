@@ -214,7 +214,8 @@
         "appBrowser",
         "inAppBrowser",
         "nearby",
-        "widget"
+        "widget",
+        "agent"
       ],
       "properties": {
         "camera": {
@@ -282,6 +283,11 @@
           "type": "boolean",
           "default": false,
           "description": "Home-screen (AppWidgetProvider/WidgetKit) and floating overlay widget bridge. Disable to make NativeKit.widget throw and to strip the widget providers + overlay service from the native projects."
+        },
+        "agent": {
+          "type": "boolean",
+          "default": false,
+          "description": "On-device Rust AI agent engine (LLM turns, tool calls, cron/heartbeat, skills, MCP, memory). Disable to make NativeKit.agent throw. Android currently ships an arm64-v8a binary only; other ABIs report checkAvailability().available=false instead of crashing."
         }
       }
     },

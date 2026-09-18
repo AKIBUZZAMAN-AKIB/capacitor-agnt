@@ -1,0 +1,74 @@
+{
+  "name": "capacitor-native-agent",
+  "version": "0.9.14",
+  "description": "Native AI agent loop for Capacitor — runs LLM completions, tool execution, and cron jobs in native Rust, enabling background execution.",
+  "main": "dist/esm/index.js",
+  "types": "dist/esm/index.d.ts",
+  "type": "module",
+  "license": "MIT",
+  "author": "Techxagon",
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "capacitor": {
+    "android": {
+      "src": "android"
+    },
+    "ios": {
+      "src": "ios"
+    }
+  },
+  "files": [
+    "dist/esm/",
+    "android/src/main/",
+    "android/build.gradle",
+    "ios/Sources/",
+    "ios/Frameworks/",
+    "CapacitorNativeAgent.podspec",
+    "Package.swift",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "capacitor",
+    "capacitor-plugin",
+    "agent",
+    "llm",
+    "native",
+    "rust",
+    "background",
+    "ai",
+    "anthropic",
+    "claude",
+    "cron",
+    "mcp"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rogelioRuiz/capacitor-native-agent.git"
+  },
+  "homepage": "https://github.com/rogelioRuiz/capacitor-native-agent#readme",
+  "bugs": {
+    "url": "https://github.com/rogelioRuiz/capacitor-native-agent/issues"
+  },
+  "peerDependencies": {
+    "@capacitor/core": "^6.0.0 || ^7.0.0 || ^8.0.0",
+    "capacitor-lancedb": "^0.2.2"
+  },
+  "peerDependenciesMeta": {
+    "capacitor-lancedb": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@capacitor/core": "^8.1.0",
+    "typescript": "~5.5.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

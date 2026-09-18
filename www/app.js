@@ -265,6 +265,13 @@ const actions = {
 document.querySelectorAll('[data-action]').forEach((button) => {
   button.addEventListener('click', () => execute(button.dataset.action, actions[button.dataset.action], button));
 });
+
+// ── Agent lab (on-device Rust AI agent) ──────────────────────────────────────
+// Loaded as a module so its ~47 API tests stay out of this file. It reuses the
+// same execute()/log() contract, so results land in the shared Host Event Log.
+import('./agent-lab.js')
+  .then((mod) => mod.wireAgentButtons(execute))
+  .catch((error) => log('agent-lab load failed', error.message));
 document.querySelector('#refresh').addEventListener('click', refresh);
 document.querySelector('#clear').addEventListener('click', () => { logNode.textContent = ''; });
 document.querySelector('#http-form').addEventListener('submit', (event) => {

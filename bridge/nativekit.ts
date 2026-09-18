@@ -15,6 +15,7 @@ import { CapacitorSQLite, SQLiteConnection } from '@capacitor-community/sqlite';
 import { NearbyConnections } from '@capacitor-trancee/nearby-connections';
 import { NativeKitCustom } from '@nativekit/custom-native';
 import { Widget } from '@nativekit/widget';
+import { NativeAgent } from 'capacitor-native-agent';
 import { InAppBrowser } from '@capgo/capacitor-inappbrowser';
 import { createAppBrowser } from './app-browser';
 
@@ -663,6 +664,115 @@ const NativeKit: any = {
     sendToFloating: async (data: unknown) => { feature('widget'); requireNative(); return Widget.sendToFloating({ data }); },
     onWidgetTap: (callback: (event: any) => void): Promise<Remove> => { feature('widget'); requireNative(); return Widget.addListener('nativeWidgetTap', callback); },
     onFloatingMessage: (callback: (event: any) => void): Promise<Remove> => { feature('widget'); requireNative(); return Widget.addListener('nativeFloatingMessage', callback); },
+  },
+  // On-device Rust AI agent. Every call below runs entirely inside the app
+  // process (LLM client, tool loop, SQLite store, cron scheduler) — the only
+  // network traffic is the agent talking to its configured LLM provider.
+  agent: {
+    supported: (): boolean => config.features.agent && isNative,
+
+    // ── Diagnostics ──
+    // Never rejects: an unsupported device ABI resolves { available: false }.
+    checkAvailability: async () => { feature('agent'); requireNative(); return NativeAgent.checkAvailability(); },
+
+    // ── Lifecycle ──
+    initWorkspace: async (options: Record<string, unknown>) => { feature('agent'); requireNative(); return NativeAgent.initWorkspace(options as any); },
+    initialize: async (options: Record<string, unknown>) => { feature('agent'); requireNative(); return NativeAgent.initialize(options as any); },
+
+    // ── Background wakes (Android JobScheduler / iOS BGProcessingTask) ──
+    scheduleBackgroundWakes: async (intervalMinutes?: number) => {
+      feature('agent'); requireNative();
+      return NativeAgent.scheduleBackgroundWakes(intervalMinutes === undefined ? {} : { intervalMinutes });
+    },
+    cancelBackgroundWakes: async () => { feature('agent'); requireNative(); return NativeAgent.cancelBackgroundWakes(); },
+
+    // ── Agent turns ──
+    sendMessage: async (options: Record<string, unknown>) => { feature('agent'); requireNative(); return NativeAgent.sendMessage(options as any); },
+    followUp: async (prompt: string) => { feature('agent'); requireNative(); return NativeAgent.followUp({ prompt }); },
+    abort: async () => { feature('agent'); requireNative(); return NativeAgent.abort(); },
+    steer: async (text: string) => { feature('agent'); requireNative(); return NativeAgent.steer({ text }); },
+
+    // ── Approval gate (human-in-the-loop tool calls) ──
+    respondToApproval: async (toolCallId: string, approved: boolean, reason?: string) => {
+      feature('agent'); requireNative();
+      return NativeAgent.respondToApproval({ toolCallId, approved, reason });
+    },
+    respondToMcpTool: async (toolCallId: string, resultJson: string, isError = false) => {
+      feature('agent'); requireNative();
+      return NativeAgent.respondToMcpTool({ toolCallId, resultJson, isError });
+    },
+    respondToCronApproval: async (requestId: string, approved: boolean) => {
+      feature('agent'); requireNative();
+      return NativeAgent.respondToCronApproval({ requestId, approved });
+    },
+
+    // ── Auth (stored in the engine's auth-profiles.json) ──
+    getAuthToken: async (provider = 'anthropic') => { feature('agent'); requireNative(); return NativeAgent.getAuthToken({ provider }); },
+    setAuthKey: async (key: string, provider = 'anthropic', authType = 'api_key', refresh?: string, expiresAt?: number) => {
+      feature('agent'); requireNative();
+      return NativeAgent.setAuthKey({ key, provider, authType, refresh, expiresAt });
+    },
+    deleteAuth: async (provider = 'anthropic') => { feature('agent'); requireNative(); return NativeAgent.deleteAuth({ provider }); },
+    refreshToken: async (provider = 'anthropic') => { feature('agent'); requireNative(); return NativeAgent.refreshToken({ provider }); },
+    getAuthStatus: async (provider = 'anthropic') => { feature('agent'); requireNative(); return NativeAgent.getAuthStatus({ provider }); },
+    exchangeOAuthCode: async (tokenUrl: string, bodyJson: string, contentType?: string) => {
+      feature('agent'); requireNative();
+      return NativeAgent.exchangeOAuthCode({ tokenUrl, bodyJson, contentType });
+    },
+
+    // ── Sessions ──
+    listSessions: async (agentId = 'main') => { feature('agent'); requireNative(); return NativeAgent.listSessions({ agentId }); },
+    loadSession: async (sessionKey: string, agentId?: string) => { feature('agent'); requireNative(); return NativeAgent.loadSession({ sessionKey, agentId }); },
+    resumeSession: async (options: Record<string, unknown>) => { feature('agent'); requireNative(); return NativeAgent.resumeSession(options as any); },
+    clearSession: async () => { feature('agent'); requireNative(); return NativeAgent.clearSession(); },
+
+    // ── Cron / heartbeat ──
+    addCronJob: async (inputJson: string) => { feature('agent'); requireNative(); return NativeAgent.addCronJob({ inputJson }); },
+    updateCronJob: async (id: string, patchJson: string) => { feature('agent'); requireNative(); return NativeAgent.updateCronJob({ id, patchJson }); },
+    removeCronJob: async (id: string) => { feature('agent'); requireNative(); return NativeAgent.removeCronJob({ id }); },
+    listCronJobs: async () => { feature('agent'); requireNative(); return NativeAgent.listCronJobs(); },
+    runCronJob: async (jobId: string) => { feature('agent'); requireNative(); return NativeAgent.runCronJob({ jobId }); },
+    listCronRuns: async (jobId?: string, limit?: number) => { feature('agent'); requireNative(); return NativeAgent.listCronRuns({ jobId, limit }); },
+    loadSurfacedMessages: async (limit?: number) => { feature('agent'); requireNative(); return NativeAgent.loadSurfacedMessages({ limit }); },
+    handleWake: async (source?: string) => { feature('agent'); requireNative(); return NativeAgent.handleWake(source === undefined ? {} : { source }); },
+    getSchedulerConfig: async () => { feature('agent'); requireNative(); return NativeAgent.getSchedulerConfig(); },
+    setSchedulerConfig: async (configJson: string) => { feature('agent'); requireNative(); return NativeAgent.setSchedulerConfig({ configJson }); },
+    setHeartbeatConfig: async (configJson: string) => { feature('agent'); requireNative(); return NativeAgent.setHeartbeatConfig({ configJson }); },
+
+    // ── Skills ──
+    addSkill: async (inputJson: string) => { feature('agent'); requireNative(); return NativeAgent.addSkill({ inputJson }); },
+    updateSkill: async (id: string, patchJson: string) => { feature('agent'); requireNative(); return NativeAgent.updateSkill({ id, patchJson }); },
+    removeSkill: async (skillId: string) => { feature('agent'); requireNative(); return NativeAgent.removeSkill({ skillId }); },
+    listSkills: async () => { feature('agent'); requireNative(); return NativeAgent.listSkills(); },
+    startSkill: async (skillId: string, configJson?: string, provider?: string) => {
+      feature('agent'); requireNative();
+      return NativeAgent.startSkill({ skillId, configJson, provider });
+    },
+    endSkill: async (skillId: string) => { feature('agent'); requireNative(); return NativeAgent.endSkill({ skillId }); },
+
+    // ── Tool permissions ──
+    seedToolPermissions: async (defaultsJson: string) => { feature('agent'); requireNative(); return NativeAgent.seedToolPermissions({ defaultsJson }); },
+    setToolPermission: async (toolName: string, permission: string, enabled?: boolean) => {
+      feature('agent'); requireNative();
+      return NativeAgent.setToolPermission({ toolName, permission, enabled });
+    },
+    listToolPermissions: async () => { feature('agent'); requireNative(); return NativeAgent.listToolPermissions(); },
+    resetToolPermissions: async () => { feature('agent'); requireNative(); return NativeAgent.resetToolPermissions(); },
+
+    // ── MCP ──
+    startMcp: async (toolsJson: string) => { feature('agent'); requireNative(); return NativeAgent.startMcp({ toolsJson }); },
+    restartMcp: async (toolsJson: string) => { feature('agent'); requireNative(); return NativeAgent.restartMcp({ toolsJson }); },
+    setMcpTools: async (toolsJson: string) => { feature('agent'); requireNative(); return NativeAgent.setMcpTools({ toolsJson }); },
+
+    // ── Models & tools ──
+    getModels: async (provider = 'anthropic') => { feature('agent'); requireNative(); return NativeAgent.getModels({ provider }); },
+    invokeTool: async (toolName: string, argsJson = '{}') => { feature('agent'); requireNative(); return NativeAgent.invokeTool({ toolName, argsJson }); },
+
+    // ── Events (streaming text, tool calls, approvals, cron results) ──
+    onEvent: (callback: (event: any) => void): Promise<Remove> => {
+      feature('agent'); requireNative();
+      return NativeAgent.addListener('nativeAgentEvent', callback);
+    },
   },
 };
 

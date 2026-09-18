@@ -1,0 +1,48 @@
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+// The LanceDB-backed memory provider is an OPTIONAL feature. Its Kotlin
+// sources live in src/main/java-memory and are only compiled — together with
+// the compileOnly dependency — when the host app also integrates the
+// capacitor-lancedb plugin (project ':capacitor-lancedb'). Without this gate
+// the plugin module fails to configure for every app that does not include
+// capacitor-lancedb, even though package.json declares it optional.
+def hasLanceDb = project.findProject(':capacitor-lancedb') != null
+if (hasLanceDb) {
+    android.sourceSets.main.java.srcDir('src/main/java-memory')
+}
+
+android {
+    namespace 'com.t6x.plugins.nativeagent'
+    compileSdk 36
+    defaultConfig {
+        minSdkVersion 23
+        targetSdkVersion 36
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+    }
+}
+
+// R8/ProGuard rules for host release builds: the UniFFI FFI surface is
+// JNA-based (dynamic interface mapping + callbacks) and breaks if the host
+// app minifies without these keep rules.
+android {
+    consumerProguardFiles 'consumer-rules.pro'
+}
+
+dependencies {
+    implementation project(':capacitor-android')
+    if (hasLanceDb) {
+        compileOnly project(':capacitor-lancedb')
+    }
+    implementation 'net.java.dev.jna:jna:5.14.0@aar'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
+}

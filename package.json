@@ -52,6 +52,7 @@
     "@nativekit/custom-native": "file:plugins/custom-native",
     "@nativekit/isolated-browser": "file:plugins/isolated-browser",
     "@nativekit/widget": "file:plugins/widget",
+    "capacitor-native-agent": "file:plugins/native-agent",
     "fflate": "0.8.3",
     "plist": "3.1.0"
   },

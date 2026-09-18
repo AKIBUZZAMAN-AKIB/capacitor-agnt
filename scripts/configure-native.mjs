@@ -7,6 +7,10 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const config = JSON.parse(await fs.readFile(path.join(root, 'app.config.json'), 'utf8'));
 const wc = config.widget ?? { enabled: false, homeScreen: { enabled: false, resizeEnabled: true, updatePeriodMinutes: 30, kinds: [] }, floating: { enabled: false, title: '', page: '', width: 240, height: 220, startOnLaunch: false } };
 
+// Must match NativeAgentBackgroundTask.taskIdentifier in the native-agent plugin
+// (plugins/native-agent/ios/Sources/NativeAgentPlugin/NativeAgentBackgroundTask.swift).
+const AGENT_WAKE_TASK_ID = 'io.t6x.nativeagent.wake';
+
 const xml = (value) => String(value)
   .replaceAll('&', '&amp;')
   .replaceAll('<', '&lt;')
@@ -277,8 +281,16 @@ function infoPlist() {
   if (config.features.advancedAlarms && config.ios.alarmKitOnIOS26) {
     entries.set('NSAlarmKitUsageDescription', config.permissions.alarmKit);
   }
-  if (config.features.backgroundRunner) {
-    entries.set('BGTaskSchedulerPermittedIdentifiers', [config.backgroundRunner.taskIdentifier]);
+  // BGTaskScheduler refuses to register an identifier that is not whitelisted here,
+  // so every background task owner must contribute its id to the SAME array.
+  const bgTaskIds = [];
+  if (config.features.backgroundRunner) bgTaskIds.push(config.backgroundRunner.taskIdentifier);
+  // On-device agent: cron jobs / heartbeat wakes are driven by a BGProcessingTask.
+  // Without this identifier scheduleBackgroundWakes() resolves jobScheduled:false
+  // and every scheduled agent job silently never runs on iOS.
+  if (config.features.agent) bgTaskIds.push(AGENT_WAKE_TASK_ID);
+  if (bgTaskIds.length) {
+    entries.set('BGTaskSchedulerPermittedIdentifiers', [...new Set(bgTaskIds)]);
   }
   // Nearby Connections (feature: nearby) — the plugin's iOS implementation (Google's
   // Swift port) needs Bluetooth + Local Network usage strings or CoreBluetooth/NW
@@ -290,7 +302,9 @@ function infoPlist() {
 
   const modes = [];
   if (config.ios.backgroundFetch) modes.push('fetch');
-  if (config.ios.backgroundProcessing) modes.push('processing');
+  // The agent's wake task is a BGProcessingTask, which requires the 'processing'
+  // background mode even if the host app did not opt into backgroundProcessing.
+  if (config.ios.backgroundProcessing || config.features.agent) modes.push('processing');
   if (config.features.backgroundLocation && config.ios.backgroundLocation) modes.push('location');
   if (config.ios.pushCapabilityConfigured) modes.push('remote-notification');
   if (modes.length) entries.set('UIBackgroundModes', modes);
