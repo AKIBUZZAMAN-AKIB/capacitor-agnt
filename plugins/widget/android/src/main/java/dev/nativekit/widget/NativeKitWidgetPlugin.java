@@ -376,20 +376,28 @@ public class NativeKitWidgetPlugin extends Plugin {
     // -- Helpers ----------------------------------------------------------------
 
     /** Deep-merge a patch JSONObject into a target JSONObject (nested objects merge recursively). */
-    private static void mergeJSON(JSONObject target, JSONObject patch) throws JSONException {
+    private static void mergeJSON(JSONObject target, JSONObject patch) {
         if (target == null || patch == null) return;
         @SuppressWarnings("unchecked")
         java.util.Iterator<String> keys = patch.keys();
         while (keys.hasNext()) {
             String key = keys.next();
             Object value = patch.opt(key);
-            if (value instanceof JSONObject) {
-                JSONObject nested = target.optJSONObject(key);
-                if (nested == null) nested = new JSONObject();
-                target.put(key, nested);
-                mergeJSON(nested, (JSONObject) value);
-            } else {
-                target.put(key, value);
+            // org.json.JSONObject.put(String, Object) throws a CHECKED
+            // JSONException (unlike Capacitor's JSObject.put). Keep it contained
+            // here so the plugin's own method signatures stay Capacitor-shaped.
+            try {
+                if (value instanceof JSONObject) {
+                    JSONObject nested = target.optJSONObject(key);
+                    if (nested == null) nested = new JSONObject();
+                    target.put(key, nested);
+                    mergeJSON(nested, (JSONObject) value);
+                } else {
+                    target.put(key, value);
+                }
+            } catch (JSONException error) {
+                // A single un-mergeable key must not discard the whole patch.
+                android.util.Log.w("NativeKitWidget", "mergeJSON: skipping key " + key, error);
             }
         }
     }
