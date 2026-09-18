@@ -17,6 +17,7 @@ import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import org.json.JSONException;
 import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -375,7 +376,7 @@ public class NativeKitWidgetPlugin extends Plugin {
     // -- Helpers ----------------------------------------------------------------
 
     /** Deep-merge a patch JSONObject into a target JSONObject (nested objects merge recursively). */
-    private static void mergeJSON(JSONObject target, JSONObject patch) {
+    private static void mergeJSON(JSONObject target, JSONObject patch) throws JSONException {
         if (target == null || patch == null) return;
         @SuppressWarnings("unchecked")
         java.util.Iterator<String> keys = patch.keys();
