@@ -16,7 +16,11 @@ buildscript {
         // its own scope before variables.gradle is applied, so reading
         // $kotlinVersion here fails with "Could not get unknown property".
         // Keep it in sync with kotlinVersion in variables.gradle (unit-tested).
-        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:2.0.21'
+        // 2.2.0 is a FLOOR, not a preference: @capacitor/background-runner
+        // ships a prebuilt android-js-engine AAR whose classes carry Kotlin
+        // 2.2.0 metadata, and an older compiler refuses to read it with
+        // "compiled with an incompatible version of Kotlin".
+        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:2.2.0'
 
         // NOTE: Do not place your application dependencies here; they belong
         // in the individual module build.gradle files
