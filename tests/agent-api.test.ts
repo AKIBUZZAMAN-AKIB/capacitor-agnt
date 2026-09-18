@@ -405,3 +405,19 @@ describe('agent — BackgroundTasks API usage (iOS)', () => {
     expect(src()).not.toContain('hadError');
   });
 });
+
+describe('agent — simulator architecture constraint', () => {
+  it('builds the Simulator app for arm64 only', () => {
+    // The vendored Rust binary has no x86_64 simulator slice (the FFI crate is
+    // in a private repo), so an Intel slice fails to link with
+    // "Undefined symbols for architecture x86_64".
+    const wf = read('.github/workflows/ios.yml');
+    expect(wf).toContain('ARCHS=arm64');
+  });
+
+  it('documents exactly the slices the xcframework ships', () => {
+    const plist = read('plugins/native-agent/ios/Frameworks/NativeAgentFFI.xcframework/Info.plist');
+    const ids = [...plist.matchAll(/<key>LibraryIdentifier<\/key>\s*<string>([^<]+)<\/string>/g)].map((m) => m[1]).sort();
+    expect(ids).toEqual(['ios-arm64', 'ios-arm64-simulator']);
+  });
+});

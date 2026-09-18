@@ -66,6 +66,12 @@ jobs:
 
       - name: Compile unsigned iOS Simulator app
         shell: bash
+        # ARCHS=arm64: the native-agent Rust binary ships ios-arm64 and
+        # ios-arm64-simulator slices only (the Rust FFI crate lives in a private
+        # repo, so an x86_64 slice cannot be produced here). A generic Simulator
+        # destination would also build x86_64 and fail to link with
+        # "Undefined symbols for architecture x86_64". Apple Silicon runners and
+        # simulators are arm64, so this loses no real coverage.
         run: |
           set -euo pipefail
           xcodebuild \
@@ -75,6 +81,7 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath "$RUNNER_TEMP/DerivedData-Simulator" \
             CODE_SIGNING_ALLOWED=NO \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
             build
 
       - name: Require complete IPA secrets
