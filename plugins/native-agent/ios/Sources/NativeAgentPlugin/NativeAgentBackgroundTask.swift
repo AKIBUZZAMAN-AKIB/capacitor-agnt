@@ -67,9 +67,9 @@ enum NativeAgentBackgroundTask {
 
     static func cancel() {
         // There is no synchronous `pendingRequests` property, and cancel takes
-        // an identifier String (cancelTaskRequest(withIdentifier:)) rather than
-        // a request object.
-        BGTaskScheduler.shared.cancelTaskRequest(withIdentifier: taskIdentifier)
+        // an identifier String: cancel(taskRequestWithIdentifier:) — note the
+        // argument label lives inside the parentheses, not in the method name.
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: taskIdentifier)
     }
 
     // ── internals ─────────────────────────────────────────────────────

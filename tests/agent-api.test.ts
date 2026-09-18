@@ -391,7 +391,7 @@ describe('agent — BackgroundTasks API usage (iOS)', () => {
 
   it('cancels by identifier, not by request object', () => {
     // There is no synchronous `pendingRequests` property.
-    expect(src()).toContain('cancelTaskRequest(withIdentifier: taskIdentifier)');
+    expect(src()).toContain('cancel(taskRequestWithIdentifier: taskIdentifier)');
     expect(src()).not.toContain('pendingRequests');
   });
 
