@@ -1,5 +1,5 @@
 import Foundation
-import BGTaskScheduler
+import BackgroundTasks
 import Capacitor
 
 /// Background cron/heartbeat wake via BGProcessingTask (no extra dependency).

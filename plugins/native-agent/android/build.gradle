@@ -18,6 +18,12 @@ android {
     defaultConfig {
         minSdkVersion 23
         targetSdkVersion 36
+        // R8/ProGuard rules for host release builds: the UniFFI FFI surface is
+        // JNA-based (dynamic interface mapping + callbacks) and breaks if the
+        // host app minifies without these keep rules. This belongs to
+        // defaultConfig — on the android{} extension AGP rejects it with
+        // "Could not find method consumerProguardFiles()".
+        consumerProguardFiles 'consumer-rules.pro'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -29,13 +35,6 @@ kotlin {
     compilerOptions {
         jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
     }
-}
-
-// R8/ProGuard rules for host release builds: the UniFFI FFI surface is
-// JNA-based (dynamic interface mapping + callbacks) and breaks if the host
-// app minifies without these keep rules.
-android {
-    consumerProguardFiles 'consumer-rules.pro'
 }
 
 dependencies {

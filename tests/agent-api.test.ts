@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -281,5 +281,46 @@ describe('agent — Android Gradle toolchain', () => {
     const plugin = Number(read('plugins/native-agent/android/build.gradle').match(/minSdkVersion (\d+)/)![1]);
     const app = Number(read('android/variables.gradle').match(/minSdkVersion = (\d+)/)![1]);
     expect(plugin).toBeLessThanOrEqual(app);
+  });
+});
+
+describe('agent — native build-file correctness', () => {
+  it('imports the BackgroundTasks framework, not the BGTaskScheduler class', () => {
+    // `import BGTaskScheduler` compiles nowhere: BGTaskScheduler is a class
+    // inside the BackgroundTasks framework. This broke the iOS CI build with
+    // "unable to resolve module dependency: 'BGTaskScheduler'".
+    const swiftFiles = [
+      'plugins/native-agent/ios/Sources/NativeAgentPlugin/NativeAgentBackgroundTask.swift',
+      'plugins/native-agent/ios/Sources/NativeAgentPlugin/NativeAgentPlugin.swift',
+    ];
+    for (const f of swiftFiles) {
+      expect(read(f)).not.toMatch(/^import BGTaskScheduler$/m);
+    }
+    const bg = read(swiftFiles[0]);
+    expect(bg).toMatch(/^import BackgroundTasks$/m);
+    expect(bg).toContain('BGTaskScheduler.shared');
+  });
+
+  it('every non-system Swift import is guarded by canImport', () => {
+    const dir = 'plugins/native-agent/ios/Sources/NativeAgentPlugin';
+    const system = new Set(['Foundation', 'Capacitor', 'BackgroundTasks', 'UserNotifications', 'UIKit', 'Combine']);
+    for (const file of readdirSync(dir).filter((f) => f.endsWith('.swift'))) {
+      const src = read(path.join(dir, file));
+      for (const m of src.matchAll(/^import (\w+)$/gm)) {
+        if (system.has(m[1])) continue;
+        // Optional dependencies must degrade gracefully when absent.
+        expect(src, `${file}: 'import ${m[1]}' is not behind #if canImport`).toContain(`canImport(${m[1]})`);
+      }
+    }
+  });
+
+  it('declares consumerProguardFiles inside defaultConfig', () => {
+    // On the android{} extension AGP fails with
+    // "Could not find method consumerProguardFiles()".
+    const gradle = read('plugins/native-agent/android/build.gradle');
+    const defaultConfig = gradle.match(/defaultConfig \{[\s\S]*?\n    \}/)![0];
+    expect(defaultConfig).toContain("consumerProguardFiles 'consumer-rules.pro'");
+    // And the referenced file must actually exist, or the build fails later.
+    expect(existsSync(path.join(process.cwd(), 'plugins/native-agent/android/consumer-rules.pro'))).toBe(true);
   });
 });
