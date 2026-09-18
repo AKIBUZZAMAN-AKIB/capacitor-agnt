@@ -249,3 +249,30 @@ describe('agent — iOS background wake configuration', () => {
     );
   });
 });
+
+describe('agent — Android Gradle toolchain', () => {
+  it('puts the Kotlin Gradle plugin on the buildscript classpath', () => {
+    // The native-agent module is the only Kotlin module in this shell; without
+    // this classpath entry Gradle fails at CONFIGURATION time with
+    // "Plugin with id 'kotlin-android' not found" and no APK is ever produced.
+    const root = read('android/build.gradle');
+    expect(read('plugins/native-agent/android/build.gradle')).toContain("apply plugin: 'kotlin-android'");
+    expect(root).toContain('org.jetbrains.kotlin:kotlin-gradle-plugin');
+    expect(read('android/variables.gradle')).toMatch(/kotlinVersion\s*=/);
+  });
+
+  it('loads variables.gradle before buildscript{} so kotlinVersion resolves', () => {
+    const root = read('android/build.gradle');
+    const applyAt = root.indexOf('apply from: "variables.gradle"');
+    const buildscriptAt = root.indexOf('buildscript {');
+    expect(applyAt).toBeGreaterThan(-1);
+    // Gradle evaluates buildscript{} first; the ext values must already exist.
+    expect(applyAt).toBeLessThan(buildscriptAt);
+  });
+
+  it('keeps the plugin minSdk at or below the app minSdk', () => {
+    const plugin = Number(read('plugins/native-agent/android/build.gradle').match(/minSdkVersion (\d+)/)![1]);
+    const app = Number(read('android/variables.gradle').match(/minSdkVersion = (\d+)/)![1]);
+    expect(plugin).toBeLessThanOrEqual(app);
+  });
+});

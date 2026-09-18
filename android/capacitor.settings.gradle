@@ -55,3 +55,9 @@ project(':nativekit-custom-native').projectDir = new File('../plugins/custom-nat
 
 include ':nativekit-isolated-browser'
 project(':nativekit-isolated-browser').projectDir = new File('../plugins/isolated-browser/android')
+
+include ':nativekit-widget'
+project(':nativekit-widget').projectDir = new File('../plugins/widget/android')
+
+include ':capacitor-native-agent'
+project(':capacitor-native-agent').projectDir = new File('../plugins/native-agent/android')

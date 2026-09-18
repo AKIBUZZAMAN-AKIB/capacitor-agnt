@@ -13,4 +13,7 @@ ext {
     androidxJunitVersion = '1.3.0'
     androidxEspressoCoreVersion = '3.7.0'
     cordovaAndroidVersion = '14.0.1'
+    // Kotlin toolchain for the native-agent plugin module. 2.0.21 matches the
+    // kotlinx-coroutines 1.8.1 the plugin depends on and supports compileSdk 36.
+    kotlinVersion = '2.0.21'
 }
