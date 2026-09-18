@@ -362,3 +362,15 @@ describe('agent — native API correctness (compile failures caught in CI)', () 
     expect(a).toBe(b);
   });
 });
+
+describe('shell plugins — Java imports', () => {
+  it('imports android.view.Gravity where Gravity is used', () => {
+    // Found once the Kotlin toolchain let the build reach javac: the widget
+    // provider used Gravity.* without importing it ("cannot find symbol").
+    const f = 'plugins/widget/android/src/main/java/dev/nativekit/widget/NativeKitWidgetProvider.java';
+    const src = read(f);
+    if (/\bGravity\./.test(src)) {
+      expect(src).toContain('import android.view.Gravity;');
+    }
+  });
+});
