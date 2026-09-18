@@ -27,12 +27,25 @@ let package = Package(
             name: "NativeAgentFFI",
             path: "ios/Frameworks/NativeAgentFFI.xcframework"
         ),
+        // Exposes the UniFFI C header as a Swift-importable module. The
+        // generated native_agent_ffi.swift does `#if canImport(native_agent_ffiFFI)`
+        // and its types (RustBuffer, RustCallStatus, ...) come from there.
+        // A binaryTarget's headers are NOT automatically importable from Swift
+        // under SwiftPM, so without this target the build fails with
+        // "cannot find type 'RustBuffer' in scope". The CocoaPods path solves
+        // the same problem with an -fmodule-map-file flag in the podspec.
+        .target(
+            name: "native_agent_ffiFFI",
+            dependencies: ["NativeAgentFFI"],
+            path: "ios/Sources/native_agent_ffiFFI"
+        ),
         .target(
             name: "NativeAgentPlugin",
             dependencies: [
                 .product(name: "Capacitor", package: "capacitor-swift-pm"),
                 .product(name: "Cordova", package: "capacitor-swift-pm"),
-                "NativeAgentFFI"
+                "NativeAgentFFI",
+                "native_agent_ffiFFI"
             ],
             path: "ios/Sources/NativeAgentPlugin",
             exclude: [

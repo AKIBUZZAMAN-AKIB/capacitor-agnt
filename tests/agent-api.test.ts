@@ -324,3 +324,41 @@ describe('agent — native build-file correctness', () => {
     expect(existsSync(path.join(process.cwd(), 'plugins/native-agent/android/consumer-rules.pro'))).toBe(true);
   });
 });
+
+describe('agent — native API correctness (compile failures caught in CI)', () => {
+  it('uses real framework JobScheduler APIs only', () => {
+    const src = read('plugins/native-agent/android/src/main/java/com/t6x/plugins/nativeagent/NativeAgentSchedule.kt');
+    // android.app.job.PeriodicJobRequest does not exist in the Android SDK;
+    // periodic jobs are built with JobInfo.Builder(...).setPeriodic(...).
+    expect(src).not.toContain('PeriodicJobRequest');
+    expect(src).toContain('JobInfo.Builder(JOB_ID, service)');
+    expect(src).toMatch(/import android\.content\.ComponentName/);
+    // setPersisted requires RECEIVE_BOOT_COMPLETED, which the plugin does not
+    // declare — calling it would throw at runtime.
+    const manifest = read('plugins/native-agent/android/src/main/AndroidManifest.xml');
+    if (!manifest.includes('RECEIVE_BOOT_COMPLETED')) {
+      expect(src).not.toContain('setPersisted(true)');
+    }
+  });
+
+  it('exposes the UniFFI C header as a SwiftPM module target', () => {
+    // A binaryTarget's headers are not importable from Swift; without a real
+    // target the generated bindings fail with "cannot find type 'RustBuffer'".
+    const pkg = read('plugins/native-agent/Package.swift');
+    expect(pkg).toContain('name: "native_agent_ffiFFI"');
+    expect(read('plugins/native-agent/ios/Sources/NativeAgentPlugin/Generated/native_agent_ffi.swift'))
+      .toContain('canImport(native_agent_ffiFFI)');
+    for (const f of [
+      'plugins/native-agent/ios/Sources/native_agent_ffiFFI/include/native_agent_ffiFFI.h',
+      'plugins/native-agent/ios/Sources/native_agent_ffiFFI/include/module.modulemap',
+    ]) {
+      expect(existsSync(path.join(process.cwd(), f)), `missing ${f}`).toBe(true);
+    }
+  });
+
+  it('keeps the shim header identical to the xcframework header', () => {
+    const a = read('plugins/native-agent/ios/Sources/native_agent_ffiFFI/include/native_agent_ffiFFI.h');
+    const b = read('plugins/native-agent/ios/Sources/NativeAgentPlugin/Generated/native_agent_ffiFFI.h');
+    expect(a).toBe(b);
+  });
+});

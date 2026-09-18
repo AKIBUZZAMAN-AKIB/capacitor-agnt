@@ -2,18 +2,17 @@ package com.t6x.plugins.nativeagent
 
 import android.app.job.JobInfo
 import android.app.job.JobScheduler
-import android.app.job.PeriodicJobRequest
+import android.content.ComponentName
 import android.content.Context
 import android.os.Build
-import java.util.concurrent.TimeUnit
 
 /**
  * Thin wrapper around the framework JobScheduler for the periodic background
  * wake job ([NativeAgentJobService]). No androidx dependency on purpose.
  *
  * Interval floors are enforced by the OS, not by us:
- *  - API 24+: periodic jobs need elapseAfter + flex >= 15 minutes.
- *  - API 23:  periodic jobs need >= 30 minutes.
+ *  - API 24+: periodic jobs are clamped to >= 15 minutes.
+ *  - API 23:  periodic jobs are clamped to >= 30 minutes (no flex support).
  */
 object NativeAgentSchedule {
 
@@ -31,21 +30,21 @@ object NativeAgentSchedule {
     @JvmStatic
     fun schedulePeriodicWakes(context: Context, requestedMinutes: Int): ScheduleResult {
         val scheduler = context.getSystemService(Context.JOB_SCHEDULER_SERVICE) as JobScheduler
-        val builder = PeriodicJobRequest.Builder(JOB_ID, NativeAgentJobService::class.java)
+        val service = ComponentName(context, NativeAgentJobService::class.java)
+        val builder = JobInfo.Builder(JOB_ID, service)
             .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-            .setPersisted(true) // survive reboots (re-registered by the OS)
 
         val effectiveMinutes: Int
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            // API 24+ accepts an explicit flex window; the OS still clamps the
+            // period to JobInfo.getMinPeriodMillis() (15 min).
             effectiveMinutes = maxOf(requestedMinutes, 15)
             val totalMs = effectiveMinutes * 60_000L
             val flexMs = minOf(5 * 60_000L, totalMs / 4)
-            builder.setPeriodic(totalMs - flexMs, flexMs)
+            builder.setPeriodic(totalMs, flexMs)
         } else {
-            @Suppress("DEPRECATION")
             effectiveMinutes = maxOf(requestedMinutes, 30)
-            @Suppress("DEPRECATION")
-            builder.setPeriodic(effectiveMinutes.toLong(), TimeUnit.MINUTES)
+            builder.setPeriodic(effectiveMinutes * 60_000L)
         }
 
         scheduler.schedule(builder.build())
