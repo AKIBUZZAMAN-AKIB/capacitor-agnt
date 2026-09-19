@@ -203,7 +203,12 @@ function appDelegate() {
   // finishes launching — the plugin cannot do it from load() (too late) and a
   // background launch has no WebView at all. Registering twice with the same
   // identifier kills the process, so the plugin guards it with a static flag.
-  const agentImport = agentWakeSupported ? '\nimport CapacitorNativeAgent' : '';
+  // The importable Swift module is the package's TARGET name, not its product
+  // name: plugins/native-agent/Package.swift ships the product
+  // `CapacitorNativeAgent` built from the target `NativeAgentPlugin`, so
+  // `import CapacitorNativeAgent` fails to resolve (the iOS CI job caught it with
+  // "unable to resolve module dependency: 'CapacitorNativeAgent'").
+  const agentImport = agentWakeSupported ? '\nimport NativeAgentPlugin' : '';
   const agentLaunch = agentWakeSupported ? `
         NativeAgentBackgroundTask.registerIfNeeded()` : '';
   const remoteNotification = config.features.backgroundRunner ? `

@@ -645,11 +645,14 @@ describe('agent — background wakes are real OS work', () => {
     expect(plist).toContain('processing');
     const delegate = read('ios/App/App/AppDelegate.swift');
     expect(delegate).toContain('NativeAgentBackgroundTask.registerIfNeeded()');
-    expect(delegate).toContain('import CapacitorNativeAgent');
+    // The module name is the SPM target (`NativeAgentPlugin`), not the product
+    // (`CapacitorNativeAgent`) — importing the product name fails to resolve.
+    expect(delegate).toContain('import NativeAgentPlugin');
+    expect(delegate).not.toContain('import CapacitorNativeAgent');
     const generator = read(CONFIGURE);
     expect(generator).toContain(`const AGENT_WAKE_TASK_ID = '${AGENT_WAKE_TASK_ID}'`);
     expect(generator).toContain('NativeAgentBackgroundTask.registerIfNeeded()');
-    expect(generator).toContain('import CapacitorNativeAgent');
+    expect(generator).toContain('import NativeAgentPlugin');
   });
 
   it('a wake rebuilds the engine headlessly on both platforms', () => {

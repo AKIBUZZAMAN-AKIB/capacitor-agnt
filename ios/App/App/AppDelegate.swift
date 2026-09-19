@@ -1,7 +1,7 @@
 import UIKit
 import Capacitor
 import CapacitorBackgroundRunner
-import CapacitorNativeAgent
+import NativeAgentPlugin
 
 @UIApplicationMain
 class AppDelegate: UIResponder, UIApplicationDelegate {
