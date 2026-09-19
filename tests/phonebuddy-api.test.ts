@@ -358,6 +358,41 @@ describe('phonebuddy engine — committed binaries and build inputs', () => {
     expect(plugin).toMatch(/"available": false/);
   });
 
+  it('declares the JNA callbacks in Java so Kotlin can write SAM lambdas', () => {
+    // A Kotlin interface extending JNA's Callback has no constructor and cannot
+    // be SAM-converted: `PbEventCallback { ... }` fails with
+    // "Interface 'PbEventCallback : Callback' does not have constructors".
+    const files = readdirSync(path.join(root, KOTLIN_DIR));
+    const kotlinSources = files.filter((f) => f.endsWith('.kt')).map((f) => read(`${KOTLIN_DIR}/${f}`));
+    for (const callback of [
+      'PbEventCallback',
+      'PbHostToolCallback',
+      'PbLlmRequestCallback',
+      'PbWebViewFetchCallback',
+      'PbLogCallback',
+    ]) {
+      expect(files, `${callback} must be declared in Java (SAM conversion)`).toContain(`${callback}.java`);
+      for (const src of kotlinSources) {
+        expect(src, `${callback} must not be re-declared in Kotlin`).not.toContain(`interface ${callback} : Callback`);
+      }
+    }
+    expect(kotlin('PhoneBuddyAgentPlugin.kt')).toMatch(/PbEventCallback \{/);
+    expect(kotlin('PhoneBuddyWakeRunner.kt')).toMatch(/PbHostToolCallback \{/);
+  });
+
+  it('keeps CallbackBox outside the canImport block', () => {
+    // The plugin class holds `callbackBoxes: [CallbackBox]` unconditionally, so
+    // declaring the type inside `#if canImport(phone_buddy_ffi)` breaks the
+    // no-framework build with "cannot find type 'CallbackBox' in scope".
+    const plugin = swift('PhoneBuddyAgentPlugin.swift');
+    const box = plugin.indexOf('final class CallbackBox');
+    const engineHalf = plugin.indexOf('// MARK: - Engine-backed implementation');
+    expect(box, 'CallbackBox is missing').toBeGreaterThan(-1);
+    expect(engineHalf).toBeGreaterThan(-1);
+    expect(box, 'CallbackBox is declared inside the canImport block').toBeLessThan(engineHalf);
+    expect(plugin.slice(0, engineHalf)).toContain('callbackBoxes: [CallbackBox]');
+  });
+
   it('every non-system Swift import is guarded by canImport', () => {
     const system = new Set(['Foundation', 'Capacitor', 'BackgroundTasks', 'UserNotifications', 'UIKit', 'Combine']);
     for (const file of readdirSync(path.join(root, SWIFT_DIR)).filter((f) => f.endsWith('.swift'))) {

@@ -479,8 +479,11 @@ class PhoneBuddyAgentPlugin : Plugin() {
             try {
                 if (!hasListeners(EVENT_NAME)) return@PbEventCallback
                 val payload = eventJson ?: return@PbEventCallback
+                // AgentEvent is an externally-tagged enum, so the single top-level
+                // key IS the event name ("TextDelta", "ToolCallStart", …).
                 val eventType = try {
-                    JSONObject(payload).keys().asSequence().firstOrNull() ?: "Unknown"
+                    val keys = JSONObject(payload).keys()
+                    if (keys.hasNext()) keys.next() else "Unknown"
                 } catch (t: Throwable) {
                     "Unknown"
                 }

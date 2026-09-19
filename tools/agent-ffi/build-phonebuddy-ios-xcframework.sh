@@ -231,9 +231,14 @@ ids = sorted(e['LibraryIdentifier'] for e in info['AvailableLibraries'])
 print('  slices:', ids)
 expected = {'ios-arm64', 'ios-arm64-simulator'}
 assert expected.issubset(set(ids)), f'expected {expected}, found {ids}'
+# xcodebuild records MinimumOSVersion only for the device slice; the simulator
+# entry legitimately has none, so the check is "whatever is declared must match
+# the deployment target we compiled for".
 for entry in info['AvailableLibraries']:
-    assert entry.get('MinimumOSVersion') == min_ios, f"slice {entry['LibraryIdentifier']} targets iOS {entry.get('MinimumOSVersion')}, expected {min_ios}"
-print('  every slice targets iOS', min_ios)
+    declared = entry.get('MinimumOSVersion')
+    print(f"  {entry['LibraryIdentifier']}: MinimumOSVersion={declared}")
+    if declared is not None:
+        assert declared == min_ios, f"slice {entry['LibraryIdentifier']} targets iOS {declared}, expected {min_ios}"
 PY
 
 for slice in "$DEST_XCF"/ios-*; do

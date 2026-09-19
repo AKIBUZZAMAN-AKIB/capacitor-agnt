@@ -1,7 +1,6 @@
 package com.t6x.plugins.phonebuddy
 
 import android.util.Log
-import com.sun.jna.Callback
 import com.sun.jna.Library
 import com.sun.jna.Native
 import com.sun.jna.Pointer
@@ -29,30 +28,11 @@ import com.sun.jna.ptr.PointerByReference
  */
 internal const val PHONE_BUDDY_LIB = "phone_buddy_ffi"
 
-/** `typedef void (*PbEventCallback)(const char *event_json, void *user_data);` */
-internal interface PbEventCallback : Callback {
-    fun invoke(eventJson: String?, userData: Pointer?)
-}
-
-/** `typedef void (*PbLlmRequestCallback)(const char *request_id, const char *request_json, void *user_data);` */
-internal interface PbLlmRequestCallback : Callback {
-    fun invoke(requestId: String?, requestJson: String?, userData: Pointer?)
-}
-
-/** `typedef void (*PbHostToolCallback)(const char *call_id, const char *name, const char *arguments_json, void *user_data);` */
-internal interface PbHostToolCallback : Callback {
-    fun invoke(callId: String?, name: String?, argumentsJson: String?, userData: Pointer?)
-}
-
-/** `typedef void (*PbWebViewFetchCallback)(const char *call_id, const char *request_json, void *user_data);` */
-internal interface PbWebViewFetchCallback : Callback {
-    fun invoke(callId: String?, requestJson: String?, userData: Pointer?)
-}
-
-/** `typedef void (*PbLogCallback)(int32_t level, const char *target, const char *message);` */
-internal interface PbLogCallback : Callback {
-    fun invoke(level: Int, target: String?, message: String?)
-}
+// The five callback types live in their own Java files (Pb*Callback.java):
+// Kotlin's SAM conversion does not apply to interfaces declared in Kotlin, so
+// `PbEventCallback { ... }` would not compile here. Java declarations also keep
+// the "public function exposes its internal parameter type" checks happy without
+// widening anything else.
 
 interface PhoneBuddyLib : Library {
     fun pb_version(): Pointer

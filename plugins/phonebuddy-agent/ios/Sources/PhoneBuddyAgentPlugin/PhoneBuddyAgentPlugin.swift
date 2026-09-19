@@ -148,6 +148,14 @@ public class PhoneBuddyAgentPlugin: CAPPlugin {
     }
 }
 
+/// Holds the Swift closure the C trampoline calls back into. Declared outside the
+/// `#if` because the plugin class keeps a strong reference to these boxes even in
+/// a build without the Rust library (the array is simply unused there).
+final class CallbackBox {
+    let handler: (String) -> Void
+    init(handler: @escaping (String) -> Void) { self.handler = handler }
+}
+
 // MARK: - Engine-backed implementation (only when the Rust library is present)
 
 #if canImport(phone_buddy_ffi)
@@ -425,12 +433,6 @@ extension PhoneBuddyAgentPlugin {
         callbackBoxes.append(box)
         return Unmanaged.passUnretained(box).toOpaque()
     }
-}
-
-/// Holds the Swift closure the C trampoline calls back into.
-final class CallbackBox {
-    let handler: (String) -> Void
-    init(handler: @escaping (String) -> Void) { self.handler = handler }
 }
 
 /// C trampoline for `PbEventCallback`.
