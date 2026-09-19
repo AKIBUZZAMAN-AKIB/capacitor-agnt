@@ -91,10 +91,11 @@ log "simulator : $SIM_TARGETS"
 if [[ "$DRY_RUN" == "1" ]]; then
   log "dry run — nothing is built. Planned commands:"
   cat <<EOF
+  export IPHONEOS_DEPLOYMENT_TARGET=$MIN_IOS            # keeps the C deps in sync with the app
   rustup target add $DEVICE_TARGET $SIM_TARGETS
   (cd $CRATE_DIR && cargo build --release --lib)                       # host dylib for bindgen
   (cd $CRATE_DIR && cargo run --bin uniffi-bindgen -- generate --library target/release/${LIB_BASENAME}.dylib --language swift --out-dir <tmp>)
-  (cd $CRATE_DIR && cargo build --release --target <each ios target> --lib)
+  (cd $CRATE_DIR && cargo rustc --release --lib --target <each ios target> --crate-type staticlib)
   xcodebuild -create-xcframework -library <device .a> -headers <device headers> \\
                                    -library <sim .a>    -headers <sim headers> \\
                                    -output $DEST_XCF
@@ -108,6 +109,15 @@ fi
 command -v cargo >/dev/null 2>&1 || die "cargo not found (rustup: https://sh.rustup.rs)"
 [[ "$(uname -s)" == "Darwin" ]] || die "this script needs macOS (xcodebuild -create-xcframework)"
 command -v xcodebuild >/dev/null 2>&1 || die "xcodebuild not found — install Xcode"
+
+# ── deployment target ───────────────────────────────────────────────────────
+# Without this the C dependencies (libgit2 via git2, ring, bundled sqlite) are
+# compiled for the SDK's default (iOS 17.5), and linking them into an app that
+# targets iOS 14 fails with
+#   "object file ... was built for newer 'iOS' version (17.5) than being linked (10.0)"
+# and unresolved ___chkstk_darwin. Keep it in sync with Package.swift (.iOS(.v14)).
+export IPHONEOS_DEPLOYMENT_TARGET="$MIN_IOS"
+log "Deployment target : iOS $MIN_IOS (IPHONEOS_DEPLOYMENT_TARGET)"
 
 # ── rust targets ────────────────────────────────────────────────────────────
 if command -v rustup >/dev/null 2>&1; then
@@ -130,7 +140,11 @@ ok "bindings → $GEN_DIR"
 # ── compile the Rust library for each iOS target ────────────────────────────
 for target in "$DEVICE_TARGET" $SIM_TARGETS; do
   log "Building $target …"
-  ( cd "$CRATE_DIR" && cargo build --release --lib --target "$target" )
+  # staticlib only: the crate also declares `crate-type = ["cdylib", ...]`, and
+  # linking a dylib for the iOS targets drags the whole Rust + C dependency set
+  # through the linker (that is where ___chkstk_darwin went missing). The app
+  # links the static library anyway, so skip the dylib entirely.
+  ( cd "$CRATE_DIR" && cargo rustc --release --lib --target "$target" --crate-type staticlib )
   [[ -f "$CRATE_DIR/target/$target/release/$SO_NAME" ]] || die "missing $CRATE_DIR/target/$target/release/$SO_NAME"
   ok "$target → $(du -h "$CRATE_DIR/target/$target/release/$SO_NAME" | cut -f1)"
 done

@@ -186,6 +186,15 @@ for abi in $ABIS; do
   start=$SECONDS
 
   cargo_args=(build -p phone-buddy-ffi --target "$triple" --release)
+
+  # Android 15+ devices can use 16 KB memory pages; Play requires new binaries to
+  # be aligned for them. The NDK's own clang does this by default, but this crate
+  # ships its own linker configuration, so make it explicit (64-bit only — 32-bit
+  # ABIs keep 4 KB pages).
+  extra_rustflags=""
+  if [[ "$abi" == "arm64-v8a" || "$abi" == "x86_64" ]]; then
+    extra_rustflags="-C link-arg=-Wl,-z,max-page-size=16384"
+  fi
   case "$PANIC" in
     unwind) cargo_args+=(--config 'profile.release.panic="unwind"') ;;
     abort)  cargo_args+=(--config 'profile.release.panic="abort"') ;;
@@ -200,6 +209,7 @@ for abi in $ABIS; do
   # exit 126/127 in CI). Quoted `export "NAME=$value"` is not affected.
   if (
     cd "$SRC_DIR"
+    [[ -n "$extra_rustflags" ]] && export RUSTFLAGS="${RUSTFLAGS:-} $extra_rustflags"
     export "CARGO_TARGET_${up}_LINKER=$cc"
     export "CC_$(printf '%s' "$triple" | tr '-' '_')=$cc"
     export "AR_$(printf '%s' "$triple" | tr '-' '_')=$NDK_BIN/llvm-ar"
