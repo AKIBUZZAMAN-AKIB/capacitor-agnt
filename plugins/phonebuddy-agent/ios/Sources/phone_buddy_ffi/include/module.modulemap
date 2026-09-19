@@ -1,0 +1,6 @@
+// Module name MUST match the SwiftPM target name (`phone_buddy_ffi`) so that
+// `import phone_buddy_ffi` / `#if canImport(phone_buddy_ffi)` resolve in Swift.
+module phone_buddy_ffi {
+    header "phone_buddy.h"
+    export *
+}

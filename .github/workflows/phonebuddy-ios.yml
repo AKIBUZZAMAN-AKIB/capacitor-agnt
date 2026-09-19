@@ -1,0 +1,143 @@
+name: PhoneBuddy FFI — iOS xcframework (build from public source)
+
+# The PhoneBuddy SDK publishes Rust source only — no iOS binaries — so the iOS
+# half of the wake/surfaced-message engine is built here, on a macOS runner,
+# from the pinned public tag (github.com/APUS-AI-Lab/PhoneBuddySDK @ v0.2.0,
+# Apache-2.0) and committed back to the branch:
+#
+#   public source → device + simulator static archives (cbindgen header checked
+#   byte-for-byte against the committed one) → PhoneBuddyFFI.xcframework
+#
+# That keeps the project rule: no private or opaque native dependency, and the
+# iOS side can be rebuilt any time with one dispatch. Details:
+# tools/agent-ffi/build-phonebuddy-ios-xcframework.sh --help
+#
+# Until this has run once, the repo still builds: plugins/phonebuddy-agent/
+# Package.swift declares its binaryTarget only when the xcframework exists, and
+# the Swift plugin then compiles its `#else` half (honest `unavailable` answers).
+
+on:
+  workflow_dispatch:
+    inputs:
+      sdk_ref:
+        description: 'PhoneBuddySDK git ref to build (tag/branch/commit)'
+        required: false
+        default: 'v0.2.0'
+      sim_archs:
+        description: 'Simulator architectures to build'
+        required: false
+        default: 'arm64'
+        type: choice
+        options: [arm64, 'arm64 x86_64']
+      commit_result:
+        description: 'Commit the rebuilt xcframework back to this branch'
+        required: false
+        default: true
+        type: boolean
+  push:
+    branches: [main]
+    paths:
+      - 'tools/agent-ffi/build-phonebuddy-ios-xcframework.sh'
+      - 'plugins/phonebuddy-agent/native/include/phone_buddy.h'
+      - '.github/workflows/phonebuddy-ios.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    name: Build PhoneBuddyFFI.xcframework from public source
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Report toolchain
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          rustc --version || true
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .ffi-cache/PhoneBuddySDK/target
+          key: cargo-phonebuddy-ios-${{ inputs.sdk_ref || 'v0.2.0' }}-${{ hashFiles('plugins/phonebuddy-agent/native/include/phone_buddy.h') }}
+          restore-keys: cargo-phonebuddy-ios-
+
+      - name: Build the xcframework from the public SDK source
+        env:
+          SDK_REF: ${{ inputs.sdk_ref || 'v0.2.0' }}
+          SIM_ARCHS: ${{ inputs.sim_archs || 'arm64' }}
+        run: |
+          set -euo pipefail
+          bash tools/agent-ffi/build-phonebuddy-ios-xcframework.sh \
+            --ref "$SDK_REF" --sim-archs "$SIM_ARCHS"
+
+      - name: Verify what will be committed
+        run: |
+          set -euo pipefail
+          PLUGIN=plugins/phonebuddy-agent
+          python3 - "$PLUGIN" <<'PY'
+          import plistlib, pathlib, sys
+          xcf = pathlib.Path(sys.argv[1]) / 'ios/Frameworks/PhoneBuddyFFI.xcframework'
+          info = plistlib.loads((xcf / 'Info.plist').read_bytes())
+          ids = sorted(e['LibraryIdentifier'] for e in info['AvailableLibraries'])
+          print('slices:', ids)
+          assert 'ios-arm64' in ids and 'ios-arm64-simulator' in ids, ids
+          for entry in info['AvailableLibraries']:
+              assert entry.get('MinimumOSVersion') == '15.0', entry
+          lib = xcf / 'ios-arm64' / 'libphone_buddy_ffi.a'
+          assert lib.is_file(), lib
+          head = (xcf / 'ios-arm64' / 'Headers' / 'phone_buddy_ffi' / 'phone_buddy.h').read_text()
+          assert 'pb_engine_chat_v2' in head and 'pb_engine_set_host_callbacks' in head
+          PY
+          echo "--- the header the Swift plugin compiles against"
+          diff -q "$PLUGIN/native/include/phone_buddy.h" "$PLUGIN/ios/Sources/phone_buddy_ffi/include/phone_buddy.h"
+          echo "--- the plugin's Swift must call only symbols the header declares"
+          python3 - "$PLUGIN" <<'PY'
+          import pathlib, re, sys
+          plugin = pathlib.Path(sys.argv[1])
+          header = (plugin / 'native/include/phone_buddy.h').read_text()
+          declared = set(re.findall(r'\b(pb_[a-z0-9_]+)\s*\(', header))
+          swift = (plugin / 'ios/Sources/PhoneBuddyAgentPlugin/PhoneBuddyAgentPlugin.swift').read_text()
+          called = set(re.findall(r'\b(pb_[a-z0-9_]+)\s*\(', swift))
+          missing = sorted(called - declared)
+          print('declared:', len(declared), '| called from Swift:', len(called), '| missing:', missing)
+          assert not missing, missing
+          PY
+
+      - name: Commit the rebuilt xcframework
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_result || github.event_name == 'push' }}
+        run: |
+          set -euo pipefail
+          git config user.name  "nativekit-ci"
+          git config user.email "nativekit-ci@users.noreply.github.com"
+          git add plugins/phonebuddy-agent/ios/Frameworks/PhoneBuddyFFI.xcframework
+          if git diff --cached --quiet; then
+            echo "nothing to commit — the committed xcframework already matches the SDK source"
+            exit 0
+          fi
+          git commit -m "build(phonebuddy): build the iOS xcframework from the public SDK source"
+          # Several workflows commit to main, so a bare `git push` races and dies
+          # with "! [rejected] HEAD -> main (fetch first)". Rebase and retry.
+          pushed=0
+          for attempt in 1 2 3 4 5; do
+            git fetch --quiet origin "${GITHUB_REF_NAME}"
+            if ! git rebase --quiet "origin/${GITHUB_REF_NAME}"; then
+              echo "::warning::rebase hit a conflict on attempt ${attempt}"
+              git rebase --abort || true
+              sleep $((attempt * 5))
+              continue
+            fi
+            if git push origin HEAD:"${GITHUB_REF_NAME}"; then pushed=1; break; fi
+            echo "push rejected (attempt ${attempt}) — rebasing on the new tip and retrying"
+            sleep $((attempt * 5))
+          done
+          [[ "$pushed" == "1" ]] || { echo "::error::could not push after 5 attempts"; exit 1; }
+          echo "Committed: $(git rev-parse HEAD)"

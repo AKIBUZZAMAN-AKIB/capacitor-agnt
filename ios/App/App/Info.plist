@@ -58,6 +58,7 @@
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>dev.nativekit.shell.background</string>
+		<string>io.t6x.phonebuddy.wake</string>
 	</array>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>কাছের ডিভাইসের সাথে অফলাইন সংযোগ ও ফাইল/চ্যাট আদান-প্রদান করতে Bluetooth প্রয়োজন।</string>

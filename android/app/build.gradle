@@ -1,7 +1,6 @@
 apply plugin: 'com.android.application'
 
-def nativeKitKeystorePa
-		dirs '../../node_modules/@capacitor/background-runner/android/src/main/libs', 'libs'th = System.getenv("ANDROID_KEYSTORE_PATH")
+def nativeKitKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
 def nativeKitSigningReady = nativeKitKeystorePath && System.getenv("ANDROID_KEYSTORE_PASSWORD") && System.getenv("ANDROID_KEY_ALIAS") && System.getenv("ANDROID_KEY_PASSWORD")
 
 android {

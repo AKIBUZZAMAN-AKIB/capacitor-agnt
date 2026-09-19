@@ -4,6 +4,31 @@
 
 ---
 
+## ✅ অবস্থা: বাস্তবায়িত (২০২৬-০৯-১৯)
+
+এই প্লানটি **PLAN A**-এর সাথে মিলিয়ে বাস্তবায়ন করা হয়েছে — এবং পরিধি বেড়েছে:
+আগের 0.9.14 generation-এ যে দুটো সুবিধা ছিল কিন্তু 0.5.2 pin-এ হারিয়ে গিয়েছিল
+(**background wake** ও **surfaced message**), সেগুলোই এখন PhoneBuddy ইঞ্জিন দিয়ে
+আসলেই কাজ করে। `bridge/nativekit.ts`-এর `{supported:false}` shim আর চূড়ান্ত অবস্থা নয়।
+
+| দিক | কোথায় |
+|---|---|
+| Capacitor plugin (Kotlin + Swift) | `plugins/phonebuddy-agent/` (`@CapacitorPlugin(name = "PhoneBuddyAgent")`, ১৭টি method) |
+| Android wake | `PhoneBuddyWakeService` (JobService) + `PhoneBuddySchedule` (JobScheduler, ১৫ মিনিট floor) |
+| Android wake logic | `PhoneBuddyWakeRunner` — persisted config থেকে engine rebuild → `scheduler.json` task → notification + `surfaced.json` → `pb_engine_free` |
+| iOS wake | `PhoneBuddyBackgroundTask` (BGTaskScheduler/BGProcessingTask, `io.t6x.phonebuddy.wake`) |
+| Surfaced store | `PhoneBuddySurfaced.kt` / `PhoneBuddySurfacedStore.swift` — একই `surfaced.json`, সর্বোচ্চ ৫০০ records |
+| Bridge | `agent.scheduleBackgroundWakes / cancelBackgroundWakes / getWakeStatus / loadSurfacedMessages / clearSurfacedMessages` + `agent.phonebuddy.*` |
+| Config | `app.config.json` → `phonebuddy` block (schema-তেও) |
+| iOS build | `tools/agent-ffi/build-phonebuddy-ios-xcframework.sh` + `.github/workflows/phonebuddy-ios.yml` |
+| Android build | `tools/agent-ffi/build-phonebuddy-all-abis.sh` + `.github/workflows/phonebuddy-ffi.yml` (৪টি ABI) |
+| Tests | `tests/phonebuddy-api.test.ts` (৩২টি assertion-group) + `tests/agent-api.test.ts`-এ হালনাগাদ shim চুক্তি |
+
+বিস্তারিত ব্যবহারবিধি, সীমাবদ্ধতা ও rebuild-এর নিয়ম: **[`docs/PHONEBUDDY-ENGINE.bn.md`](../PHONEBUDDY-ENGINE.bn.md)**।
+নিচের অংশটি মূল গবেষণা-প্রতিবেদন (সিদ্ধান্তের কারণ ও প্রমাণ) হিসেবেই থাকল।
+
+---
+
 ## ০. সংক্ষেপে সিদ্ধান্ত
 
 | বিষয় | সিদ্ধান্ত |

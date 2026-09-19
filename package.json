@@ -59,6 +59,7 @@
     "@capgo/capacitor-inappbrowser": "8.15.2",
     "@nativekit/custom-native": "file:plugins/custom-native",
     "@nativekit/isolated-browser": "file:plugins/isolated-browser",
+    "@nativekit/phonebuddy-agent": "file:plugins/phonebuddy-agent",
     "@nativekit/widget": "file:plugins/widget",
     "capacitor-native-agent": "file:plugins/native-agent",
     "fflate": "0.8.3",

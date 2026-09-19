@@ -27,6 +27,7 @@ dependencies {
     implementation project(':capgo-capacitor-inappbrowser')
     implementation project(':nativekit-custom-native')
     implementation project(':nativekit-isolated-browser')
+    implementation project(':nativekit-phonebuddy-agent')
     implementation project(':nativekit-widget')
     implementation project(':capacitor-native-agent')
 

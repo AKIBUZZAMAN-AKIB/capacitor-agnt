@@ -17,7 +17,8 @@ import { describe, expect, it } from 'vitest';
 //   2. the crash-safety / optional-dependency fixes backported from 0.9.x must
 //      stay in place (catch Throwable, lancedb gating on both platforms),
 //   3. the five newer-engine APIs are compat shims in the bridge and must never
-//      be called on the native plugin,
+//      be called on the native plugin — the wake/surfaced ones are answered by
+//      the PhoneBuddy engine instead (tests/phonebuddy-api.test.ts),
 //   4. the private-repo submodule must never come back.
 
 const root = process.cwd();
@@ -332,16 +333,42 @@ describe('agent — bridge and demo wiring', () => {
     }
   });
 
-  it('compat shims resolve with an explicit unsupported envelope instead of rejecting', () => {
+  it('routes the wake/surfaced APIs to the PhoneBuddy engine, with an honest fallback', () => {
     const block = bridgeAgentBlock();
-    for (const name of ['scheduleBackgroundWakes', 'cancelBackgroundWakes', 'loadSurfacedMessages']) {
+    const routed = [
+      'scheduleBackgroundWakes',
+      'cancelBackgroundWakes',
+      'getWakeStatus',
+      'loadSurfacedMessages',
+      'clearSurfacedMessages',
+    ];
+    for (const name of routed) {
       const m = block.match(new RegExp(`^    ${name}: async \\([\\s\\S]*?\\n    \\},`, 'm'));
       expect(m, `${name} shim not found`).not.toBeNull();
-      expect(m![0], `${name} shim must report supported:false`).toContain('supported: false');
-      expect(m![0], `${name} shim must name the pinned generation`).toContain('0.5.2-public');
+      // The capability really exists now (PhoneBuddy engine), so the shim must
+      // call it rather than short-circuiting to an "unsupported" envelope.
+      expect(m![0], `${name} must be answered by the PhoneBuddy engine`).toContain(`'${name}'`);
+      expect(m![0], `${name} must call PhoneBuddyAgent`).toMatch(/phoneBuddyCall\(/);
+      // …but a device/build without that engine still gets a truthful envelope
+      // instead of a rejection or a fake success.
+      expect(m![0], `${name} needs a supported:false fallback`).toContain('supported: false');
+      expect(m![0], `${name} must explain the fallback`).toContain('reason:');
     }
     // setMcpTools is mapped onto the closest native capability.
     expect(block).toMatch(/setMcpTools→restartMcp/);
+  });
+
+  it('degrades to the fallback instead of rejecting when the engine is missing', () => {
+    const block = bridgeAgentBlock();
+    // phoneBuddyCall() is the single place that talks to the PhoneBuddy plugin,
+    // and it may never reject: web builds, unsupported ABIs and disabled
+    // features all have to come back as data.
+    const helper = read(BRIDGE).match(/async function phoneBuddyCall\([\s\S]*?\n\}/)![0];
+    expect(helper).toContain('catch (error)');
+    expect(helper).toContain('return { ...fallback }');
+    expect(helper).not.toContain('throw');
+    expect(block).toMatch(/^    phonebuddy: \{/m);
+    expect(block).toContain('generation: PHONEBUDDY_GENERATION');
   });
 
   it('gates every agent call behind the feature flag and a native check', () => {

@@ -30,6 +30,7 @@ let package = Package(
         .package(name: "CapgoCapacitorInappbrowser", path: "../../../node_modules/@capgo/capacitor-inappbrowser"),
         .package(name: "NativekitCustomNative", path: "../../../plugins/custom-native"),
         .package(name: "NativekitIsolatedBrowser", path: "../../../plugins/isolated-browser"),
+        .package(name: "NativekitPhonebuddyAgent", path: "../../../plugins/phonebuddy-agent"),
         .package(name: "NativekitWidget", path: "../../../plugins/widget"),
         .package(name: "CapacitorNativeAgent", path: "../../../plugins/native-agent")
     ],
@@ -57,6 +58,7 @@ let package = Package(
                 .product(name: "CapgoCapacitorInappbrowser", package: "CapgoCapacitorInappbrowser"),
                 .product(name: "NativekitCustomNative", package: "NativekitCustomNative"),
                 .product(name: "NativekitIsolatedBrowser", package: "NativekitIsolatedBrowser"),
+                .product(name: "NativekitPhonebuddyAgent", package: "NativekitPhonebuddyAgent"),
                 .product(name: "NativekitWidget", package: "NativekitWidget"),
                 .product(name: "CapacitorNativeAgent", package: "CapacitorNativeAgent")
             ]

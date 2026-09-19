@@ -260,6 +260,12 @@ const agentActions = {
     return res;
   },
   agentbgcancel: async () => { requireInit(); return window.NativeKit.agent.cancelBackgroundWakes(); },
+  agentwakes: async () => { requireInit(); return window.NativeKit.agent.getWakeStatus(); },
+
+  // 9b ── PhoneBuddy engine (wakes + surfaced messages actually run here) ─────
+  agentpbavail: async () => { requireInit(); return window.NativeKit.agent.phonebuddy.checkAvailability(); },
+  agentpbwake: async () => { requireInit(); return window.NativeKit.agent.phonebuddy.handleWake('lab_manual'); },
+  agentclearsurfaced: async () => { requireInit(); return window.NativeKit.agent.clearSurfacedMessages(); },
 
   // 10 ── Skills ─────────────────────────────────────────────────────────────
   agentaddskill: async () => {
