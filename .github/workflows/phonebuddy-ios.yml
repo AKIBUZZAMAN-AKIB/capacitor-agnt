@@ -52,7 +52,14 @@ permissions:
 jobs:
   rebuild:
     name: Build PhoneBuddyFFI.xcframework from public source
-    runs-on: macos-14
+    # macos-26, not macos-14, and not for the shiny new Xcode: this runner's
+    # toolchain is Clang/LLVM 21, the same LLVM generation rustc emits objects
+    # with. macos-14 (LLVM 15) cannot read them at all — run 35447710343 died
+    # with "Unknown attribute kind (86)" from nm on a perfectly good archive,
+    # and a *reader* older than the *producer* would also be what links the app.
+    # ios.yml, which is the job that consumes this xcframework, already runs on
+    # macos-26 with Xcode 26.
+    runs-on: macos-26
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -63,7 +70,13 @@ jobs:
         run: |
           set -euo pipefail
           xcodebuild -version
+          xcrun --find nm
           rustc --version || true
+          # machocheck.py prefers Apple's nm and falls back to the Rust
+          # toolchain's own llvm-nm if this Xcode turns out to be the older LLVM.
+          echo "llvm-nm: $(rustc --print sysroot 2>/dev/null)/lib/rustlib/*/bin/llvm-nm"
+          ls "$(rustc --print sysroot 2>/dev/null)"/lib/rustlib/*/bin/llvm-nm 2>/dev/null || \
+            echo "llvm-nm: not installed (rustup component add llvm-tools-preview)" 
 
       - name: Cache cargo
         uses: actions/cache@v6

@@ -355,7 +355,9 @@ describe('phonebuddy engine — committed binaries and build inputs', () => {
 
   it('the iOS xcframework workflow builds, verifies and commits the result', () => {
     const wf = read('.github/workflows/phonebuddy-ios.yml');
-    expect(wf).toContain('runs-on: macos-14');
+    // macos-26 = Clang/LLVM 21, the same generation rustc emits objects with;
+    // macos-14's LLVM 15 cannot read them (nm: "Unknown attribute kind").
+    expect(wf).toContain('runs-on: macos-26');
     expect(wf).toContain('build-phonebuddy-ios-xcframework.sh');
     expect(wf).toContain('plugins/phonebuddy-agent/ios/Frameworks/PhoneBuddyFFI.xcframework');
     expect(wf).toContain('pb_engine_set_host_callbacks');

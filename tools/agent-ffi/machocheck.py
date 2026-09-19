@@ -82,25 +82,76 @@ class UsageError(Exception):
 
 # ── nm ───────────────────────────────────────────────────────────────────────
 
-def resolve_nm(explicit: str | None = None) -> str:
-    """Return the nm to use, preferring Apple's (which understands Mach-O)."""
-    for candidate in (explicit, os.environ.get("NM_BIN") or None):
-        if candidate:
-            if Path(candidate).is_file():
-                return candidate
-            raise UsageError(f"nm not found at {candidate} (--nm/NM_BIN)")
+def rust_llvm_tools() -> list[str]:
+    """`llvm-nm` shipped by the active Rust toolchain, if the component is there.
+
+    This is the reader that *matches the producer*: rustc embeds LLVM's own
+    object format, and a reader from a different LLVM generation can refuse it
+    outright — Xcode 15.4's nm (LLVM 15) cannot read Rust 1.94 objects
+    (LLVM 21) and fails with "Unknown attribute kind (86)", which is what made
+    CI run 35447710343 report a healthy archive as unreadable. `rustup component
+    add llvm-tools-preview` puts llvm-nm next to the toolchain.
+    """
+    found: list[str] = []
+    try:
+        proc = subprocess.run(
+            ["rustc", "--print", "sysroot"], capture_output=True, text=True, errors="replace"
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            sysroot = Path(proc.stdout.strip())
+            found += sorted(str(p) for p in (sysroot / "lib/rustlib").glob("*/bin/llvm-nm"))
+    except OSError:
+        pass
+    home = os.environ.get("HOME")
+    if home:
+        found += sorted(
+            str(p) for p in Path(home).glob(".rustup/toolchains/*/lib/rustlib/*/bin/llvm-nm")
+        )
+    which = shutil.which("llvm-nm")
+    if which:
+        found.append(which)
+    return found
+
+
+def resolve_nm_candidates(explicit: str | None = None) -> list[str]:
+    """Every plausible nm, best first.
+
+    Apple's nm comes first because the Xcode toolchain is what links the app, but
+    it is not the only acceptable reader: when it is older than the LLVM that
+    produced the objects it refuses to parse them, and the Rust toolchain's own
+    llvm-nm answers the (identical) question correctly. Which one was used is
+    printed, so the log never hides it.
+    """
+    chosen = explicit or os.environ.get("NM_BIN") or None
+    if chosen:
+        if not Path(chosen).is_file():
+            raise UsageError(f"nm not found at {chosen} (--nm/NM_BIN)")
+        return [chosen]  # an explicit choice is used and nothing else
+
+    candidates: list[str] = []
+
+    def add(path: str | None) -> None:
+        if path and Path(path).is_file() and path not in candidates:
+            candidates.append(path)
+
     try:
         proc = subprocess.run(
             ["xcrun", "-f", "nm"], capture_output=True, text=True, errors="replace"
         )
-        if proc.returncode == 0 and proc.stdout.strip():
-            return proc.stdout.strip()
+        if proc.returncode == 0:
+            add(proc.stdout.strip())
     except OSError:
-        pass  # no xcrun (Linux host): fall through to the plain paths
-    for candidate in ("/usr/bin/nm", shutil.which("nm") or ""):
-        if candidate and Path(candidate).is_file():
-            return candidate
-    raise UsageError("no nm found (tried $NM_BIN, `xcrun -f nm`, /usr/bin/nm, $PATH)")
+        pass  # no xcrun (Linux host)
+    add("/usr/bin/nm")
+    add(shutil.which("nm"))
+    for tool in rust_llvm_tools():
+        add(tool)
+    if not candidates:
+        raise UsageError(
+            "no nm found (tried $NM_BIN, `xcrun -f nm`, /usr/bin/nm, $PATH, and the Rust "
+            "toolchain's llvm-nm — `rustup component add llvm-tools-preview` provides the last one)"
+        )
+    return candidates
 
 
 def parse_nm_output(text: str) -> set[str]:
@@ -122,30 +173,34 @@ def parse_nm_output(text: str) -> set[str]:
     return found
 
 
-def read_symbols(nm: str, lib: Path) -> tuple[set[str], str]:
-    """Run nm on `lib` and return (defined symbols, the command that worked).
+def read_symbols(nm_candidates: list[str], lib: Path) -> tuple[set[str], str]:
+    """Run the first nm that can actually read `lib`; return (symbols, command).
 
-    `nm -g` is preferred because its output is self-describing; if that nm
-    variant cannot handle the file (for example a non-Mach-O nm, or a member it
-    chokes on) the name-only `-g -j -U` form is tried before giving up loudly.
+    `nm -g` is preferred because its output is self-describing; the name-only
+    `-g -j -U` form is the fallback for nm dialects that dislike the table.
+    Every failure is kept, so the message that reaches CI names the tool, its
+    exit code and its own words — the thing `2>/dev/null` used to throw away.
     """
-    attempts = ([nm, "-g", str(lib)], [nm, "-g", "-j", "-U", str(lib)])
     problems: list[str] = []
-    for argv in attempts:
-        proc = subprocess.run(argv, capture_output=True, text=True, errors="replace")
-        if proc.returncode == 0 and proc.stdout.strip():
-            return parse_nm_output(proc.stdout), " ".join(argv)
-        stderr = (proc.stderr or "").strip().splitlines()
-        problems.append(
-            f"    {' '.join(argv)}\n"
-            f"      exit {proc.returncode}"
-            + (f" — {stderr[0]}" if stderr else "")
-            + ("" if proc.stdout.strip() else " (no symbols on stdout)")
-        )
+    for nm in nm_candidates:
+        for argv in ([nm, "-g", str(lib)], [nm, "-g", "-j", "-U", str(lib)]):
+            proc = subprocess.run(argv, capture_output=True, text=True, errors="replace")
+            if proc.returncode == 0 and proc.stdout.strip():
+                return parse_nm_output(proc.stdout), " ".join(argv)
+            stderr = (proc.stderr or "").strip().splitlines()
+            problems.append(
+                f"    {' '.join(argv)}\n"
+                f"      exit {proc.returncode}"
+                + (f" — {stderr[0]}" if stderr else "")
+                + ("" if proc.stdout.strip() else " (no symbols on stdout)")
+            )
     raise CheckError(
         f"could not read the symbol table of {lib}\n"
         + "\n".join(problems)
-        + "\n  hint: `nm` must be Apple's (xcrun -f nm); GNU binutils nm cannot read Mach-O"
+        + "\n  hint: a reader older than the LLVM that produced the objects refuses them"
+          " ('Unknown attribute kind' above) — build on a runner whose Xcode matches"
+          " (macos-26 = LLVM 21), or provide llvm-nm from the Rust toolchain"
+          " (`rustup component add llvm-tools-preview`)"
     )
 
 
@@ -226,7 +281,7 @@ def check_library(
     label: str,
     lib_candidates: list[Path],
     required: list[str],
-    nm: str,
+    nm_candidates: list[str],
     report: Report,
     symbol_prefix: str,
     slice_header: Path | None = None,
@@ -263,7 +318,7 @@ def check_library(
         )
         report.say(f"{label}: shipped header matches the committed ABI ({len(shipped)} functions)")
 
-    symbols, command = read_symbols(nm, lib)
+    symbols, command = read_symbols(nm_candidates, lib)
     missing = [name for name in required if name not in symbols]
     report.say(f"{label}: {len(required) - len(missing)}/{len(required)} declared C-ABI symbols exported"
                f" ({lib.name}, via `{command}`)")
@@ -313,8 +368,8 @@ def check_plist_slices(xcf: Path, args, report: Report) -> list[dict]:
     return entries
 
 
-def check_xcframework(xcf: Path, args, nm: str, required: list[str], header_syms: list[str],
-                      report: Report) -> None:
+def check_xcframework(xcf: Path, args, nm_candidates: list[str], required: list[str],
+                      header_syms: list[str], report: Report) -> None:
     require(xcf.is_dir(), f"xcframework not found: {xcf}")
     entries = check_plist_slices(xcf, args, report)
 
@@ -326,7 +381,7 @@ def check_xcframework(xcf: Path, args, nm: str, required: list[str], header_syms
             label=ident,
             lib_candidates=slice_library_candidates(xcf, slice_dir, entry, args.lib_name),
             required=required,
-            nm=nm,
+            nm_candidates=nm_candidates,
             report=report,
             symbol_prefix=args.symbol_prefix,
             slice_header=module_dir / "phone_buddy.h",
@@ -374,18 +429,18 @@ def main(argv: list[str] | None = None) -> int:
     if not required:
         raise UsageError("nothing to check: pass --header and/or --require-symbol")
 
-    nm = resolve_nm(args.nm)
+    nm_candidates = resolve_nm_candidates(args.nm)
     report = Report()
-    report.say(f"nm: {nm}")
+    report.say("nm candidates: " + ", ".join(nm_candidates))
 
     if args.xcframework:
-        check_xcframework(Path(args.xcframework), args, nm, required, header_syms, report)
+        check_xcframework(Path(args.xcframework), args, nm_candidates, required, header_syms, report)
     else:
         check_library(
             label=Path(args.lib).name,
             lib_candidates=[Path(args.lib)],
             required=required,
-            nm=nm,
+            nm_candidates=nm_candidates,
             report=report,
             symbol_prefix=args.symbol_prefix,
         )
