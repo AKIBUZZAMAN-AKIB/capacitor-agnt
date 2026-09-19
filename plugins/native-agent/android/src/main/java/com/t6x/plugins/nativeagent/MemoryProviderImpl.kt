@@ -71,17 +71,30 @@ class MemoryProviderImpl(context: Context) : MemoryProvider {
         val metadata = parseMetadata(metadataJson)
 
         lock.withLock {
-            val document = readDocument()
-            val entries = document.entries
-            val existing = entries.indexOfFirst { it.optString("key") == resolvedKey }
+            val entries = readDocument().entries
+            // JSONArray has no indexOfFirst/find: walk it by index. (`entries[i]`
+            // does not exist either — get() returns Any, so use optJSONObject.)
+            var existing = -1
+            for (index in 0 until entries.length()) {
+                if (entries.optJSONObject(index)?.optString("key") == resolvedKey) {
+                    existing = index
+                    break
+                }
+            }
+
+            val createdAt = if (existing >= 0) {
+                entries.optJSONObject(existing)?.optLong("createdAt", now) ?: now
+            } else {
+                now
+            }
             val record = JSONObject()
                 .put("key", resolvedKey)
                 .put("text", trimmed)
-                .put("createdAt", if (existing >= 0) entries[existing].optLong("createdAt", now) else now)
+                .put("createdAt", createdAt)
                 .put("updatedAt", now)
             if (metadata != null) record.put("metadata", metadata)
 
-            if (existing >= 0) entries[existing] = record else entries.add(record)
+            if (existing >= 0) entries.put(existing, record) else entries.put(record)
             while (entries.length() > MAX_ENTRIES) entries.remove(0) // oldest first
             writeDocument(entries)
         }
