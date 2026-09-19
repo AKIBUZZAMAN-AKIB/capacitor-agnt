@@ -1,6 +1,7 @@
 import UIKit
 import Capacitor
 import CapacitorBackgroundRunner
+import CapacitorNativeAgent
 
 @UIApplicationMain
 class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -12,6 +13,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     ) -> Bool {
         BackgroundRunnerPlugin.registerBackgroundTask()
         BackgroundRunnerPlugin.handleApplicationDidFinishLaunching(launchOptions: launchOptions)
+        NativeAgentBackgroundTask.registerIfNeeded()
         return true
     }
 

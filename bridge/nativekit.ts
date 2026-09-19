@@ -47,6 +47,12 @@ interface NativeKitBuildConfig {
     isolated: { enabled: boolean; fallbackToIframe: boolean; stageChunkBytes: number; androidMinApi: number; hangTerminationDelayMs: number };
   };
   backgroundRunner: { label: string; event: string; defaultSyncUrl: string };
+  agent: {
+    wakeIntervalMinutes: number;
+    minWakeIntervalMinutes: number;
+    surfacedLimit: number;
+    markSurfacedRead: boolean;
+  };
   widget: {
     enabled: boolean;
     homeScreen: {
@@ -98,6 +104,27 @@ function randomId(prefix = 'nk'): string {
   const value = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   return `${prefix}-${value}`;
 }
+
+/** `message` of an unknown throw, for the envelopes that never reject. */
+function failureMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Clamps a requested wake interval into the range an OS scheduler can honour.
+ * Both platforms count in minutes and Android floors periodic work at 15; the
+ * native side reports the interval it actually got, so this is a request, not a
+ * promise.
+ */
+function agentInterval(requested?: number): number {
+  const floor = Math.max(config.agent.minWakeIntervalMinutes, 15);
+  const value = requested ?? config.agent.wakeIntervalMinutes;
+  return Math.min(Math.max(Math.round(value), floor), 1440);
+}
+
+/** The documented way to run agent work when the OS scheduler is unavailable. */
+const WAKE_ALTERNATIVE =
+  'addCronJob({...}) + handleWake() driven by a wake source your app owns (@capacitor/background-runner, or a JobService/BGTask of your own).';
 
 function encodeBase64Utf8(text: string): string {
   const bytes = new TextEncoder().encode(text);
@@ -674,16 +701,22 @@ const NativeKit: any = {
   // and therefore buildable for every Android ABI. This is the ONLY agent engine
   // in the app: every capability below is answered by this plugin.
   //
-  // Two groups of methods are shims rather than raw pass-throughs, so no caller
-  // ever sees a missing-method error:
+  // Three groups of methods are not raw pass-throughs, so no caller ever sees a
+  // missing-method error:
   //   * real shims — checkAvailability (native probe added) and setMcpTools
   //     (restartMcp with the new tool list, which has the same effect here);
-  //   * honest refusals — scheduleBackgroundWakes, cancelBackgroundWakes,
-  //     getWakeStatus, loadSurfacedMessages, clearSurfacedMessages: this
-  //     generation has no OS wake scheduler and no surfaced-message store (an
-  //     earlier engine generation that provided them was removed), so they
-  //     resolve `supported: false` with the reason and the supported alternative
-  //     instead of silently doing nothing.
+  //   * the wake layer — scheduleBackgroundWakes, cancelBackgroundWakes,
+  //     getWakeStatus, loadSurfacedMessages, clearSurfacedMessages. The engine
+  //     can *run* a wake (`handle_wake()` evaluates due cron jobs, writes
+  //     `cron_runs` and notifies through NativeNotifier) but it cannot ask
+  //     Android/iOS for background runtime. That half lives in the plugin
+  //     (WorkManager on Android, BGTaskScheduler on iOS) and it answers with what
+  //     the OS actually holds — including the platform floors, which are
+  //     reported rather than smoothed over. A build where the native side cannot
+  //     schedule resolves `supported: false` plus the reason and the alternative;
+  //     it never pretends to have scheduled something.
+  //   * never-rejecting wrappers — the same five calls turn a native rejection
+  //     into data instead of an exception.
   agent: {
     supported: (): boolean => config.features.agent && isNative,
 
@@ -698,53 +731,66 @@ const NativeKit: any = {
     initWorkspace: async (options: Record<string, unknown>) => { feature('agent'); requireNative(); return NativeAgent.initWorkspace(options as any); },
     initialize: async (options: Record<string, unknown>) => { feature('agent'); requireNative(); return NativeAgent.initialize(options as any); },
 
-    // ── Background wakes ────────────────────────────────────────────────────
-    // HONEST STATE: the pinned native-agent generation (0.5.2) has no OS wake
-    // scheduler. It cannot ask Android (JobScheduler) or iOS (BGTaskScheduler)
-    // to run the agent while the app is closed, so these calls cannot be
-    // implemented without an engine that schedules OS work.
-    //
-    // They stay in the surface — the lab, the typings and host apps call them —
-    // but they answer with an explicit `supported: false` envelope that names the
-    // reason and the supported alternative (cron job + handleWake from a wake
-    // source the host app owns, e.g. @capacitor/background-runner). They never
-    // reject and never pretend to have scheduled anything.
+    // ── Background wakes (real OS scheduling) ───────────────────────────────
+    // Android: a periodic WorkManager job. iOS: a BGProcessingTask registered by
+    // the app at launch. Both rebuild the engine from its persisted config in a
+    // process that may have no WebView, run every due cron job, and surface the
+    // results. The answers below are the native side's, so `intervalMinutes` is
+    // the interval the OS granted (never silently the one that was asked for),
+    // and `nextRunApproxMs` is what the scheduler really holds.
     scheduleBackgroundWakes: async (intervalMinutes?: number) => {
       feature('agent'); requireNative();
-      return {
-        supported: false,
-        engineGeneration: '0.5.2-public',
-        jobScheduled: false,
-        intervalMinutes: intervalMinutes ?? null,
-        reason: 'native-agent (0.5.2-public) has no OS wake scheduler: nothing was scheduled.',
-        alternative: 'addCronJob({...}) + handleWake() driven by a wake source your app owns (@capacitor/background-runner on Android/iOS, or a JobService of your own).',
-      } as unknown as { supported: boolean };
+      const requested = agentInterval(intervalMinutes);
+      try {
+        const native = await NativeAgent.scheduleBackgroundWakes({ intervalMinutes: requested });
+        return { supported: true, engineGeneration: '0.5.2-public', requestedIntervalMinutes: requested, ...(native ?? {}) };
+      } catch (error) {
+        return {
+          supported: false,
+          engineGeneration: '0.5.2-public',
+          jobScheduled: false,
+          requestedIntervalMinutes: requested,
+          reason: `the native wake scheduler could not be reached: ${failureMessage(error)}`,
+          alternative: WAKE_ALTERNATIVE,
+        } as unknown as { supported: boolean };
+      }
     },
     cancelBackgroundWakes: async () => {
       feature('agent'); requireNative();
-      return {
-        supported: false,
-        engineGeneration: '0.5.2-public',
-        jobScheduled: false,
-        reason: 'native-agent (0.5.2-public) never scheduled an OS wake, so there is nothing to cancel.',
-        alternative: 'To stop scheduled work, use removeCronJob() (or updateCronJob({enabled:false})) — cron jobs are the only scheduled work this generation owns.',
-      } as unknown as { supported: boolean };
+      try {
+        const native = await NativeAgent.cancelBackgroundWakes();
+        return { supported: true, engineGeneration: '0.5.2-public', ...(native ?? {}) };
+      } catch (error) {
+        return {
+          supported: false,
+          engineGeneration: '0.5.2-public',
+          jobScheduled: false,
+          reason: `the native wake scheduler could not be reached: ${failureMessage(error)}`,
+          alternative: 'To stop scheduled work with the engine itself, use removeCronJob() or updateCronJob({id, patchJson: JSON.stringify({enabled:false})}).',
+        } as unknown as { supported: boolean };
+      }
     },
-    // Wake telemetry: with no OS scheduler there is no job to report on. The
-    // stale-vs-live question still has an answer — listCronJobs() +
-    // listCronRuns() show what the engine thinks is scheduled and when it last
-    // ran — so the envelope points there instead of inventing numbers.
+    // Wake telemetry: the OS scheduler's own state (WorkManager `WorkInfo` /
+    // `BGTaskScheduler.getPendingTaskRequests`), the last wake's timestamp,
+    // source, summary and outcome, and — when the agent is initialised — how many
+    // cron jobs are armed and how many are already due. Nothing here is a stored
+    // wish about whether a job exists.
     getWakeStatus: async () => {
       feature('agent'); requireNative();
-      return {
-        supported: false,
-        engineGeneration: '0.5.2-public',
-        jobScheduled: false,
-        lastRunAt: null,
-        pendingTasks: null,
-        reason: 'native-agent (0.5.2-public) has no OS wake scheduler to report on.',
-        alternative: 'listCronJobs() + listCronRuns() for schedule/run history, handleWake() to run due work in the foreground.',
-      } as unknown as { supported: boolean };
+      try {
+        const native = await NativeAgent.getWakeStatus();
+        return { supported: true, engineGeneration: '0.5.2-public', ...(native ?? {}) };
+      } catch (error) {
+        return {
+          supported: false,
+          engineGeneration: '0.5.2-public',
+          jobScheduled: false,
+          lastWakeAt: null,
+          pendingTasks: null,
+          reason: `the native wake scheduler could not be reached: ${failureMessage(error)}`,
+          alternative: 'listCronJobs() + listCronRuns() for schedule/run history, handleWake() to run due work in the foreground.',
+        } as unknown as { supported: boolean };
+      }
     },
 
     // ── Agent turns ──
@@ -796,32 +842,44 @@ const NativeKit: any = {
     listCronJobs: async () => { feature('agent'); requireNative(); return NativeAgent.listCronJobs(); },
     runCronJob: async (jobId: string) => { feature('agent'); requireNative(); return NativeAgent.runCronJob({ jobId }); },
     listCronRuns: async (jobId?: string, limit?: number) => { feature('agent'); requireNative(); return NativeAgent.listCronRuns({ jobId, limit }); },
-    // Messages a background run produced while the UI was closed. There is no
-    // background run in this generation (see above), so there is nothing to
-    // surface — the same honest envelope, pointing at the real store.
+    // Messages produced while the user was not looking: one record per cron run a
+    // wake completed (status, response text, job id — read back from the engine's
+    // own `cron_runs` rows) plus one per notification the engine posted during it.
+    // The plugin owns the store, so this is a real inbox and not a re-read of the
+    // session log.
     loadSurfacedMessages: async (limit?: number) => {
       feature('agent'); requireNative();
-      const cap = Math.min(Math.max(Math.round(limit ?? 50), 1), 500);
-      return {
-        supported: false,
-        engineGeneration: '0.5.2-public',
-        limit: cap,
-        messagesJson: '[]',
-        count: 0,
-        unread: 0,
-        reason: 'native-agent (0.5.2-public) runs only while the app is awake, so it produces no surfaced messages.',
-        alternative: 'listSessions() + loadSession() read the persisted conversation (SQLite) the agent already writes.',
-      } as unknown as { supported: boolean };
+      const cap = Math.min(Math.max(Math.round(limit ?? config.agent.surfacedLimit), 1), 500);
+      try {
+        const native = await NativeAgent.loadSurfacedMessages({ limit: cap, markRead: config.agent.markSurfacedRead });
+        return { supported: true, engineGeneration: '0.5.2-public', ...(native ?? {}) };
+      } catch (error) {
+        return {
+          supported: false,
+          engineGeneration: '0.5.2-public',
+          limit: cap,
+          messagesJson: '[]',
+          count: 0,
+          unread: 0,
+          reason: `the native surfaced-message store could not be reached: ${failureMessage(error)}`,
+          alternative: 'listSessions() + loadSession() read the persisted conversation (SQLite) the agent already writes.',
+        } as unknown as { supported: boolean };
+      }
     },
     clearSurfacedMessages: async () => {
       feature('agent'); requireNative();
-      return {
-        supported: false,
-        engineGeneration: '0.5.2-public',
-        cleared: 0,
-        reason: 'there is no surfaced-message store in this generation — nothing to clear.',
-        alternative: 'clearSession() drops the stored conversation if that is what you meant.',
-      } as unknown as { supported: boolean };
+      try {
+        const native = await NativeAgent.clearSurfacedMessages();
+        return { supported: true, engineGeneration: '0.5.2-public', ...(native ?? {}) };
+      } catch (error) {
+        return {
+          supported: false,
+          engineGeneration: '0.5.2-public',
+          cleared: 0,
+          reason: `the native surfaced-message store could not be reached: ${failureMessage(error)}`,
+          alternative: 'clearSession() drops the stored conversation if that is what you meant.',
+        } as unknown as { supported: boolean };
+      }
     },
 
     handleWake: async (source?: string) => { feature('agent'); requireNative(); return NativeAgent.handleWake({ source: source ?? 'manual' }); },

@@ -133,6 +133,107 @@ export interface CronSkillInput {
     maxTurns?: number;
     timeoutMs?: number;
 }
+export interface ScheduleBackgroundWakesOptions {
+    /**
+     * Interval to ask the OS for, in minutes. Android's WorkManager floors periodic
+     * work at 15 minutes; iOS treats the value as a floor (`earliestBeginDate`),
+     * not a promise. The answer states what was actually granted.
+     */
+    intervalMinutes?: number;
+}
+/** `loadSurfacedMessages()` page options. */
+export interface LoadSurfacedMessagesOptions {
+    /** Newest-first page size (default 50, max 500). */
+    limit?: number;
+    /** Mark the returned page as read (default false). */
+    markRead?: boolean;
+}
+/**
+ * One record produced while the user was not looking: a cron run a wake
+ * finished, or a notification the engine posted during it.
+ */
+export interface SurfacedMessage {
+    id: string;
+    /** ISO-8601 timestamp. */
+    at: string;
+    /** `background` | `notification`. */
+    source: string;
+    read: boolean;
+    title?: string;
+    body?: string;
+    text?: string;
+    /** Cron job / run the record came from (engine `cron_runs` row). */
+    jobId?: string;
+    taskId?: string;
+    runId?: number;
+    status?: string;
+    delivered?: boolean;
+}
+export interface SurfacedMessagesResult {
+    /** JSON array of {@link SurfacedMessage}. */
+    messagesJson: string;
+    count: number;
+    unread: number;
+    limit?: number;
+    markRead?: boolean;
+    lastWakeAt?: string | null;
+    lastWakeSource?: string | null;
+    lastWakeSummary?: string | null;
+    engineGeneration?: string;
+    platform?: string;
+}
+/** Result of a foreground catch-up wake (`handleWake`). */
+export interface HandleWakeResult {
+    /** Cron jobs that ran to completion. */
+    ran: number;
+    /** Cron jobs that ended in an error. */
+    failed: number;
+    /** Surfaced records this wake appended. */
+    surfaced: number;
+    summary: string;
+}
+/** What `scheduleBackgroundWakes()` / `cancelBackgroundWakes()` report. */
+export interface BackgroundWakeResult {
+    jobScheduled: boolean;
+    /** Interval the OS actually granted (may differ from the request). */
+    intervalMinutes: number;
+    /** Interval the caller asked for, before platform floors. */
+    requestedIntervalMinutes?: number;
+    requiresCharging?: boolean;
+    minIntervalMinutes?: number;
+    /** Epoch millis; only present when the scheduler knows it (Android ENQUEUED). */
+    nextRunApproxMs?: number | null;
+    jobCancelled?: boolean;
+    engineGeneration?: string;
+    platform?: string;
+    /** `WorkManager PeriodicWorkRequest` (Android) or `BGTaskScheduler BGProcessingTask` (iOS). */
+    mechanism?: string;
+    workName?: string;
+    workState?: string | null;
+    runAttemptCount?: number;
+    taskIdentifier?: string;
+    /** iOS: the system, not the app, picks the moment. */
+    opportunistic?: boolean;
+    schedulerEnabled?: boolean;
+    heartbeatIntervalMinutes?: number;
+    reason?: string;
+}
+/** Live scheduler state plus the last wake's outcome. */
+export interface BackgroundWakeStatus extends BackgroundWakeResult {
+    lastWakeAt?: string | null;
+    lastWakeSource?: string | null;
+    lastWakeSummary?: string | null;
+    lastWakeRan?: number;
+    lastWakeOk?: boolean;
+    unreadSurfaced?: number;
+    engineInitialized?: boolean;
+    /** Cron jobs still waiting to run. */
+    pendingTasks?: number | null;
+    enabledCronJobs?: number | null;
+    dueCronJobs?: number | null;
+    /** iOS: the identifier is whitelisted in Info.plist. */
+    permitted?: boolean;
+}
 export interface CronSkillRecord {
     id: string;
     name: string;
@@ -253,9 +354,10 @@ export interface NativeAgentPlugin {
     }): Promise<{
         runsJson: string;
     }>;
+    /** Foreground catch-up: runs every due cron job and surfaces the results. */
     handleWake(options: {
         source: string;
-    }): Promise<void>;
+    }): Promise<HandleWakeResult>;
     getSchedulerConfig(): Promise<{
         schedulerJson: string;
         heartbeatJson: string;
@@ -266,6 +368,17 @@ export interface NativeAgentPlugin {
     setHeartbeatConfig(options: {
         configJson: string;
     }): Promise<void>;
+    scheduleBackgroundWakes(options?: ScheduleBackgroundWakesOptions): Promise<BackgroundWakeResult>;
+    cancelBackgroundWakes(): Promise<BackgroundWakeResult>;
+    getWakeStatus(): Promise<BackgroundWakeStatus>;
+    /** What the agent produced while the user was not looking. */
+    loadSurfacedMessages(options?: LoadSurfacedMessagesOptions): Promise<SurfacedMessagesResult>;
+    clearSurfacedMessages(): Promise<{
+        cleared: number;
+        unread?: number;
+        engineGeneration?: string;
+        platform?: string;
+    }>;
     respondToCronApproval(options: {
         requestId: string;
         approved: boolean;

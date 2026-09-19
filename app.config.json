@@ -124,6 +124,12 @@
     "taskIdentifier": "dev.nativekit.shell.background",
     "defaultSyncUrl": ""
   },
+  "agent": {
+    "wakeIntervalMinutes": 30,
+    "minWakeIntervalMinutes": 15,
+    "surfacedLimit": 50,
+    "markSurfacedRead": false
+  },
   "widget": {
     "enabled": true,
     "homeScreen": {

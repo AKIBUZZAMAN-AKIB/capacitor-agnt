@@ -10,16 +10,16 @@ const wc = config.widget ?? { enabled: false, homeScreen: { enabled: false, resi
 // Must match NativeAgentBackgroundTask.taskIdentifier in the native-agent plugin
 // (plugins/native-agent/ios/Sources/NativeAgentPlugin/NativeAgentBackgroundTask.swift).
 const AGENT_WAKE_TASK_ID = 'io.t6x.nativeagent.wake';
-// …but that file only exists in newer plugin generations. The pinned public
-// 0.5.2 generation (docs/AGENT-ENGINE-0.5.2-BACKPORT.bn.md) has no iOS wake task,
-// and whitelisting an identifier nobody registers would silently promise iOS
-// scheduled agent runs that never happen — so the id is added only when the
-// implementation is really there.
+// The identifier is only whitelisted (and the launch handler only registered)
+// when the registrar really ships with the plugin: whitelisting an id nobody
+// registers would promise iOS background agent runs that can never happen, and
+// registering an id that is not whitelisted kills the process. The check keeps
+// the two halves locked together.
 const agentWakeTaskFile = path.join(
   root,
   'plugins/native-agent/ios/Sources/NativeAgentPlugin/NativeAgentBackgroundTask.swift',
 );
-const agentWakeSupported = existsSync(agentWakeTaskFile);
+const agentWakeSupported = config.features.agent === true && existsSync(agentWakeTaskFile);
 
 const xml = (value) => String(value)
   .replaceAll('&', '&amp;')
@@ -199,6 +199,13 @@ function appDelegate() {
   const backgroundLaunch = config.features.backgroundRunner ? `
         BackgroundRunnerPlugin.registerBackgroundTask()
         BackgroundRunnerPlugin.handleApplicationDidFinishLaunching(launchOptions: launchOptions)` : '';
+  // BGTaskScheduler requires the launch handler to be registered before the app
+  // finishes launching — the plugin cannot do it from load() (too late) and a
+  // background launch has no WebView at all. Registering twice with the same
+  // identifier kills the process, so the plugin guards it with a static flag.
+  const agentImport = agentWakeSupported ? '\nimport CapacitorNativeAgent' : '';
+  const agentLaunch = agentWakeSupported ? `
+        NativeAgentBackgroundTask.registerIfNeeded()` : '';
   const remoteNotification = config.features.backgroundRunner ? `
 
     func application(
@@ -215,7 +222,7 @@ function appDelegate() {
     }` : '';
 
   return `import UIKit
-import Capacitor${backgroundImport}
+import Capacitor${backgroundImport}${agentImport}
 
 @UIApplicationMain
 class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -224,7 +231,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
-    ) -> Bool {${backgroundLaunch}
+    ) -> Bool {${backgroundLaunch}${agentLaunch}
         return true
     }${remoteNotification}
 

@@ -2,6 +2,7 @@ package com.t6x.plugins.nativeagent
 
 import android.content.Context
 import android.os.Build
+import android.util.Log
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
@@ -14,6 +15,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import uniffi.native_agent_ffi.InitConfig
 import uniffi.native_agent_ffi.NativeAgentHandle
 import uniffi.native_agent_ffi.NativeEventCallback
@@ -26,11 +28,15 @@ class NativeAgentPlugin : Plugin() {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     companion object {
-        private const val STORAGE_FILE = "CapacitorStorage"
-        private const val CONFIG_PATH_KEY = "mobilecron:native-agent-config-path"
+        // Shared with NativeWakeStore: the WorkManager worker runs in a process
+        // with no WebView, so it must read exactly the keys initialize() wrote.
+        private const val STORAGE_FILE = NativeWakeStore.CAPACITOR_STORAGE_FILE
+        private const val CONFIG_PATH_KEY = NativeWakeStore.CONFIG_PATH_KEY
 
         /** Which public upstream generation this module was pinned to. */
         private const val ENGINE_GENERATION = "0.5.2-public"
+
+        private const val LOG_TAG = "NativeAgentPlugin"
     }
 
     // ── Helper: wrap common pattern ────────────────────────────────────
@@ -379,10 +385,31 @@ private fun withHandle(call: PluginCall, block: (NativeAgentHandle) -> Unit) {
         call.resolve(ret)
     }
 
+    /**
+     * Foreground catch-up: runs every due cron job immediately, exactly like the
+     * OS-initiated wake, and therefore surfaces its output the same way. Without
+     * the capture step, "wake now" would silently run jobs whose answers never
+     * reach `loadSurfacedMessages()`.
+     */
     @PluginMethod
     fun handleWake(call: PluginCall) = withHandle(call) { h ->
-        h.handleWake(call.getString("source") ?: "unknown")
-        call.resolve()
+        val appContext = context.applicationContext
+        val source = call.getString("source") ?: "unknown"
+        val startedAt = System.currentTimeMillis()
+        NativeWakeCapture.installRecordingNotifier(appContext, h)
+        try {
+            h.handleWake(source)
+        } finally {
+            NativeWakeCapture.restoreDefaultNotifier(appContext, h)
+        }
+        val captured = NativeWakeCapture.capture(appContext, h, source, startedAt)
+        NativeWakeStore(appContext).recordWake(source, captured.summary, captured.ran, true)
+        val ret = JSObject()
+        ret.put("ran", captured.ran)
+        ret.put("failed", captured.failed)
+        ret.put("surfaced", captured.surfaced)
+        ret.put("summary", captured.summary)
+        call.resolve(ret)
     }
 
     @PluginMethod
@@ -405,6 +432,172 @@ private fun withHandle(call: PluginCall, block: (NativeAgentHandle) -> Unit) {
     fun setHeartbeatConfig(call: PluginCall) = withHandle(call) { h ->
         h.setHeartbeatConfig(call.getString("configJson") ?: "{}")
         call.resolve()
+    }
+
+    // ── Background wakes ──────────────────────────────────────────────
+    //
+    // The engine can *run* a wake (`handle_wake` evaluates every due cron job)
+    // but it cannot ask the OS for background runtime — that is the app's job,
+    // and this is where the app does it. NativeWakeScheduler explains why
+    // WorkManager; the limits below are reported instead of hidden.
+
+    /**
+     * Arms the periodic OS wake. The interval preference order is: the explicit
+     * argument, then the engine's heartbeat interval, then the stored/default
+     * value — and WorkManager floors it at 15 minutes, which the answer states.
+     */
+    @PluginMethod
+    fun scheduleBackgroundWakes(call: PluginCall) {
+        val appContext = context.applicationContext
+        val store = NativeWakeStore(appContext)
+        val h = handle
+        var requiresCharging = false
+        var schedulerEnabled: Boolean? = null
+        var heartbeatMinutes: Int? = null
+        if (h != null) {
+            try {
+                val scheduler = JSONObject(h.getSchedulerConfig())
+                requiresCharging = scheduler.optBoolean("runOnCharging", false)
+                schedulerEnabled = scheduler.optBoolean("enabled", true)
+                val everyMs = JSONObject(h.getHeartbeatConfig()).optLong("everyMs", 0L)
+                if (everyMs > 0) heartbeatMinutes = (everyMs / 60_000L).toInt().coerceAtLeast(1)
+            } catch (t: Throwable) {
+                if (t is OutOfMemoryError) throw t
+                Log.w(LOG_TAG, "engine scheduler config unreadable: ${t.message}")
+            }
+        }
+
+        val requested = call.getInt("intervalMinutes") ?: heartbeatMinutes ?: store.intervalMinutes
+
+        scope.launch {
+            val status = NativeWakeScheduler.schedule(appContext, requested, requiresCharging)
+            val ret = JSObject()
+            ret.put("jobScheduled", status.jobScheduled)
+            ret.put("intervalMinutes", status.intervalMinutes)
+            ret.put("requestedIntervalMinutes", requested)
+            ret.put("requiresCharging", status.requiresCharging)
+            ret.put("minIntervalMinutes", NativeWakeStore.MIN_INTERVAL_MINUTES)
+            ret.put("engineGeneration", ENGINE_GENERATION)
+            ret.put("platform", "android")
+            ret.put("mechanism", "WorkManager PeriodicWorkRequest")
+            ret.put("workName", NativeWakeScheduler.UNIQUE_WORK_NAME)
+            heartbeatMinutes?.let { ret.put("heartbeatIntervalMinutes", it) }
+            schedulerEnabled?.let { ret.put("schedulerEnabled", it) }
+            status.nextRunApproxMs?.let { ret.put("nextRunApproxMs", it.toDouble()) }
+            if (store.engineConfigPath() == null) {
+                ret.put(
+                    "reason",
+                    "wake armed, but the engine config was never persisted — call initialize() so the background wake can rebuild the engine",
+                )
+            }
+            status.reason?.let { ret.put("reason", it) }
+            call.resolve(ret)
+        }
+    }
+
+    @PluginMethod
+    fun cancelBackgroundWakes(call: PluginCall) {
+        scope.launch {
+            val status = NativeWakeScheduler.cancel(context.applicationContext)
+            val ret = JSObject()
+            ret.put("jobScheduled", false)
+            ret.put("jobCancelled", status.reason == null)
+            ret.put("intervalMinutes", 0)
+            ret.put("engineGeneration", ENGINE_GENERATION)
+            ret.put("platform", "android")
+            status.reason?.let { ret.put("reason", it) }
+            call.resolve(ret)
+        }
+    }
+
+    /**
+     * Real telemetry: the WorkManager state (not a stored wish), the last wake's
+     * timestamp/source/outcome, and — when a handle exists — how many cron jobs
+     * are enabled and how many are already due.
+     */
+    @PluginMethod
+    fun getWakeStatus(call: PluginCall) {
+        val appContext = context.applicationContext
+        scope.launch {
+            val store = NativeWakeStore(appContext)
+            val status = NativeWakeScheduler.status(appContext)
+            val ret = JSObject()
+            ret.put("jobScheduled", status.jobScheduled)
+            ret.put("intervalMinutes", status.intervalMinutes)
+            ret.put("requiresCharging", status.requiresCharging)
+            ret.put("minIntervalMinutes", NativeWakeStore.MIN_INTERVAL_MINUTES)
+            ret.put("engineGeneration", ENGINE_GENERATION)
+            ret.put("platform", "android")
+            ret.put("mechanism", "WorkManager PeriodicWorkRequest")
+            ret.put("workName", NativeWakeScheduler.UNIQUE_WORK_NAME)
+            ret.put("workState", status.state ?: JSONObject.NULL)
+            ret.put("runAttemptCount", status.runAttemptCount)
+            ret.put("nextRunApproxMs", status.nextRunApproxMs?.toDouble() ?: JSONObject.NULL)
+            ret.put("lastWakeAt", store.lastWakeAt ?: JSONObject.NULL)
+            ret.put("lastWakeSource", store.lastWakeSource ?: JSONObject.NULL)
+            ret.put("lastWakeSummary", store.lastWakeSummary ?: JSONObject.NULL)
+            ret.put("lastWakeRan", store.lastWakeRan)
+            ret.put("lastWakeOk", store.lastWakeOk)
+            ret.put("unreadSurfaced", store.unreadCount())
+            val h = handle
+            ret.put("engineInitialized", h != null)
+            ret.put("pendingTasks", JSONObject.NULL)
+            ret.put("enabledCronJobs", JSONObject.NULL)
+            ret.put("dueCronJobs", JSONObject.NULL)
+            if (h != null) {
+                try {
+                    val cron = NativeWakeScheduler.cronSummary(h.listCronJobs())
+                    ret.put("enabledCronJobs", cron.first)
+                    ret.put("dueCronJobs", cron.second)
+                    // Same meaning the previous generation's getWakeStatus gave
+                    // `pendingTasks`: work that is still waiting to run.
+                    ret.put("pendingTasks", cron.second)
+                } catch (t: Throwable) {
+                    if (t is OutOfMemoryError) throw t
+                    Log.w(LOG_TAG, "could not read cron jobs: ${t.message}")
+                }
+            }
+            status.reason?.let { ret.put("reason", it) }
+            call.resolve(ret)
+        }
+    }
+
+    @PluginMethod
+    fun loadSurfacedMessages(call: PluginCall) {
+        val appContext = context.applicationContext
+        val limit = (call.getInt("limit") ?: 50).coerceIn(1, NativeWakeStore.MAX_RECORDS)
+        val markRead = call.getBoolean("markRead") ?: false
+        scope.launch {
+            val store = NativeWakeStore(appContext)
+            val page = store.load(limit, markRead)
+            val ret = JSObject()
+            ret.put("messagesJson", page.messagesJson)
+            ret.put("count", page.count)
+            ret.put("unread", page.unread)
+            ret.put("limit", limit)
+            ret.put("markRead", markRead)
+            ret.put("engineGeneration", ENGINE_GENERATION)
+            ret.put("platform", "android")
+            ret.put("lastWakeAt", store.lastWakeAt ?: JSONObject.NULL)
+            ret.put("lastWakeSource", store.lastWakeSource ?: JSONObject.NULL)
+            ret.put("lastWakeSummary", store.lastWakeSummary ?: JSONObject.NULL)
+            call.resolve(ret)
+        }
+    }
+
+    @PluginMethod
+    fun clearSurfacedMessages(call: PluginCall) {
+        val appContext = context.applicationContext
+        scope.launch {
+            val store = NativeWakeStore(appContext)
+            val cleared = store.clear()
+            val ret = JSObject()
+            ret.put("cleared", cleared)
+            ret.put("unread", 0)
+            ret.put("engineGeneration", ENGINE_GENERATION)
+            ret.put("platform", "android")
+            call.resolve(ret)
+        }
     }
 
     // ── Skills ────────────────────────────────────────────────────────

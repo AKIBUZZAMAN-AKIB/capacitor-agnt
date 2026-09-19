@@ -32,6 +32,14 @@ await build({
         event: config.backgroundRunner.event,
         defaultSyncUrl: config.backgroundRunner.defaultSyncUrl,
       },
+      // Defaults for the agent's OS wake + surfaced-message inbox; the native
+      // side still owns the real values (it reports what the OS granted).
+      agent: {
+        wakeIntervalMinutes: config.agent.wakeIntervalMinutes,
+        minWakeIntervalMinutes: config.agent.minWakeIntervalMinutes,
+        surfacedLimit: config.agent.surfacedLimit,
+        markSurfacedRead: config.agent.markSurfacedRead,
+      },
       widget: config.widget,
     }),
   },

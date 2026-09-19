@@ -34,6 +34,11 @@ class NativeAgentWeb extends WebPlugin {
     async getSchedulerConfig() { throw this.unavailable(ERR); }
     async setSchedulerConfig() { throw this.unavailable(ERR); }
     async setHeartbeatConfig() { throw this.unavailable(ERR); }
+    async scheduleBackgroundWakes() { throw this.unavailable(ERR); }
+    async cancelBackgroundWakes() { throw this.unavailable(ERR); }
+    async getWakeStatus() { throw this.unavailable(ERR); }
+    async loadSurfacedMessages() { throw this.unavailable(ERR); }
+    async clearSurfacedMessages() { throw this.unavailable(ERR); }
     async respondToCronApproval() { throw this.unavailable(ERR); }
     async addSkill() { throw this.unavailable(ERR); }
     async updateSkill() { throw this.unavailable(ERR); }

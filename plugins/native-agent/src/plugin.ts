@@ -34,10 +34,15 @@ class NativeAgentWeb extends WebPlugin implements NativeAgentPlugin {
   async listCronJobs(): Promise<any> { throw this.unavailable(ERR) }
   async runCronJob(): Promise<void> { throw this.unavailable(ERR) }
   async listCronRuns(): Promise<any> { throw this.unavailable(ERR) }
-  async handleWake(): Promise<void> { throw this.unavailable(ERR) }
+  async handleWake(): Promise<any> { throw this.unavailable(ERR) }
   async getSchedulerConfig(): Promise<any> { throw this.unavailable(ERR) }
   async setSchedulerConfig(): Promise<void> { throw this.unavailable(ERR) }
   async setHeartbeatConfig(): Promise<void> { throw this.unavailable(ERR) }
+  async scheduleBackgroundWakes(): Promise<any> { throw this.unavailable(ERR) }
+  async cancelBackgroundWakes(): Promise<any> { throw this.unavailable(ERR) }
+  async getWakeStatus(): Promise<any> { throw this.unavailable(ERR) }
+  async loadSurfacedMessages(): Promise<any> { throw this.unavailable(ERR) }
+  async clearSurfacedMessages(): Promise<any> { throw this.unavailable(ERR) }
   async respondToCronApproval(): Promise<void> { throw this.unavailable(ERR) }
   async addSkill(): Promise<any> { throw this.unavailable(ERR) }
   async updateSkill(): Promise<void> { throw this.unavailable(ERR) }

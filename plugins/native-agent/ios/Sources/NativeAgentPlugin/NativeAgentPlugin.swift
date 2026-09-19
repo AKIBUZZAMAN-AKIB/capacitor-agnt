@@ -44,6 +44,12 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "getSchedulerConfig", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setSchedulerConfig", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setHeartbeatConfig", returnType: CAPPluginReturnPromise),
+        // Background wakes (BGTaskScheduler + surfaced messages)
+        CAPPluginMethod(name: "scheduleBackgroundWakes", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "cancelBackgroundWakes", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getWakeStatus", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "loadSurfacedMessages", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "clearSurfacedMessages", returnType: CAPPluginReturnPromise),
         // Skills
         CAPPluginMethod(name: "addSkill", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "updateSkill", returnType: CAPPluginReturnPromise),
@@ -571,15 +577,196 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
+    /// Foreground catch-up: runs every due cron job immediately, exactly like the
+    /// OS-initiated wake, and therefore surfaces its output the same way. Without
+    /// the capture step, "wake now" would silently run jobs whose answers never
+    /// reach `loadSurfacedMessages()`.
     @objc func handleWake(_ call: CAPPluginCall) {
         withHandle(call) { h in
+            let store = NativeAgentWakeStore()
+            let source = call.getString("source") ?? "unknown"
+            let startedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
             do {
-                try h.handleWake(source: call.getString("source") ?? "unknown")
-                call.resolve()
+                NativeAgentWakeCapture.installRecordingNotifier(handle: h, store: store)
+                defer { NativeAgentWakeCapture.restoreDefaultNotifier(handle: h) }
+                try h.handleWake(source: source)
+                let captured = NativeAgentWakeCapture.capture(
+                    handle: h,
+                    store: store,
+                    source: source,
+                    startedAtMs: startedAtMs
+                )
+                store.recordWake(source: source, summary: captured.summary, ran: captured.ran, ok: true)
+                call.resolve([
+                    "ran": captured.ran,
+                    "failed": captured.failed,
+                    "surfaced": captured.surfaced,
+                    "summary": captured.summary,
+                ])
             } catch {
                 call.reject("handleWake failed: \(error.localizedDescription)")
             }
         }
+    }
+
+    // ── Background wakes ─────────────────────────────────────────────────────
+    //
+    // The engine can *run* a wake (`handle_wake` evaluates every due cron job)
+    // but it cannot ask iOS for background runtime — that is the app's job, and
+    // this is where the app does it. NativeAgentBackgroundTask explains why a
+    // BGProcessingTask; the limits are reported instead of hidden.
+
+    @objc func scheduleBackgroundWakes(_ call: CAPPluginCall) {
+        let store = NativeAgentWakeStore()
+        var requiresCharging = false
+        var schedulerEnabled: Bool?
+        var heartbeatMinutes: Int?
+
+        if let h = handle {
+            if let json = try? h.getSchedulerConfig(),
+               let object = Self.jsonObject(json) {
+                requiresCharging = (object["runOnCharging"] as? Bool) ?? false
+                schedulerEnabled = object["enabled"] as? Bool
+            }
+            if let json = try? h.getHeartbeatConfig(),
+               let object = Self.jsonObject(json),
+               let everyMs = (object["everyMs"] as? NSNumber)?.int64Value, everyMs > 0 {
+                heartbeatMinutes = max(Int(everyMs / 60_000), 1)
+            }
+        }
+
+        let requested = call.getInt("intervalMinutes") ?? heartbeatMinutes ?? store.intervalMinutes
+        let outcome = NativeAgentBackgroundTask.schedule(
+            intervalMinutes: requested,
+            requiresCharging: requiresCharging
+        )
+        let effective = max(requested, NativeAgentWakeStore.minIntervalMinutes)
+        if outcome.ok {
+            store.intervalMinutes = effective
+            store.requiresCharging = requiresCharging
+        }
+
+        var result: [String: Any] = [
+            "jobScheduled": outcome.ok,
+            "intervalMinutes": effective,
+            "requestedIntervalMinutes": requested,
+            "requiresCharging": requiresCharging,
+            "minIntervalMinutes": NativeAgentWakeStore.minIntervalMinutes,
+            "engineGeneration": "0.5.2-public",
+            "platform": "ios",
+            "mechanism": "BGTaskScheduler BGProcessingTask",
+            "taskIdentifier": NativeAgentBackgroundTask.taskIdentifier,
+            // iOS picks the moment; earliestBeginDate is only a floor.
+            "opportunistic": true,
+        ]
+        if let schedulerEnabled { result["schedulerEnabled"] = schedulerEnabled }
+        if let heartbeatMinutes { result["heartbeatIntervalMinutes"] = heartbeatMinutes }
+        if store.engineConfigPath == nil {
+            result["reason"] = "wake armed, but the engine config was never persisted — call initialize() so the background wake can rebuild the engine"
+        }
+        if let reason = outcome.reason { result["reason"] = reason }
+        call.resolve(result)
+    }
+
+    @objc func cancelBackgroundWakes(_ call: CAPPluginCall) {
+        NativeAgentBackgroundTask.cancel()
+        call.resolve([
+            "jobScheduled": false,
+            "jobCancelled": true,
+            "intervalMinutes": 0,
+            "engineGeneration": "0.5.2-public",
+            "platform": "ios",
+        ])
+    }
+
+    /// Real telemetry: what the scheduler actually holds (`getPendingTaskRequests`),
+    /// when it may run, and what the last wake did.
+    @objc func getWakeStatus(_ call: CAPPluginCall) {
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let store = NativeAgentWakeStore()
+            var result: [String: Any] = [
+                "intervalMinutes": store.intervalMinutes,
+                "requiresCharging": store.requiresCharging,
+                "minIntervalMinutes": NativeAgentWakeStore.minIntervalMinutes,
+                "engineGeneration": "0.5.2-public",
+                "platform": "ios",
+                "mechanism": "BGTaskScheduler BGProcessingTask",
+                "taskIdentifier": NativeAgentBackgroundTask.taskIdentifier,
+                "permitted": NativeAgentBackgroundTask.permissionConfigured,
+                "opportunistic": true,
+                "unreadSurfaced": store.unreadCount(),
+                "lastWakeRan": store.lastWakeRan,
+                "lastWakeOk": store.lastWakeOk,
+                "lastWakeAt": store.lastWakeAt ?? NSNull(),
+                "lastWakeSource": store.lastWakeSource ?? NSNull(),
+                "lastWakeSummary": store.lastWakeSummary ?? NSNull(),
+            ]
+
+            let handle = self.handle
+            result["engineInitialized"] = handle != nil
+            result["pendingTasks"] = NSNull()
+            result["enabledCronJobs"] = NSNull()
+            result["dueCronJobs"] = NSNull()
+            if let handle, let jobsJson = try? handle.listCronJobs() {
+                let cron = NativeAgentWakeCapture.cronSummary(jobsJson)
+                result["enabledCronJobs"] = cron.enabled
+                result["dueCronJobs"] = cron.due
+                result["pendingTasks"] = cron.due
+            }
+
+            NativeAgentBackgroundTask.pendingEarliestBeginDate { earliest in
+                result["jobScheduled"] = earliest != nil
+                if let earliest {
+                    result["nextRunApproxMs"] = Int(earliest.timeIntervalSince1970 * 1000)
+                } else {
+                    result["nextRunApproxMs"] = NSNull()
+                }
+                if !NativeAgentBackgroundTask.permissionConfigured {
+                    result["reason"] = "Info.plist is missing BGTaskSchedulerPermittedIdentifiers containing '\(NativeAgentBackgroundTask.taskIdentifier)'"
+                }
+                call.resolve(result)
+            }
+        }
+    }
+
+    @objc func loadSurfacedMessages(_ call: CAPPluginCall) {
+        let store = NativeAgentWakeStore()
+        let limit = min(max(call.getInt("limit") ?? 50, 1), NativeAgentWakeStore.maxRecords)
+        let markRead = call.getBool("markRead") ?? false
+        DispatchQueue.global(qos: .userInitiated).async {
+            let page = store.load(limit: limit, markRead: markRead)
+            call.resolve([
+                "messagesJson": page.messagesJson,
+                "count": page.count,
+                "unread": page.unread,
+                "limit": limit,
+                "markRead": markRead,
+                "engineGeneration": "0.5.2-public",
+                "platform": "ios",
+                "lastWakeAt": store.lastWakeAt ?? NSNull(),
+                "lastWakeSource": store.lastWakeSource ?? NSNull(),
+                "lastWakeSummary": store.lastWakeSummary ?? NSNull(),
+            ])
+        }
+    }
+
+    @objc func clearSurfacedMessages(_ call: CAPPluginCall) {
+        let store = NativeAgentWakeStore()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let cleared = store.clear()
+            call.resolve([
+                "cleared": cleared,
+                "unread": 0,
+                "engineGeneration": "0.5.2-public",
+                "platform": "ios",
+            ])
+        }
+    }
+
+    /// Small helper shared by the wake methods that read engine JSON.
+    private static func jsonObject(_ json: String) -> [String: Any]? {
+        guard let data = json.data(using: .utf8) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
     @objc func getSchedulerConfig(_ call: CAPPluginCall) {

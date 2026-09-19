@@ -244,29 +244,60 @@ const agentActions = {
     const id = state.lastCronJobId; state.lastCronJobId = null;
     return { removed: id };
   },
-  agentwake: async () => { requireInit(); await window.NativeKit.agent.handleWake('manual_demo'); return { woken: true }; },
+  // Foreground catch-up: runs every due cron job now and surfaces the results,
+  // exactly like an OS wake — so "Wake now" and a real background wake end up in
+  // the same inbox (loadSurfacedMessages).
+  agentwake: async () => {
+    requireInit();
+    const res = await window.NativeKit.agent.handleWake('manual_demo');
+    setStatus(res?.ran ? `${res.ran}টি job চলল (${res.summary})` : `হয়েছে: ${res?.summary ?? 'no due job'}`, 'ok');
+    return res ?? { ran: 0 };
+  },
   agentgetsched: async () => { requireInit(); return window.NativeKit.agent.getSchedulerConfig(); },
   agentsetsched: async () => { requireInit(); await window.NativeKit.agent.setSchedulerConfig(JSON.stringify({ enabled: true, tickSeconds: 60 })); return { schedulerUpdated: true }; },
   agentsetheartbeat: async () => { requireInit(); await window.NativeKit.agent.setHeartbeatConfig(JSON.stringify({ enabled: true, intervalMinutes: 60 })); return { heartbeatUpdated: true }; },
 
-  // 9 ── Background wakes ────────────────────────────────────────────────────
+  // 9 ── Background wakes (real OS scheduling) ──────────────────────────────
+  // Android: Android WorkManager starts the worker even when the app process is
+  // gone. iOS: a BGProcessingTask the system runs when it decides to — that is
+  // why the answer carries `intervalMinutes` as granted (Android floors at 15)
+  // and `opportunistic: true` on iOS.
   agentbgschedule: async () => {
     requireInit();
-    // Resolves (never rejects) with jobScheduled:false + reason when the host
-    // app isn't configured (iOS Info.plist / disabled by OS).
+    // Never rejects: a refusal comes back as jobScheduled:false + reason.
     const res = await window.NativeKit.agent.scheduleBackgroundWakes(30);
-    setStatus(res.jobScheduled ? `Background wake প্রতি ${res.intervalMinutes} মিনিটে` : `Schedule হয়নি: ${res.reason}`, res.jobScheduled ? 'ok' : 'warn');
+    setStatus(res.jobScheduled ? `Background wake armed — ${res.mechanism}, প্রতি ${res.intervalMinutes} মিনিট` : `Schedule হয়নি: ${res.reason}`, res.jobScheduled ? 'ok' : 'warn');
     return res;
   },
-  agentbgcancel: async () => { requireInit(); return window.NativeKit.agent.cancelBackgroundWakes(); },
-  agentwakes: async () => { requireInit(); return window.NativeKit.agent.getWakeStatus(); },
+  agentbgcancel: async () => {
+    requireInit();
+    const res = await window.NativeKit.agent.cancelBackgroundWakes();
+    setStatus(res.jobCancelled ? 'Background wake বাতিল।' : `বাতিল করা যায়নি: ${res.reason ?? 'unknown'}`, res.jobCancelled ? 'ok' : 'warn');
+    return res;
+  },
+  agentwakes: async () => {
+    requireInit();
+    const res = await window.NativeKit.agent.getWakeStatus();
+    setStatus(res.jobScheduled ? `Wake armed (${res.workState ?? 'pending'})${res.nextRunApproxMs ? `, next ≈ ${new Date(res.nextRunApproxMs).toLocaleTimeString()}` : ''}` : `Wake armed নয়${res.lastWakeAt ? ` — শেষ wake ${res.lastWakeAt}` : ''}`, res.jobScheduled ? 'ok' : 'warn');
+    return res;
+  },
 
-  // 9a ── Surfaced messages: deliberately still wired, so the lab SHOWS the
-  // honest answer ("this generation has no surfaced-message store") instead of
-  // hiding the gap. Nothing is faked: it returns supported:false + reason +
-  // the store to read instead.
-  agentsurfaced: async () => { requireInit(); return window.NativeKit.agent.loadSurfacedMessages(20); },
-  agentclearsurfaced: async () => { requireInit(); return window.NativeKit.agent.clearSurfacedMessages(); },
+  // 9a ── Surfaced messages: what the agent produced while the UI was closed.
+  // The plugin fills this from the engine's own cron_runs rows (plus the
+  // notifications posted during a wake), so a background job's answer is still
+  // readable on the next launch.
+  agentsurfaced: async () => {
+    requireInit();
+    const res = await window.NativeKit.agent.loadSurfacedMessages(20);
+    setStatus(res.count ? `${res.count}টি message (${res.unread} unread)` : 'এখনো কোনো surfaced message নেই — আগে একটি cron job যোগ করে wake চালান।', res.count ? 'ok' : 'muted');
+    return res;
+  },
+  agentclearsurfaced: async () => {
+    requireInit();
+    const res = await window.NativeKit.agent.clearSurfacedMessages();
+    setStatus(`${res.cleared}টি message মুছে ফেলা হয়েছে।`, 'ok');
+    return res;
+  },
 
   // 9b ── Long-term memory (built into the plugin, see MemoryProviderImpl) ────
   // These call the agent's own memory tools directly, which is exactly what the

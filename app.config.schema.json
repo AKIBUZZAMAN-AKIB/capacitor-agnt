@@ -14,6 +14,7 @@
     "ios",
     "appBrowser",
     "backgroundRunner",
+    "agent",
     "security"
   ],
   "properties": {
@@ -632,6 +633,41 @@
         "defaultSyncUrl": {
           "type": "string",
           "maxLength": 2048
+        }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Defaults for the on-device agent's background wakes and surfaced-message inbox.",
+      "required": [
+        "wakeIntervalMinutes",
+        "minWakeIntervalMinutes",
+        "surfacedLimit",
+        "markSurfacedRead"
+      ],
+      "properties": {
+        "wakeIntervalMinutes": {
+          "type": "integer",
+          "minimum": 15,
+          "maximum": 1440,
+          "description": "Default interval asked of the OS when the caller passes none (Android floors it at 15, iOS treats it as a floor, not a promise)."
+        },
+        "minWakeIntervalMinutes": {
+          "type": "integer",
+          "minimum": 15,
+          "maximum": 1440,
+          "description": "Lower bound the bridge clamps requests to before they reach the OS scheduler."
+        },
+        "surfacedLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "description": "Default page size for loadSurfacedMessages()."
+        },
+        "markSurfacedRead": {
+          "type": "boolean",
+          "description": "Whether loadSurfacedMessages() marks the returned page as read by default."
         }
       }
     },

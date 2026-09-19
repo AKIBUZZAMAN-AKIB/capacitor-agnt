@@ -1,3 +1,3 @@
-export type { AgentAvailabilityResult, AuthStatusResult, AuthTokenResult, CronJobInput, CronJobRecord, CronRunRecord, CronSkillInput, CronSkillRecord, HeartbeatConfig, InitConfig, ModelInfo, NativeAgentEvent, NativeAgentEventType, NativeAgentPlugin, SchedulerConfig, SendMessageParams, SessionHistoryResult, SessionInfo, TokenUsage, } from './definitions';
+export type { AgentAvailabilityResult, AuthStatusResult, AuthTokenResult, BackgroundWakeResult, BackgroundWakeStatus, CronJobInput, CronJobRecord, CronRunRecord, CronSkillInput, CronSkillRecord, HandleWakeResult, HeartbeatConfig, InitConfig, LoadSurfacedMessagesOptions, ModelInfo, NativeAgentEvent, NativeAgentEventType, NativeAgentPlugin, ScheduleBackgroundWakesOptions, SchedulerConfig, SendMessageParams, SessionHistoryResult, SessionInfo, SurfacedMessage, SurfacedMessagesResult, TokenUsage, } from './definitions';
 export { NativeAgent } from './plugin';
 //# sourceMappingURL=index.d.ts.map

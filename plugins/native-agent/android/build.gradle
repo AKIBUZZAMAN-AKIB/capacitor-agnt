@@ -30,4 +30,12 @@ dependencies {
     implementation project(':capacitor-android')
     implementation 'net.java.dev.jna:jna:5.14.0@aar'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
+    // Background wakes run in a Worker the OS owns. WorkManager is already in
+    // every host app that has @capacitor/background-runner (it ships the same
+    // library on the classpath), so this only pins the API this module compiles
+    // against; Gradle resolves the single highest version.
+    def workManagerVersion = project.hasProperty('workManagerVersion')
+        ? rootProject.ext.workManagerVersion
+        : '2.11.0'
+    implementation "androidx.work:work-runtime:$workManagerVersion"
 }

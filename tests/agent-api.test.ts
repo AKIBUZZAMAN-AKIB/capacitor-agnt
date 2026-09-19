@@ -16,10 +16,12 @@ import { describe, expect, it } from 'vitest';
 //   1. the UniFFI contract version on both sides must be the 0.5.2 one (26),
 //   2. the crash-safety fixes backported from 0.9.x must stay in place (catch
 //      Throwable / never throw across the FFI boundary),
-//   3. the five newer-engine APIs are compat shims in the bridge and must never
-//      be called on the native plugin; this generation cannot schedule OS wakes
-//      or surface background messages, so those five answer `supported: false`
-//      with a reason and the supported alternative,
+//   3. the five wake/surfaced APIs are implemented for real: the engine runs a
+//      wake but cannot ask the OS for background runtime, so the PLUGIN owns
+//      that half (WorkManager periodic work on Android, a BGProcessingTask on
+//      iOS) and the bridge passes the OS's own answer through — including the
+//      platform floors (Android: 15 minutes) which are reported, not smoothed
+//      over. The surfaced inbox is filled from the engine's `cron_runs` rows,
 //   4. the private-repo submodule must never come back,
 //   5. this is the ONLY agent engine in the app: the long-term memory it needs is
 //      implemented in-repo (file-backed, lexical) instead of behind an optional
@@ -59,9 +61,13 @@ function bridgeNativeCalls(): Set<string> {
   return new Set(unique([...read(BRIDGE).matchAll(/NativeAgent\.(\w+)\(/g)].map((m) => m[1])));
 }
 
-/** The agent namespace block of the bridge. */
+/**
+ * The agent namespace block of the bridge. Anchored on its first member rather
+ * than on `agent: {` alone: `NativeKitBuildConfig` also declares an `agent`
+ * object, and a lazy match from that one would swallow every other namespace.
+ */
 function bridgeAgentBlock(): string {
-  const block = read(BRIDGE).match(/\n  agent: \{[\s\S]*?\n  \},\n\};/);
+  const block = read(BRIDGE).match(/\n  agent: \{\n    supported:[\s\S]*?\n  \},\n\};/);
   expect(block, 'agent namespace not found in bridge/nativekit.ts').not.toBeNull();
   return block![0];
 }
@@ -376,9 +382,6 @@ describe('agent — bridge and demo wiring', () => {
     const calls = bridgeNativeCalls();
     const shimmed = new Set([
       // compat shims: implemented in the bridge because 0.5.2 has no such native method
-      'scheduleBackgroundWakes',
-      'cancelBackgroundWakes',
-      'loadSurfacedMessages',
       'setMcpTools',
       'addListener', // wrapped as agent.onEvent
     ]);
@@ -389,41 +392,43 @@ describe('agent — bridge and demo wiring', () => {
     }
   });
 
-  it('never calls the newer-engine APIs on the native plugin', () => {
+  it('calls the real wake APIs on the plugin, on both platforms', () => {
     const calls = bridgeNativeCalls();
-    for (const absent of ['scheduleBackgroundWakes', 'cancelBackgroundWakes', 'loadSurfacedMessages', 'setMcpTools']) {
-      expect(calls.has(absent), `NativeAgent.${absent}() does not exist in the 0.5.2 plugin`).toBe(false);
-      expect(kotlinMethods(), `${absent} must not exist on the pinned Kotlin plugin`).not.toContain(absent);
-    }
-  });
-
-  it('answers the wake/surfaced APIs honestly instead of pretending', () => {
-    // This generation cannot schedule OS wakes (no JobScheduler / BGTaskScheduler
-    // path) and has no surfaced-message store. The five APIs stay in the surface
-    // so host apps compile, but each one must return data — never reject, never
-    // claim a job was scheduled.
-    const block = bridgeAgentBlock();
-    const refused = [
+    const wakeApi = [
       'scheduleBackgroundWakes',
       'cancelBackgroundWakes',
       'getWakeStatus',
       'loadSurfacedMessages',
       'clearSurfacedMessages',
     ];
-    for (const name of refused) {
-      const m = block.match(new RegExp(`^    ${name}: async \\([\\s\\S]*?\\n    \\},`, 'm'));
-      expect(m, `${name} shim not found`).not.toBeNull();
-      const body = m![0];
-      expect(body, `${name} must say it is unsupported`).toContain('supported: false');
-      expect(body, `${name} must explain why`).toContain('reason:');
-      expect(body, `${name} must offer the supported alternative`).toContain('alternative:');
-      // No phantom engine call, no rejection, no fake success.
-      expect(body, `${name} must not call a native method`).not.toMatch(/NativeAgent\./);
-      expect(body, `${name} must not throw`).not.toContain('throw');
-      expect(body, `${name} must not claim it scheduled anything`).not.toContain('jobScheduled: true');
+    for (const name of wakeApi) {
+      expect(calls.has(name), `NativeAgent.${name}() must be called by the bridge`).toBe(true);
+      expect(kotlinMethods(), `${name} must exist on the Android plugin`).toContain(name);
+      expect(swiftExportedMethods(), `${name} must be exported on iOS`).toContain(name);
     }
-    // setMcpTools is mapped onto the closest native capability.
-    expect(block).toMatch(/setMcpTools→restartMcp/);
+    // setMcpTools stays a bridge shim: it is mapped onto the closest native
+    // capability instead of a native method that does not exist.
+    expect(bridgeAgentBlock()).toMatch(/setMcpTools→restartMcp/);
+  });
+
+  it('never reports a wake success it did not get from the OS', () => {
+    // The wake APIs are wrappers, not pass-throughs: on success they spread the
+    // native answer (so `intervalMinutes` is what the OS granted), and on failure
+    // they still resolve — with `supported: false`, a reason and the documented
+    // alternative. No envelope may invent a scheduled job.
+    const block = bridgeAgentBlock();
+    for (const name of ['scheduleBackgroundWakes', 'cancelBackgroundWakes', 'getWakeStatus', 'loadSurfacedMessages', 'clearSurfacedMessages']) {
+      const m = block.match(new RegExp(`^    ${name}: async \\([\\s\\S]*?\\n    \\},`, 'm'));
+      expect(m, `${name} not found in the bridge`).not.toBeNull();
+      const body = m![0];
+      expect(body, `${name} must call the native plugin`).toMatch(new RegExp(`NativeAgent\\.${name}\\(`));
+      expect(body, `${name} must not throw; failures resolve as data`).not.toContain('throw');
+      expect(body, `${name} must report what the OS granted`).toContain('...(native');
+      expect(body, `${name} needs a failure envelope`).toContain('supported: false');
+      expect(body, `${name} failure envelope must explain itself`).toContain('reason:');
+      expect(body, `${name} failure envelope must offer the alternative`).toContain('alternative:');
+      expect(body, `${name} must never hardcode a scheduled job`).not.toContain('jobScheduled: true');
+    }
   });
 
   it('has no second engine: PhoneBuddy is gone from the app', () => {
@@ -571,5 +576,173 @@ describe('shell plugins — Java imports', () => {
     if (/\bGravity\./.test(src)) {
       expect(src).toContain('import android.view.Gravity;');
     }
+  });
+});
+
+const WAKE_DIR_KT = 'plugins/native-agent/android/src/main/java/com/t6x/plugins/nativeagent';
+const WAKE_DIR_SWIFT = 'plugins/native-agent/ios/Sources/NativeAgentPlugin';
+const CONFIGURE = 'scripts/configure-native.mjs';
+const AGENT_WAKE_TASK_ID = 'io.t6x.nativeagent.wake';
+
+describe('agent — background wakes are real OS work', () => {
+  it('Android arms a periodic WorkManager job and reports the granted interval', () => {
+    const scheduler = read(`${WAKE_DIR_KT}/NativeWakeScheduler.kt`);
+    for (const api of [
+      'PeriodicWorkRequest.Builder',
+      'enqueueUniquePeriodicWork',
+      'ExistingPeriodicWorkPolicy.UPDATE',
+      'setInitialDelay',
+      'setRequiredNetworkType(NetworkType.CONNECTED)',
+      'getWorkInfosForUniqueWork',
+      'cancelUniqueWork',
+    ]) {
+      expect(scheduler, `WorkManager API missing: ${api}`).toContain(api);
+    }
+    expect(scheduler).toContain('NativeAgentWakeWorker::class.java');
+    // 15 minutes is a platform floor, so it is clamped and reported, not ignored.
+    const store = read(`${WAKE_DIR_KT}/NativeWakeStore.kt`);
+    expect(store).toContain('MIN_INTERVAL_MINUTES = 15');
+    expect(store).toMatch(/PeriodicWorkRequest\.MIN_PERIODIC_INTERVAL_MILLIS/);
+    expect(scheduler).toContain('maxOf(requestedMinutes, NativeWakeStore.MIN_INTERVAL_MINUTES)');
+    expect(read('plugins/native-agent/android/build.gradle')).toContain('androidx.work:work-runtime');
+  });
+
+  it('the Android worker is instantiable by the OS and cannot crash the app', () => {
+    const worker = read(`${WAKE_DIR_KT}/NativeAgentWakeWorker.kt`);
+    expect(worker).toContain(': Worker(');
+    expect(worker, 'WorkManager needs a public class').not.toContain('internal class');
+    expect(worker, 'WorkManager needs a public class').not.toContain('private class');
+    expect(worker).toContain('NativeWakeRunner.run(applicationContext, NativeWakeRunner.SOURCE_WORKER)');
+    // Periodic work cannot end in a terminal state, so success is returned and
+    // the outcome is recorded in telemetry instead.
+    expect(worker).toContain('Result.success()');
+    const runner = read(`${WAKE_DIR_KT}/NativeWakeRunner.kt`);
+    expect(runner).toContain('catch (t: Throwable)');
+    expect(runner).toContain('handle?.close()');
+  });
+
+  it('iOS uses a BGProcessingTask registered before launch completes', () => {
+    const task = read(`${WAKE_DIR_SWIFT}/NativeAgentBackgroundTask.swift`);
+    for (const api of [
+      'BGProcessingTaskRequest',
+      'requiresNetworkConnectivity = true',
+      'earliestBeginDate',
+      'forTaskWithIdentifier:',
+      'cancel(taskRequestWithIdentifier:',
+      'getPendingTaskRequests',
+      'setTaskCompleted',
+      'expirationHandler',
+    ]) {
+      expect(task, `BGTaskScheduler API missing: ${api}`).toContain(api);
+    }
+    expect(task).toContain(AGENT_WAKE_TASK_ID);
+    // Registering the same identifier twice kills the process, so it is guarded.
+    expect(task).toContain('private static var registered = false');
+
+    // The identifier must be whitelisted, and the handler registered at launch.
+    const plist = read('ios/App/App/Info.plist');
+    expect(plist).toContain(AGENT_WAKE_TASK_ID);
+    expect(plist).toContain('processing');
+    const delegate = read('ios/App/App/AppDelegate.swift');
+    expect(delegate).toContain('NativeAgentBackgroundTask.registerIfNeeded()');
+    expect(delegate).toContain('import CapacitorNativeAgent');
+    const generator = read(CONFIGURE);
+    expect(generator).toContain(`const AGENT_WAKE_TASK_ID = '${AGENT_WAKE_TASK_ID}'`);
+    expect(generator).toContain('NativeAgentBackgroundTask.registerIfNeeded()');
+    expect(generator).toContain('import CapacitorNativeAgent');
+  });
+
+  it('a wake rebuilds the engine headlessly on both platforms', () => {
+    const kotlin = read(`${WAKE_DIR_KT}/NativeWakeRunner.kt`);
+    const swift = read(`${WAKE_DIR_SWIFT}/NativeAgentWakeRunner.swift`);
+    for (const src of [kotlin, swift]) {
+      expect(src).toContain('createHandleFromPersistedConfig');
+      expect(src).toContain('handleWake');
+      expect(src).toContain('setMemoryProvider');
+      expect(src).toContain('recordWake');
+      expect(src).toContain('engineConfigPath');
+    }
+    // The config path is the one initialize() persisted — one key, shared.
+    const pluginKt = read(KOTLIN);
+    expect(pluginKt).toContain('NativeWakeStore.CAPACITOR_STORAGE_FILE');
+    expect(pluginKt).toContain('NativeWakeStore.CONFIG_PATH_KEY');
+    expect(read(`${WAKE_DIR_KT}/NativeWakeStore.kt`)).toContain('"CapacitorStorage"');
+    expect(read(`${WAKE_DIR_SWIFT}/NativeAgentWakeStore.swift`)).toContain('"mobilecron:native-agent-config-path"');
+  });
+
+  it('telemetry reflects the OS, not a stored wish', () => {
+    const scheduler = read(`${WAKE_DIR_KT}/NativeWakeScheduler.kt`);
+    expect(scheduler).toContain('WorkInfo.State.ENQUEUED');
+    expect(scheduler).toContain('nextScheduleTimeMillis');
+    const pluginKt = read(KOTLIN);
+    for (const field of ['workState', 'nextRunApproxMs', 'lastWakeAt', 'lastWakeSource', 'lastWakeSummary', 'pendingTasks', 'dueCronJobs']) {
+      expect(pluginKt, `getWakeStatus must report ${field}`).toContain(field);
+    }
+    const pluginSwift = read(SWIFT);
+    for (const field of ['permitted', 'opportunistic', 'unreadSurfaced', 'pendingTasks']) {
+      expect(pluginSwift, `iOS wake status must report ${field}`).toContain(field);
+    }
+    expect(read(`${WAKE_DIR_SWIFT}/NativeAgentBackgroundTask.swift`)).toContain('getPendingTaskRequests');
+  });
+});
+
+describe("agent — surfaced messages come from the engine's own run history", () => {
+  it('the capture filter matches what the engine writes', () => {
+    const db = read(`${CRATE}/src/db.rs`);
+    expect(db).toContain('wake_source');
+    expect(db).toContain('INSERT INTO cron_runs (job_id, started_at, status, wake_source)');
+    expect(db).toContain('finalize_cron_run');
+    for (const src of [
+      read(`${WAKE_DIR_KT}/NativeWakeCapture.kt`),
+      read(`${WAKE_DIR_SWIFT}/NativeAgentWakeCapture.swift`),
+    ]) {
+      expect(src).toContain('wakeSource');
+      expect(src).toContain('startedAt');
+      expect(src).toContain('listCronRuns');
+      expect(src).toContain('responseText');
+      expect(src).toContain('listCronJobs');
+    }
+  });
+
+  it('both platforms cap and shape the queue identically', () => {
+    const kt = read(`${WAKE_DIR_KT}/NativeWakeStore.kt`);
+    const sw = read(`${WAKE_DIR_SWIFT}/NativeAgentWakeStore.swift`);
+    for (const src of [kt, sw]) {
+      expect(src).toContain('surfaced.json');
+      expect(src).toContain('500');
+      for (const field of ['source', 'read', 'title', 'body', 'text', 'jobId', 'runId', 'status']) {
+        expect(src, `record shape must carry ${field}`).toContain(`"${field}"`);
+      }
+    }
+    // Written from the plugin, the worker and a notifier callback: serialised.
+    expect(kt).toContain('synchronized(lock)');
+    expect(sw).toContain('lock.lock()');
+  });
+
+  it('notifications posted during a wake are recorded too', () => {
+    expect(read(`${WAKE_DIR_KT}/NativeWakeNotifier.kt`)).toContain('NativeNotifier');
+    expect(read(`${WAKE_DIR_SWIFT}/NativeAgentWakeCapture.swift`)).toContain('NativeAgentWakeNotifier');
+    // Installed around the wake; the normal notifier is restored afterwards so a
+    // foreground turn is not recorded as a background message.
+    for (const src of [read(KOTLIN), read(SWIFT)]) {
+      expect(src).toContain('installRecordingNotifier');
+      expect(src).toContain('restoreDefaultNotifier');
+    }
+  });
+
+  it('config carries the wake defaults into the bridge', () => {
+    const config = JSON.parse(read('app.config.json'));
+    expect(Object.keys(config.agent).sort()).toEqual([
+      'markSurfacedRead',
+      'minWakeIntervalMinutes',
+      'surfacedLimit',
+      'wakeIntervalMinutes',
+    ]);
+    const schema = JSON.parse(read('app.config.schema.json'));
+    expect(schema.required).toContain('agent');
+    expect(schema.properties.agent.properties.minWakeIntervalMinutes.minimum).toBe(15);
+    expect(read('scripts/build-bridge.mjs')).toContain('agent: {');
+    expect(read(BRIDGE)).toContain('minWakeIntervalMinutes');
+    expect(read(BRIDGE)).toContain('function agentInterval(');
   });
 });
