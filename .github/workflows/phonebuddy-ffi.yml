@@ -105,11 +105,11 @@ jobs:
           set -euo pipefail
           args=(--ref "$SDK_REF" --abis "$ABIS" --best-effort)
           if [ "${VENDOR_SOURCE:-false}" = "true" ]; then args+=(--vendor); fi
-          tools/agent-ffi/build-phonebuddy-all-abis.sh "${args[@]}"
+          bash tools/agent-ffi/build-phonebuddy-all-abis.sh "${args[@]}"
 
       - name: Verify ABI coverage (source tree)
         run: |
-          tools/agent-ffi/verify-abis.sh --require-lib libphone_buddy_ffi.so --strict --jni "$JNI_LIBS"
+          bash tools/agent-ffi/verify-abis.sh --require-lib libphone_buddy_ffi.so --strict --jni "$JNI_LIBS"
           cat "$JNI_LIBS/abi-manifest.json"
 
       - name: Upload .so slices
@@ -181,7 +181,7 @@ jobs:
           set -euo pipefail
           apk="$(find android/app/build/outputs/apk/debug -name '*.apk' | head -n1)"
           test -n "$apk"
-          tools/agent-ffi/verify-abis.sh --require-lib libphone_buddy_ffi.so --strict --apk "$apk"
+          bash tools/agent-ffi/verify-abis.sh --require-lib libphone_buddy_ffi.so --strict --apk "$apk"
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v6

@@ -161,7 +161,7 @@ jobs:
                              [ -n "$SOURCE_URL" ] && args+=(--asset-url "$SOURCE_URL") ;;
             repo)            echo "::error::source_mode=repo but nothing is vendored. Pick public-upstream / release-asset / git."; exit 1 ;;
           esac
-          tools/agent-ffi/resolve-ffi-source.sh "${args[@]}"
+          bash tools/agent-ffi/resolve-ffi-source.sh "${args[@]}"
           echo "--- vendored crate ---"
           find plugins/native-agent/rust/native-agent-ffi -maxdepth 2 -type f | sort | head -40
 
@@ -247,14 +247,14 @@ jobs:
             args+=($CARGO_FEATURES)
           fi
           echo "build-android-all-abis.sh ${args[*]}"
-          tools/agent-ffi/build-android-all-abis.sh "${args[@]}"
+          bash tools/agent-ffi/build-android-all-abis.sh "${args[@]}"
           echo "built=$ABIS" >> "$GITHUB_OUTPUT"
 
       - name: Verify ABI coverage and slice integrity
         shell: bash
         run: |
           set -euo pipefail
-          tools/agent-ffi/verify-abis.sh --strict --jni "$JNI_LIBS"
+          bash tools/agent-ffi/verify-abis.sh --strict --jni "$JNI_LIBS"
           for abi in $ABIS; do
             so="$JNI_LIBS/$abi/libnative_agent_ffi.so"
             [ -f "$so" ] || { echo "::error::$abi slice missing"; exit 1; }
@@ -340,7 +340,7 @@ jobs:
           set -euo pipefail
           apk="$(find android/app/build/outputs/apk/debug -name '*.apk' | head -n1)"
           test -n "$apk"
-          tools/agent-ffi/verify-abis.sh --strict --apk "$apk"
+          bash tools/agent-ffi/verify-abis.sh --strict --apk "$apk"
           node tools/agent-ffi/check-native-abis.mjs --strict --apk "$apk"
 
       - name: Upload debug APK
