@@ -50,7 +50,7 @@ rust/native-agent-ffi/
 |---|---|---|---|
 | public `v0.5.2` ক্রেট | 0.28.3 | **26** | চায় **30** ❌ |
 | আপনার প্লাগইন (0.9.14) | 0.30.x | 30 | — ✅ |
-| public রিপোর `v0.5.2` **প্লাগইন code** | 0.28.3 | 26 | её নিজের binding = 26 ✅ |
+| public রিপোর `v0.5.2` **প্লাগইন code** | 0.28.3 | 26 | এর নিজের binding = 26 ✅ |
 
 অর্থাৎ **০.৫.২ ক্রেট + ০.৯.১৪ প্লাগইন মেশানো যায় না** — ডিভাইসে `UniFFI contract version mismatch` ছুড়বে। যেটা যায়: **পুরো স্ট্যাক একই প্রজন্মে** রাখা।
 
@@ -193,7 +193,7 @@ tools/agent-ffi/resolve-ffi-source.sh --mode public-upstream --ref v0.5.2 --dry-
 
 ## 7. প্রমাণের ফাইল
 
-- `tools/agent-ffi/resolve-ffi-source.sh` — উপরের ৪ মোডের সাথে সোর্স আনে/ভেন্ডর করে (দ্রুত परীক্ষা করা: v0.5.2 থেকে ১৫টি ফাইল নামে)
+- `tools/agent-ffi/resolve-ffi-source.sh` — উপরের ৪ মোডের সাথে সোর্স আনে/ভেন্ডর করে (দ্রুত পরীক্ষা করা: v0.5.2 থেকে ১৫টি ফাইল নামে)
 - `tools/agent-ffi/build-android-all-abis.sh` — ৪ ABI বিল্ড, ELF verify, contract gate (`--require-binding-match`)
 - `tools/agent-ffi/switch-agent-generation.sh` — PLAN A-র জন্য পাবলিক প্রজন্মে নামার সহায়ক
 - `.github/workflows/native-agent-ffi.yml` — Actions-only পাইপলাইন

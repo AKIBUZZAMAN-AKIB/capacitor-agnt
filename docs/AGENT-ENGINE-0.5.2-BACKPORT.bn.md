@@ -39,7 +39,7 @@ UniFFI contract version: 26 (দুই দিকেই match ✅)
 | 7 | **C3 → অপ্রযোজ্য:** `Package.swift`-এ কোনো অপশনাল নেটিভ ডিপেন্ডেন্সি নেই — Swift মেমোরি প্রোভাইডারও বিল্ট-ইন (`MemoryProviderImpl.swift`) | macOS-এ SwiftPM resolve-এ কোনো বাহ্যিক প্লাগিন লাগে না |
 | 8 | `android/consumer-rules.pro` + `consumerProguardFiles` (defaultConfig-এ) | JNA/UniFFI-reflection সহ minify-করা রিলিজ বিল্ড |
 | 9 | ~~ব্রিজে কম্প্যাট শিম~~ → **প্লাগইনে আসল ইমপ্লিমেন্টেশন** (`scheduleBackgroundWakes`, `cancelBackgroundWakes`, `getWakeStatus`, `loadSurfacedMessages`, `clearSurfacedMessages`) | ইঞ্জিন wake *চালাতে* পারে কিন্তু OS-এর কাছে background runtime *চাইতে* পারে না — সেই অর্ধেকটা এখন প্লাগিনে (Android: WorkManager periodic worker; iOS: `BGProcessingTask`)। বিস্তারিত: `docs/BACKGROUND-WAKES.bn.md`। শুধু `setMcpTools` শিমই রয়ে গেছে |
-| 10 | `scripts/configure-native.mjs`: iOS BGTask id শুধু тогда যোগ হয় যখন `NativeAgentBackgroundTask.swift` সত্যিই আছে | কাল্পনিক টাস্ক iOS-কে promise করা বন্ধ |
+| 10 | `scripts/configure-native.mjs`: iOS BGTask id শুধু তখনই যোগ হয় যখন `NativeAgentBackgroundTask.swift` সত্যিই আছে | কাল্পনিক টাস্ক iOS-কে promise করা বন্ধ |
 | 11 | `tests/agent-api.test.ts` নতুন প্রজন্মের জন্য পুনর্লিখন | contract 26, ব্যাকপোর্ট, বিল্ট-ইন মেমোরি (কোনো ভেক্টর নেই), ABI টুলিং, শিম, একটাই ইঞ্জিন — সব মেশিন-যাচাই |
 
 ### কম্প্যাট শিমগুলো (ব্রিজের ভেতরে)
@@ -77,7 +77,7 @@ UniFFI contract version: 26 (দুই দিকেই match ✅)
 
 ## ৪. এখন কী করবেন (সব Actions থেকে)
 
-1. **প্রথমে লোকাল যাচাই** (একবার, ঐচ্ছিক): `npm ci && npm run check` → сейчас সবুজ ✅
+1. **প্রথমে লোকাল যাচাই** (একবার, ঐচ্ছিক): `npm ci && npm run check` → এখন সবুজ ✅
 2. **commit + push**:
    ```bash
    git add -A

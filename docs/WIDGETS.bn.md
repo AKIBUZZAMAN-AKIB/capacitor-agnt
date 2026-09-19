@@ -150,7 +150,7 @@ await NativeKit.widget.onFloatingMessage((ev) => { /* ev = payload */ });
 
 ### Manifiest/পারমিশন
 
-`scripts/configure-native.mjs` когда `widget.floating.enabled` থাকে তখন এই জিনিসগুলো `AndroidManifest.xml`-এ যোগ করে:
+`scripts/configure-native.mjs` যখন `widget.floating.enabled` থাকে তখন এই জিনিসগুলো `AndroidManifest.xml`-এ যোগ করে:
 - `<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />` ("display over other apps")
 - `<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />` + `<uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />`
 - `<service android:foregroundServiceType="specialUse">` + `PROPERTY_SPECIAL_USE_FGS_SUBTYPE`
