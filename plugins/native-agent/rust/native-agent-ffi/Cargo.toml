@@ -1,0 +1,43 @@
+[package]
+name = "native-agent-ffi"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+name = "native_agent_ffi"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+
+[dependencies]
+uniffi = { version = "0.28", features = ["tokio", "cli"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "process"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json", "stream"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+async-trait = "0.1"
+thiserror = "1"
+tracing = "0.1"
+futures = "0.3"
+regex = "1"
+glob = "0.3"
+git2 = { version = "0.19", default-features = false, optional = true }
+walkdir = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[features]
+default = ["libgit2"]
+libgit2 = ["dep:git2"]
+
+[build-dependencies]
+uniffi = { version = "0.28", features = ["build"] }
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+strip = true

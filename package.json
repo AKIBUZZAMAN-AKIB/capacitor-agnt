@@ -27,7 +27,15 @@
     "typecheck": "tsc --noEmit",
     "check": "npm run validate:config && npm run typecheck && npm test && npm run prepare:native",
     "ci:android": "npm run native:sync",
-    "ci:ios": "npm run native:sync"
+    "ci:ios": "npm run native:sync",
+    "check:abis": "node tools/agent-ffi/check-native-abis.mjs",
+    "ffi:vendor": "bash tools/agent-ffi/vendor-ffi-source.sh",
+    "ffi:build:android": "bash tools/agent-ffi/build-android-all-abis.sh",
+    "ffi:verify": "bash tools/agent-ffi/verify-abis.sh",
+    "ffi:resolve": "bash tools/agent-ffi/resolve-ffi-source.sh",
+    "agent:switch-generation": "bash tools/agent-ffi/switch-agent-generation.sh",
+    "ffi:build:phonebuddy": "bash tools/agent-ffi/build-phonebuddy-all-abis.sh",
+    "ffi:verify:phonebuddy": "bash tools/agent-ffi/verify-abis.sh --require-lib libphone_buddy_ffi.so --jni plugins/phonebuddy-agent/android/src/main/jniLibs"
   },
   "dependencies": {
     "@capacitor-community/sqlite": "8.1.1",

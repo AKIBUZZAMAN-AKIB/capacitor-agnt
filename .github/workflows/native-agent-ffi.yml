@@ -1,0 +1,352 @@
+name: Native agent FFI — source, build, verify (Actions only)
+
+# ONE button does everything, with no local commands and no private access:
+#   workshop: resolve/vendor the Rust FFI crate  →  build the .so for every
+#             Android ABI  →  verify each slice  →  commit them back  →
+#             (optional) build a debug APK and assert its ABI coverage.
+#
+# Source modes (input `source_mode`)
+#   repo            the crate is already vendored in this repository (nothing to fetch)
+#   public-upstream clone the PUBLIC GitHub repo rogelioRuiz/capacitor-native-agent at
+#                   `source_ref` and take rust/native-agent-ffi. The crate is
+#                   committed there up to v0.5.2; from v0.9.0 it is only a submodule
+#                   pointer to the private GitLab — pick a tag that really has it.
+#   release-asset   download a source archive that someone uploaded to a GitHub
+#                   Release of THIS repo (asset_pattern / asset_tag). Zero local
+#                   steps for everyone: upload the tarball once from a phone or
+#                   browser, then every build runs here.
+#   git             clone any git URL (e.g. the private GitLab) using the optional
+#                   FFI_SOURCE_TOKEN secret.
+#
+# Binding safety: slices are only committed when the UniFFI bindings regenerate
+# identical to the committed ones (contract/checksum match). Flip
+# `allow_binding_mismatch` only for investigation builds — a mismatched .so makes
+# the app throw "UniFFI contract/API checksum mismatch" at runtime.
+#
+# Details: tools/agent-ffi/README.bn.md
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_mode:
+        description: 'Where the Rust crate comes from'
+        required: true
+        default: 'repo'
+        type: choice
+        options: [repo, public-upstream, release-asset, git]
+      source_ref:
+        description: 'Git ref for public-upstream / git (e.g. v0.5.2, main)'
+        required: false
+        default: 'v0.5.2'
+        type: string
+      source_url:
+        description: 'URL/path for git, or a direct asset URL for release-asset'
+        required: false
+        default: ''
+        type: string
+      asset_tag:
+        description: 'Release tag that holds the source archive (release-asset mode)'
+        required: false
+        default: 'ffi-source'
+        type: string
+      asset_pattern:
+        description: 'Release asset filename glob (release-asset mode)'
+        required: false
+        default: 'native-agent-ffi-src-*.tar.gz'
+        type: string
+      abis:
+        description: 'Space-separated Android ABIs to build'
+        required: false
+        default: 'arm64-v8a armeabi-v7a x86_64 x86'
+        type: string
+      best_effort:
+        description: 'Keep going when a 32-bit/emulator target fails (arm64-v8a is always required)'
+        required: false
+        default: true
+        type: boolean
+      cargo_features:
+        description: 'Extra cargo flags, e.g. "--no-default-features" or "--features libgit2"'
+        required: false
+        default: ''
+        type: string
+      commit_source:
+        description: 'Commit the fetched crate source into the repository (makes future runs offline)'
+        required: false
+        default: true
+        type: boolean
+      commit_slices:
+        description: 'Commit the built .so slices back into plugins/native-agent/android/src/main/jniLibs'
+        required: false
+        default: true
+        type: boolean
+      allow_binding_mismatch:
+        description: 'Allow slices whose UniFFI bindings differ from the committed ones (investigation only)'
+        required: false
+        default: false
+        type: boolean
+      build_apk:
+        description: 'Also build a debug APK and assert it contains every ABI'
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches: [main]
+    paths:
+      - 'plugins/native-agent/rust/**'
+      - 'tools/agent-ffi/**'
+      - '.github/workflows/native-agent-ffi.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: native-agent-ffi-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NDK_VERSION: '27.0.12077973'
+  JNI_LIBS: plugins/native-agent/android/src/main/jniLibs
+  ABIS: ${{ inputs.abis || 'arm64-v8a armeabi-v7a x86_64 x86' }}
+  MODE: ${{ inputs.source_mode || 'repo' }}
+  SOURCE_REF: ${{ inputs.source_ref || 'v0.5.2' }}
+  SOURCE_URL: ${{ inputs.source_url || '' }}
+  ASSET_TAG: ${{ inputs.asset_tag || 'ffi-source' }}
+  ASSET_PATTERN: ${{ inputs.asset_pattern || 'native-agent-ffi-src-*.tar.gz' }}
+  CARGO_FEATURES: ${{ inputs.cargo_features || '' }}
+
+jobs:
+  # ── 1. get the crate source into the repository ───────────────────────────
+  resolve-source:
+    name: Resolve and vendor FFI source (${{ inputs.source_mode || 'repo' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      sha: ${{ steps.commit.outputs.sha || steps.head.outputs.sha }}
+      had_source: ${{ steps.check.outputs.had_source }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref_name }}
+
+      - name: Report current state
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f plugins/native-agent/rust/native-agent-ffi/Cargo.toml ]; then
+            echo "had_source=true" >> "$GITHUB_OUTPUT"
+            echo "The crate is already vendored in this repository."
+            grep -E '^[[:space:]]*(name|version)[[:space:]]*=' plugins/native-agent/rust/native-agent-ffi/Cargo.toml | head -2
+          else
+            echo "had_source=false" >> "$GITHUB_OUTPUT"
+            echo "No vendored crate yet."
+          fi
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch the crate source (Actions-only path)
+        if: ${{ steps.check.outputs.had_source != 'true' }}
+        shell: bash
+        env:
+          FFI_SOURCE_TOKEN: ${{ secrets.FFI_SOURCE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          args=(--mode "$MODE")
+          case "$MODE" in
+            public-upstream) args+=(--ref "$SOURCE_REF") ;;
+            git)             args+=(--url "$SOURCE_URL"); [ -n "$SOURCE_REF" ] && args+=(--ref "$SOURCE_REF") ;;
+            release-asset)   args+=(--tag "$ASSET_TAG" --asset-pattern "$ASSET_PATTERN" --repo "$GITHUB_REPOSITORY")
+                             [ -n "$SOURCE_URL" ] && args+=(--asset-url "$SOURCE_URL") ;;
+            repo)            echo "::error::source_mode=repo but nothing is vendored. Pick public-upstream / release-asset / git."; exit 1 ;;
+          esac
+          tools/agent-ffi/resolve-ffi-source.sh "${args[@]}"
+          echo "--- vendored crate ---"
+          find plugins/native-agent/rust/native-agent-ffi -maxdepth 2 -type f | sort | head -40
+
+      - name: Commit the vendored source
+        id: commit
+        if: ${{ inputs.commit_source != false && steps.check.outputs.had_source != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A plugins/native-agent/rust plugins/native-agent/.gitmodules* 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "Nothing to commit (source already up to date)."
+          else
+            git commit -m "chore(native-agent): vendor FFI source ($MODE ${SOURCE_REF})"
+            git push origin HEAD:"${{ github.ref_name }}"
+            echo "Source committed: $(git rev-parse HEAD)"
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Head sha (no commit path)
+        id: head
+        if: ${{ inputs.commit_source == false || steps.check.outputs.had_source == 'true' }}
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  # ── 2. build and verify every ABI ─────────────────────────────────────────
+  build-slices:
+    name: Build and verify .so slices
+    needs: resolve-source
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout (with the freshly vendored source)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-source.outputs.sha }}
+
+      - name: Set up Rust with the four Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugins/native-agent/rust/native-agent-ffi
+
+      - name: Install Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMGR="$(find "$SDK/cmdline-tools" -maxdepth 3 -name sdkmanager -type f | sort -V | tail -n1 || true)"
+          if [ -n "$SDKMGR" ]; then
+            yes | "$SDKMGR" --licenses >/dev/null 2>&1 || true
+            "$SDKMGR" --install "ndk;${NDK_VERSION}" >/dev/null
+          fi
+          NDK="$SDK/ndk/${NDK_VERSION}"
+          test -d "$NDK" || NDK="$(find "$SDK/ndk" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -n1)"
+          test -d "$NDK" || { echo "No Android NDK available on this runner." >&2; exit 1; }
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "Using NDK: $NDK"
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build every ABI
+        id: build
+        shell: bash
+        env:
+          BEST_EFFORT: ${{ inputs.best_effort }}
+          ALLOW_MISMATCH: ${{ inputs.allow_binding_mismatch }}
+        run: |
+          set -euo pipefail
+          args=(--abis "$ABIS")
+          [ "${BEST_EFFORT:-true}" != "false" ] && args+=(--best-effort)
+          [ "${ALLOW_MISMATCH:-false}" != "true" ] && args+=(--require-binding-match)
+          if [ -n "${CARGO_FEATURES:-}" ]; then
+            # shellcheck disable=SC2206
+            args+=($CARGO_FEATURES)
+          fi
+          echo "build-android-all-abis.sh ${args[*]}"
+          tools/agent-ffi/build-android-all-abis.sh "${args[@]}"
+          echo "built=$ABIS" >> "$GITHUB_OUTPUT"
+
+      - name: Verify ABI coverage and slice integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools/agent-ffi/verify-abis.sh --strict --jni "$JNI_LIBS"
+          for abi in $ABIS; do
+            so="$JNI_LIBS/$abi/libnative_agent_ffi.so"
+            [ -f "$so" ] || { echo "::error::$abi slice missing"; exit 1; }
+            align=()
+            [ "$abi" = "arm64-v8a" ] && align+=(--require-page-align 16384)
+            python3 tools/agent-ffi/elfcheck.py --expect-abi "$abi" "${align[@]}" \
+              --require-symbol ffi_native_agent_ffi_uniffi_contract_version "$so"
+          done
+          cat "$JNI_LIBS/abi-manifest.json"
+
+      - name: Upload .so slices
+        uses: actions/upload-artifact@v6
+        with:
+          name: native-agent-ffi-jniLibs-${{ github.sha }}
+          path: ${{ env.JNI_LIBS }}/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Commit rebuilt slices back
+        if: ${{ inputs.commit_slices != false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A "$JNI_LIBS"
+          if git diff --cached --quiet; then
+            echo "Slices unchanged — nothing to commit."
+            exit 0
+          fi
+          git commit -m "build(native-agent): FFI slices for [${ABIS}]"
+          git push origin HEAD:"${{ github.ref_name }}"
+
+  # ── 3. optional: prove the APK really carries every ABI ───────────────────
+  packaged-apk:
+    name: Build APK and assert all ABIs inside
+    needs: [resolve-source, build-slices]
+    if: ${{ inputs.build_apk == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-source.outputs.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22.x'
+          cache: npm
+          package-manager-cache: false
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install locked JavaScript dependencies
+        run: npm ci
+
+      - name: Download freshly built slices into the plugin
+        uses: actions/download-artifact@v6
+        with:
+          name: native-agent-ffi-jniLibs-${{ github.sha }}
+          path: ${{ env.JNI_LIBS }}
+
+      - name: Ensure Gradle wrapper is executable
+        run: chmod +x android/gradlew
+
+      - name: Stage trusted UI and sync native projects
+        run: npm run ci:android
+
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew --no-daemon --max-workers=2 assembleDebug
+
+      - name: Assert the APK really carries every ABI
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="$(find android/app/build/outputs/apk/debug -name '*.apk' | head -n1)"
+          test -n "$apk"
+          tools/agent-ffi/verify-abis.sh --strict --apk "$apk"
+          node tools/agent-ffi/check-native-abis.mjs --strict --apk "$apk"
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: native-agent-ffi-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14

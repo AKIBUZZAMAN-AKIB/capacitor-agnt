@@ -5,18 +5,19 @@ import type { NativeAgentPlugin } from './definitions'
 const ERR = 'NativeAgent is only available on native platforms.'
 
 class NativeAgentWeb extends WebPlugin implements NativeAgentPlugin {
+  async checkAvailability(): Promise<any> {
+    // Web target: there is no native library, but the probe contract is
+    // "resolve, never reject" so UI code can branch on `available`.
+    return { abi: 'web', is64Bit: false, available: false, reason: ERR, engineGeneration: 'web' }
+  }
   async initWorkspace(): Promise<void> { throw this.unavailable(ERR) }
   async initialize(): Promise<void> { throw this.unavailable(ERR) }
-  async checkAvailability(): Promise<any> { throw this.unavailable(ERR) }
-  async scheduleBackgroundWakes(): Promise<any> { throw this.unavailable(ERR) }
-  async cancelBackgroundWakes(): Promise<any> { throw this.unavailable(ERR) }
   async sendMessage(): Promise<any> { throw this.unavailable(ERR) }
   async followUp(): Promise<void> { throw this.unavailable(ERR) }
   async abort(): Promise<void> { throw this.unavailable(ERR) }
   async steer(): Promise<void> { throw this.unavailable(ERR) }
   async respondToApproval(): Promise<void> { throw this.unavailable(ERR) }
   async respondToMcpTool(): Promise<void> { throw this.unavailable(ERR) }
-  async setMcpTools(): Promise<any> { throw this.unavailable(ERR) }
   async getAuthToken(): Promise<any> { throw this.unavailable(ERR) }
   async setAuthKey(): Promise<void> { throw this.unavailable(ERR) }
   async deleteAuth(): Promise<void> { throw this.unavailable(ERR) }
@@ -25,7 +26,7 @@ class NativeAgentWeb extends WebPlugin implements NativeAgentPlugin {
   async exchangeOAuthCode(): Promise<any> { throw this.unavailable(ERR) }
   async listSessions(): Promise<any> { throw this.unavailable(ERR) }
   async loadSession(): Promise<any> { throw this.unavailable(ERR) }
-  async resumeSession(): Promise<any> { throw this.unavailable(ERR) }
+  async resumeSession(): Promise<void> { throw this.unavailable(ERR) }
   async clearSession(): Promise<void> { throw this.unavailable(ERR) }
   async addCronJob(): Promise<any> { throw this.unavailable(ERR) }
   async updateCronJob(): Promise<void> { throw this.unavailable(ERR) }
@@ -33,7 +34,6 @@ class NativeAgentWeb extends WebPlugin implements NativeAgentPlugin {
   async listCronJobs(): Promise<any> { throw this.unavailable(ERR) }
   async runCronJob(): Promise<void> { throw this.unavailable(ERR) }
   async listCronRuns(): Promise<any> { throw this.unavailable(ERR) }
-  async loadSurfacedMessages(): Promise<any> { throw this.unavailable(ERR) }
   async handleWake(): Promise<void> { throw this.unavailable(ERR) }
   async getSchedulerConfig(): Promise<any> { throw this.unavailable(ERR) }
   async setSchedulerConfig(): Promise<void> { throw this.unavailable(ERR) }

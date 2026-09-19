@@ -74,7 +74,26 @@ npm run native:sync
 
 Generated `.nativekit/staged-www/`, `web-dist/`, `android/app/build/` বা Xcode build output source হিসেবে edit করবেন না।
 
-## Framework source mode
+## সব Android ABI (৩২-bit ফোন সহ) সাপোর্ট — pino করা প্রজন্ম: `0.5.2`
+
+`plugins/native-agent` এখন **পাবলিক upstream tag `v0.5.2`**-এ পিন করা। কারণ ওই tag-এই একমাত্র Rust ক্রেট সোর্স (`libnative_agent_ffi.so`-র সোর্স, MIT) repo-তে commit করা আছে — তাই **চারটি ABI-র বিল্ড এখন যে কেউ, যেকোনো সময়, GitHub Actions থেকে করতে পারে**, কারও private GitLab বা secret ছাড়াই।
+
+আগের সমস্যা (এখন ইতিহাস): শুধু `arm64-v8a` স্লাইস থাকায় `armeabi-v7a` (32-bit) ফোন ও x86/x86_64 এমুলেটরে `checkAvailability()` → `available:false` আসত।
+
+```bash
+npm run check:abis                                     # কোন ABI-তে ইঞ্জিন আছে/নেই
+npm run ffi:build:android                              # ৪ ABI .so (ক্রেট ভেন্ডর করা আছে)
+npm run ffi:verify -- --strict --apk app-debug.apk     # প্যাকেজের ভেতরেও যাচাই
+```
+
+**এক বাটনেই (Actions):** “Native agent FFI — source, build, verify (Actions only)” → `source_mode=repo`, `commit_slices=✅`, `build_apk=✅` → বিল্ড → ELF+binding যাচাই → `.so` commit → APK artifact।
+
+সম্পূর্ণ বিবরণ:
+- [এই প্রজন্মে পিন করার রিপোর্ট ও ব্যাকপোর্ট তালিকা](./docs/AGENT-ENGINE-0.5.2-BACKPORT.bn.md)
+- [আবি বিল্ড টুলকিট](./tools/agent-ffi/README.bn.md)
+- [কেন 0.9.x সোর্স পাবলিক কোথাও নেই (৯ চেক)](./docs/research/FFI-SOURCE-AVAILABILITY.bn.md)
+
+## Framework source mode## Framework source mode
 
 `app.config.json`:
 

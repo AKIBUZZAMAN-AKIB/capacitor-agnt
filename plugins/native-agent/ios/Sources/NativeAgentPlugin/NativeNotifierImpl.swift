@@ -19,21 +19,7 @@ public final class NativeNotifierImpl: NativeNotifier {
             content: content,
             trigger: nil
         )
-        // Log delivery failures instead of discarding them silently (the old
-        // fire-and-forget hid permission denials and quota errors completely).
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error {
-                NSLog("[NativeNotifierImpl] notification \(identifier) failed: \(error.localizedDescription)")
-            }
-        }
-
-        // JSON result for parity with the Android notifier (the old iOS side
-        // returned a bare UUID string, so Rust-side consumers saw two shapes).
-        if let data = try? JSONSerialization.data(
-            withJSONObject: ["notificationId": identifier, "dataJson": dataJson]
-        ), let json = String(data: data, encoding: .utf8) {
-            return json
-        }
+        UNUserNotificationCenter.current().add(request)
         return identifier
     }
 }

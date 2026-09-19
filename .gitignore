@@ -18,3 +18,5 @@ ios/App/build/
 *.mobileprovision
 *.jks
 *.keystore
+
+.nativekit-backups/

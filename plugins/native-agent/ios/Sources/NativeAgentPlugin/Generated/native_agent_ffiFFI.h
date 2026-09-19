@@ -50,9 +50,9 @@ typedef void (*UniffiRustFutureContinuationCallback)(uint64_t, int8_t
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_DROPPED_CALLBACK
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_DROPPED_CALLBACK
-typedef void (*UniffiForeignFutureDroppedCallback)(uint64_t
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_FREE
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_FREE
+typedef void (*UniffiForeignFutureFree)(uint64_t
     );
 
 #endif
@@ -62,226 +62,192 @@ typedef void (*UniffiCallbackInterfaceFree)(uint64_t
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLONE
-#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLONE
-typedef uint64_t (*UniffiCallbackInterfaceClone)(uint64_t
-    );
-
-#endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_DROPPED_CALLBACK_STRUCT
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_DROPPED_CALLBACK_STRUCT
-typedef struct UniffiForeignFutureDroppedCallbackStruct {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE
+typedef struct UniffiForeignFuture {
     uint64_t handle;
-    UniffiForeignFutureDroppedCallback _Nonnull free;
-} UniffiForeignFutureDroppedCallbackStruct;
+    UniffiForeignFutureFree _Nonnull free;
+} UniffiForeignFuture;
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U8
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U8
-typedef struct UniffiForeignFutureResultU8 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U8
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U8
+typedef struct UniffiForeignFutureStructU8 {
     uint8_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureResultU8;
+} UniffiForeignFutureStructU8;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U8
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U8
-typedef void (*UniffiForeignFutureCompleteU8)(uint64_t, UniffiForeignFutureResultU8
+typedef void (*UniffiForeignFutureCompleteU8)(uint64_t, UniffiForeignFutureStructU8
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I8
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I8
-typedef struct UniffiForeignFutureResultI8 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I8
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I8
+typedef struct UniffiForeignFutureStructI8 {
     int8_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureResultI8;
+} UniffiForeignFutureStructI8;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I8
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I8
-typedef void (*UniffiForeignFutureCompleteI8)(uint64_t, UniffiForeignFutureResultI8
+typedef void (*UniffiForeignFutureCompleteI8)(uint64_t, UniffiForeignFutureStructI8
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U16
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U16
-typedef struct UniffiForeignFutureResultU16 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U16
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U16
+typedef struct UniffiForeignFutureStructU16 {
     uint16_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureResultU16;
+} UniffiForeignFutureStructU16;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U16
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U16
-typedef void (*UniffiForeignFutureCompleteU16)(uint64_t, UniffiForeignFutureResultU16
+typedef void (*UniffiForeignFutureCompleteU16)(uint64_t, UniffiForeignFutureStructU16
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I16
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I16
-typedef struct UniffiForeignFutureResultI16 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I16
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I16
+typedef struct UniffiForeignFutureStructI16 {
     int16_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureResultI16;
+} UniffiForeignFutureStructI16;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I16
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I16
-typedef void (*UniffiForeignFutureCompleteI16)(uint64_t, UniffiForeignFutureResultI16
+typedef void (*UniffiForeignFutureCompleteI16)(uint64_t, UniffiForeignFutureStructI16
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U32
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U32
-typedef struct UniffiForeignFutureResultU32 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U32
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U32
+typedef struct UniffiForeignFutureStructU32 {
     uint32_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureResultU32;
+} UniffiForeignFutureStructU32;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U32
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U32
-typedef void (*UniffiForeignFutureCompleteU32)(uint64_t, UniffiForeignFutureResultU32
+typedef void (*UniffiForeignFutureCompleteU32)(uint64_t, UniffiForeignFutureStructU32
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I32
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I32
-typedef struct UniffiForeignFutureResultI32 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I32
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I32
+typedef struct UniffiForeignFutureStructI32 {
     int32_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureResultI32;
+} UniffiForeignFutureStructI32;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I32
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I32
-typedef void (*UniffiForeignFutureCompleteI32)(uint64_t, UniffiForeignFutureResultI32
+typedef void (*UniffiForeignFutureCompleteI32)(uint64_t, UniffiForeignFutureStructI32
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U64
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_U64
-typedef struct UniffiForeignFutureResultU64 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U64
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_U64
+typedef struct UniffiForeignFutureStructU64 {
     uint64_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureResultU64;
+} UniffiForeignFutureStructU64;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U64
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U64
-typedef void (*UniffiForeignFutureCompleteU64)(uint64_t, UniffiForeignFutureResultU64
+typedef void (*UniffiForeignFutureCompleteU64)(uint64_t, UniffiForeignFutureStructU64
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I64
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_I64
-typedef struct UniffiForeignFutureResultI64 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I64
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_I64
+typedef struct UniffiForeignFutureStructI64 {
     int64_t returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureResultI64;
+} UniffiForeignFutureStructI64;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I64
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I64
-typedef void (*UniffiForeignFutureCompleteI64)(uint64_t, UniffiForeignFutureResultI64
+typedef void (*UniffiForeignFutureCompleteI64)(uint64_t, UniffiForeignFutureStructI64
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_F32
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_F32
-typedef struct UniffiForeignFutureResultF32 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_F32
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_F32
+typedef struct UniffiForeignFutureStructF32 {
     float returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureResultF32;
+} UniffiForeignFutureStructF32;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_F32
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_F32
-typedef void (*UniffiForeignFutureCompleteF32)(uint64_t, UniffiForeignFutureResultF32
+typedef void (*UniffiForeignFutureCompleteF32)(uint64_t, UniffiForeignFutureStructF32
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_F64
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_F64
-typedef struct UniffiForeignFutureResultF64 {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_F64
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_F64
+typedef struct UniffiForeignFutureStructF64 {
     double returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureResultF64;
+} UniffiForeignFutureStructF64;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_F64
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_F64
-typedef void (*UniffiForeignFutureCompleteF64)(uint64_t, UniffiForeignFutureResultF64
+typedef void (*UniffiForeignFutureCompleteF64)(uint64_t, UniffiForeignFutureStructF64
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_RUST_BUFFER
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_RUST_BUFFER
-typedef struct UniffiForeignFutureResultRustBuffer {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_POINTER
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_POINTER
+typedef struct UniffiForeignFutureStructPointer {
+    void*_Nonnull returnValue;
+    RustCallStatus callStatus;
+} UniffiForeignFutureStructPointer;
+
+#endif
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_POINTER
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_POINTER
+typedef void (*UniffiForeignFutureCompletePointer)(uint64_t, UniffiForeignFutureStructPointer
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_RUST_BUFFER
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_RUST_BUFFER
+typedef struct UniffiForeignFutureStructRustBuffer {
     RustBuffer returnValue;
     RustCallStatus callStatus;
-} UniffiForeignFutureResultRustBuffer;
+} UniffiForeignFutureStructRustBuffer;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_RUST_BUFFER
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_RUST_BUFFER
-typedef void (*UniffiForeignFutureCompleteRustBuffer)(uint64_t, UniffiForeignFutureResultRustBuffer
+typedef void (*UniffiForeignFutureCompleteRustBuffer)(uint64_t, UniffiForeignFutureStructRustBuffer
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_VOID
-#define UNIFFI_FFIDEF_FOREIGN_FUTURE_RESULT_VOID
-typedef struct UniffiForeignFutureResultVoid {
+#ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_VOID
+#define UNIFFI_FFIDEF_FOREIGN_FUTURE_STRUCT_VOID
+typedef struct UniffiForeignFutureStructVoid {
     RustCallStatus callStatus;
-} UniffiForeignFutureResultVoid;
+} UniffiForeignFutureStructVoid;
 
 #endif
 #ifndef UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_VOID
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_VOID
-typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureResultVoid
-    );
-
-#endif
-#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_GOVERNANCE_PROVIDER_METHOD0
-#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_GOVERNANCE_PROVIDER_METHOD0
-typedef void (*UniffiCallbackInterfaceGovernanceProviderMethod0)(uint64_t, RustBuffer, RustBuffer, RustBuffer* _Nonnull, 
-        RustCallStatus *_Nonnull uniffiCallStatus
-    );
-
-#endif
-#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_GOVERNANCE_PROVIDER_METHOD1
-#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_GOVERNANCE_PROVIDER_METHOD1
-typedef void (*UniffiCallbackInterfaceGovernanceProviderMethod1)(uint64_t, RustBuffer, RustBuffer, RustBuffer, RustBuffer* _Nonnull, 
-        RustCallStatus *_Nonnull uniffiCallStatus
-    );
-
-#endif
-#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_GOVERNANCE_PROVIDER_METHOD2
-#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_GOVERNANCE_PROVIDER_METHOD2
-typedef void (*UniffiCallbackInterfaceGovernanceProviderMethod2)(uint64_t, RustBuffer, RustBuffer, RustBuffer, RustBuffer, void* _Nonnull, 
-        RustCallStatus *_Nonnull uniffiCallStatus
-    );
-
-#endif
-#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_GOVERNANCE_PROVIDER_METHOD3
-#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_GOVERNANCE_PROVIDER_METHOD3
-typedef void (*UniffiCallbackInterfaceGovernanceProviderMethod3)(uint64_t, RustBuffer, RustBuffer, RustBuffer* _Nonnull, 
-        RustCallStatus *_Nonnull uniffiCallStatus
-    );
-
-#endif
-#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_GOVERNANCE_PROVIDER_METHOD4
-#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_GOVERNANCE_PROVIDER_METHOD4
-typedef void (*UniffiCallbackInterfaceGovernanceProviderMethod4)(uint64_t, void* _Nonnull, 
-        RustCallStatus *_Nonnull uniffiCallStatus
-    );
-
-#endif
-#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_GOVERNANCE_PROVIDER_METHOD5
-#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_GOVERNANCE_PROVIDER_METHOD5
-typedef void (*UniffiCallbackInterfaceGovernanceProviderMethod5)(uint64_t, RustBuffer, uint32_t, uint32_t, void* _Nonnull, 
-        RustCallStatus *_Nonnull uniffiCallStatus
+typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureStructVoid
     );
 
 #endif
@@ -334,378 +300,277 @@ typedef void (*UniffiCallbackInterfaceNativeNotifierMethod0)(uint64_t, RustBuffe
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_AUTH_PROFILE_STORE_METHOD0
-#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_AUTH_PROFILE_STORE_METHOD0
-typedef void (*UniffiCallbackInterfaceAuthProfileStoreMethod0)(uint64_t, RustBuffer* _Nonnull, 
-        RustCallStatus *_Nonnull uniffiCallStatus
-    );
-
-#endif
-#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_AUTH_PROFILE_STORE_METHOD1
-#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_AUTH_PROFILE_STORE_METHOD1
-typedef void (*UniffiCallbackInterfaceAuthProfileStoreMethod1)(uint64_t, RustBuffer, void* _Nonnull, 
-        RustCallStatus *_Nonnull uniffiCallStatus
-    );
-
-#endif
-#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_GOVERNANCE_PROVIDER
-#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_GOVERNANCE_PROVIDER
-typedef struct UniffiVTableCallbackInterfaceGovernanceProvider {
-    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
-    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
-    UniffiCallbackInterfaceGovernanceProviderMethod0 _Nonnull checkLoop;
-    UniffiCallbackInterfaceGovernanceProviderMethod1 _Nonnull recordOutcome;
-    UniffiCallbackInterfaceGovernanceProviderMethod2 _Nonnull recordAudit;
-    UniffiCallbackInterfaceGovernanceProviderMethod3 _Nonnull checkSink;
-    UniffiCallbackInterfaceGovernanceProviderMethod4 _Nonnull reset;
-    UniffiCallbackInterfaceGovernanceProviderMethod5 _Nonnull recordUsage;
-} UniffiVTableCallbackInterfaceGovernanceProvider;
-
-#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_MEMORY_PROVIDER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_MEMORY_PROVIDER
 typedef struct UniffiVTableCallbackInterfaceMemoryProvider {
-    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
-    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
     UniffiCallbackInterfaceMemoryProviderMethod0 _Nonnull store;
     UniffiCallbackInterfaceMemoryProviderMethod1 _Nonnull recall;
     UniffiCallbackInterfaceMemoryProviderMethod2 _Nonnull forget;
     UniffiCallbackInterfaceMemoryProviderMethod3 _Nonnull search;
     UniffiCallbackInterfaceMemoryProviderMethod4 _Nonnull list;
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
 } UniffiVTableCallbackInterfaceMemoryProvider;
 
 #endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_NATIVE_EVENT_CALLBACK
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_NATIVE_EVENT_CALLBACK
 typedef struct UniffiVTableCallbackInterfaceNativeEventCallback {
-    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
-    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
     UniffiCallbackInterfaceNativeEventCallbackMethod0 _Nonnull onEvent;
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
 } UniffiVTableCallbackInterfaceNativeEventCallback;
 
 #endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_NATIVE_NOTIFIER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_NATIVE_NOTIFIER
 typedef struct UniffiVTableCallbackInterfaceNativeNotifier {
-    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
-    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
     UniffiCallbackInterfaceNativeNotifierMethod0 _Nonnull sendNotification;
-} UniffiVTableCallbackInterfaceNativeNotifier;
-
-#endif
-#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_AUTH_PROFILE_STORE
-#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_AUTH_PROFILE_STORE
-typedef struct UniffiVTableCallbackInterfaceAuthProfileStore {
     UniffiCallbackInterfaceFree _Nonnull uniffiFree;
-    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
-    UniffiCallbackInterfaceAuthProfileStoreMethod0 _Nonnull load;
-    UniffiCallbackInterfaceAuthProfileStoreMethod1 _Nonnull save;
-} UniffiVTableCallbackInterfaceAuthProfileStore;
+} UniffiVTableCallbackInterfaceNativeNotifier;
 
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_CLONE_NATIVEAGENTHANDLE
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_CLONE_NATIVEAGENTHANDLE
-uint64_t uniffi_native_agent_ffi_fn_clone_nativeagenthandle(uint64_t handle, RustCallStatus *_Nonnull out_status
+void*_Nonnull uniffi_native_agent_ffi_fn_clone_nativeagenthandle(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_FREE_NATIVEAGENTHANDLE
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_FREE_NATIVEAGENTHANDLE
-void uniffi_native_agent_ffi_fn_free_nativeagenthandle(uint64_t handle, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_free_nativeagenthandle(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_CONSTRUCTOR_NATIVEAGENTHANDLE_NEW
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_CONSTRUCTOR_NATIVEAGENTHANDLE_NEW
-uint64_t uniffi_native_agent_ffi_fn_constructor_nativeagenthandle_new(RustBuffer config, RustCallStatus *_Nonnull out_status
+void*_Nonnull uniffi_native_agent_ffi_fn_constructor_nativeagenthandle_new(RustBuffer config, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_ABORT
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_ABORT
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_abort(uint64_t ptr, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_abort(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_ADD_CRON_JOB
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_ADD_CRON_JOB
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_add_cron_job(uint64_t ptr, RustBuffer input_json, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_add_cron_job(void*_Nonnull ptr, RustBuffer input_json, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_ADD_SKILL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_ADD_SKILL
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_add_skill(uint64_t ptr, RustBuffer input_json, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_add_skill(void*_Nonnull ptr, RustBuffer input_json, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_CLEAR_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_CLEAR_SESSION
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_clear_session(uint64_t ptr, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_clear_session(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_DELETE_AUTH
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_DELETE_AUTH
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_delete_auth(uint64_t ptr, RustBuffer provider, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_DISPATCH_AGENT_COMMAND_JSON
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_DISPATCH_AGENT_COMMAND_JSON
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_dispatch_agent_command_json(uint64_t ptr, RustBuffer json, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_delete_auth(void*_Nonnull ptr, RustBuffer provider, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_END_SKILL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_END_SKILL
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_end_skill(uint64_t ptr, RustBuffer skill_id, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_end_skill(void*_Nonnull ptr, RustBuffer skill_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_EXCHANGE_OAUTH_CODE
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_EXCHANGE_OAUTH_CODE
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_exchange_oauth_code(uint64_t ptr, RustBuffer token_url, RustBuffer body_json, RustBuffer content_type, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_exchange_oauth_code(void*_Nonnull ptr, RustBuffer token_url, RustBuffer body_json, RustBuffer content_type, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_FOLLOW_UP
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_FOLLOW_UP
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_follow_up(uint64_t ptr, RustBuffer prompt, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_follow_up(void*_Nonnull ptr, RustBuffer prompt, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_GET_AUTH_STATUS
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_GET_AUTH_STATUS
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_auth_status(uint64_t ptr, RustBuffer provider, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_auth_status(void*_Nonnull ptr, RustBuffer provider, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_GET_AUTH_TOKEN
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_GET_AUTH_TOKEN
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_auth_token(uint64_t ptr, RustBuffer provider, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_auth_token(void*_Nonnull ptr, RustBuffer provider, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_GET_HEARTBEAT_CONFIG
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_GET_HEARTBEAT_CONFIG
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_heartbeat_config(uint64_t ptr, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_heartbeat_config(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_GET_MODELS
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_GET_MODELS
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_models(uint64_t ptr, RustBuffer provider, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_models(void*_Nonnull ptr, RustBuffer provider, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_GET_SCHEDULER_CONFIG
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_GET_SCHEDULER_CONFIG
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_scheduler_config(uint64_t ptr, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_scheduler_config(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_HANDLE_WAKE
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_HANDLE_WAKE
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_handle_wake(uint64_t ptr, RustBuffer source, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_handle_wake(void*_Nonnull ptr, RustBuffer source, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_INVOKE_TOOL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_INVOKE_TOOL
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_invoke_tool(uint64_t ptr, RustBuffer tool_name, RustBuffer args_json, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_invoke_tool(void*_Nonnull ptr, RustBuffer tool_name, RustBuffer args_json, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_LIST_CRON_JOBS
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_LIST_CRON_JOBS
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_cron_jobs(uint64_t ptr, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_cron_jobs(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_LIST_CRON_RUNS
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_LIST_CRON_RUNS
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_cron_runs(uint64_t ptr, RustBuffer job_id, int64_t limit, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_LIST_NATIVE_TOOLS
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_LIST_NATIVE_TOOLS
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_native_tools(uint64_t ptr, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_cron_runs(void*_Nonnull ptr, RustBuffer job_id, int64_t limit, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_LIST_SESSIONS
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_LIST_SESSIONS
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_sessions(uint64_t ptr, RustBuffer agent_id, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_sessions(void*_Nonnull ptr, RustBuffer agent_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_LIST_SKILLS
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_LIST_SKILLS
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_skills(uint64_t ptr, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_LIST_TOOL_PERMISSIONS
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_LIST_TOOL_PERMISSIONS
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_tool_permissions(uint64_t ptr, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_skills(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_LOAD_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_LOAD_SESSION
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_load_session(uint64_t ptr, RustBuffer session_key, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_LOAD_SURFACED_MESSAGES
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_LOAD_SURFACED_MESSAGES
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_load_surfaced_messages(uint64_t ptr, int64_t limit, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_load_session(void*_Nonnull ptr, RustBuffer session_key, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_PERSIST_CONFIG
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_PERSIST_CONFIG
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_persist_config(uint64_t ptr, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_persist_config(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_REFRESH_TOKEN
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_REFRESH_TOKEN
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_refresh_token(uint64_t ptr, RustBuffer provider, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_refresh_token(void*_Nonnull ptr, RustBuffer provider, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_REMOVE_CRON_JOB
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_REMOVE_CRON_JOB
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_remove_cron_job(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_remove_cron_job(void*_Nonnull ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_REMOVE_SKILL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_REMOVE_SKILL
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_remove_skill(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_RESET_TOOL_PERMISSIONS
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_RESET_TOOL_PERMISSIONS
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_reset_tool_permissions(uint64_t ptr, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_remove_skill(void*_Nonnull ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_RESPOND_TO_APPROVAL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_RESPOND_TO_APPROVAL
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_respond_to_approval(uint64_t ptr, RustBuffer tool_call_id, int8_t approved, RustBuffer reason, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_respond_to_approval(void*_Nonnull ptr, RustBuffer tool_call_id, int8_t approved, RustBuffer reason, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_RESPOND_TO_CRON_APPROVAL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_RESPOND_TO_CRON_APPROVAL
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_respond_to_cron_approval(uint64_t ptr, RustBuffer _request_id, int8_t approved, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_respond_to_cron_approval(void*_Nonnull ptr, RustBuffer _request_id, int8_t approved, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_RESPOND_TO_MCP_TOOL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_RESPOND_TO_MCP_TOOL
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_respond_to_mcp_tool(uint64_t ptr, RustBuffer tool_call_id, RustBuffer result_json, int8_t is_error, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_respond_to_mcp_tool(void*_Nonnull ptr, RustBuffer tool_call_id, RustBuffer result_json, int8_t is_error, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_RESTART_MCP
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_RESTART_MCP
-uint32_t uniffi_native_agent_ffi_fn_method_nativeagenthandle_restart_mcp(uint64_t ptr, RustBuffer tools_json, RustCallStatus *_Nonnull out_status
+uint32_t uniffi_native_agent_ffi_fn_method_nativeagenthandle_restart_mcp(void*_Nonnull ptr, RustBuffer tools_json, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_RESUME_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_RESUME_SESSION
-int8_t uniffi_native_agent_ffi_fn_method_nativeagenthandle_resume_session(uint64_t ptr, RustBuffer session_key, RustBuffer agent_id, RustBuffer messages_json, RustBuffer provider, RustBuffer model, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_resume_session(void*_Nonnull ptr, RustBuffer session_key, RustBuffer agent_id, RustBuffer messages_json, RustBuffer provider, RustBuffer model, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_RUN_CRON_JOB
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_RUN_CRON_JOB
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_run_cron_job(uint64_t ptr, RustBuffer job_id, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SEED_TOOL_PERMISSIONS
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SEED_TOOL_PERMISSIONS
-uint32_t uniffi_native_agent_ffi_fn_method_nativeagenthandle_seed_tool_permissions(uint64_t ptr, RustBuffer defaults_json, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_run_cron_job(void*_Nonnull ptr, RustBuffer job_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SEND_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SEND_MESSAGE
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_send_message(uint64_t ptr, RustBuffer params, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SERIALIZE_AGENT_EVENT_JSON
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SERIALIZE_AGENT_EVENT_JSON
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_serialize_agent_event_json(uint64_t ptr, RustBuffer event_type, RustBuffer payload_json, RustBuffer session_key, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_send_message(void*_Nonnull ptr, RustBuffer params, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SET_AUTH_KEY
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SET_AUTH_KEY
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_auth_key(uint64_t ptr, RustBuffer key, RustBuffer provider, RustBuffer auth_type, RustBuffer refresh, RustBuffer expires_at, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_auth_key(void*_Nonnull ptr, RustBuffer key, RustBuffer provider, RustBuffer auth_type, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SET_EVENT_CALLBACK
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SET_EVENT_CALLBACK
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_event_callback(uint64_t ptr, uint64_t callback, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SET_GOVERNANCE_PROVIDER
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SET_GOVERNANCE_PROVIDER
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_governance_provider(uint64_t ptr, uint64_t provider, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_event_callback(void*_Nonnull ptr, uint64_t callback, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SET_HEARTBEAT_CONFIG
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SET_HEARTBEAT_CONFIG
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_heartbeat_config(uint64_t ptr, RustBuffer config_json, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SET_MCP_TOOLS
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SET_MCP_TOOLS
-uint32_t uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_mcp_tools(uint64_t ptr, RustBuffer tools_json, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_heartbeat_config(void*_Nonnull ptr, RustBuffer config_json, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SET_MEMORY_PROVIDER
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SET_MEMORY_PROVIDER
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_memory_provider(uint64_t ptr, uint64_t provider, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_memory_provider(void*_Nonnull ptr, uint64_t provider, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SET_NOTIFIER
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SET_NOTIFIER
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_notifier(uint64_t ptr, uint64_t notifier, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_notifier(void*_Nonnull ptr, uint64_t notifier, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SET_SCHEDULER_CONFIG
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SET_SCHEDULER_CONFIG
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_scheduler_config(uint64_t ptr, RustBuffer config_json, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SET_TOOL_PERMISSION
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_SET_TOOL_PERMISSION
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_tool_permission(uint64_t ptr, RustBuffer tool_name, RustBuffer permission, int8_t enabled, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_scheduler_config(void*_Nonnull ptr, RustBuffer config_json, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_START_MCP
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_START_MCP
-uint32_t uniffi_native_agent_ffi_fn_method_nativeagenthandle_start_mcp(uint64_t ptr, RustBuffer tools_json, RustCallStatus *_Nonnull out_status
+uint32_t uniffi_native_agent_ffi_fn_method_nativeagenthandle_start_mcp(void*_Nonnull ptr, RustBuffer tools_json, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_START_SKILL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_START_SKILL
-RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_start_skill(uint64_t ptr, RustBuffer skill_id, RustBuffer config_json, RustBuffer provider, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_native_agent_ffi_fn_method_nativeagenthandle_start_skill(void*_Nonnull ptr, RustBuffer skill_id, RustBuffer config_json, RustBuffer provider, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_STEER
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_STEER
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_steer(uint64_t ptr, RustBuffer text, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_steer(void*_Nonnull ptr, RustBuffer text, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_UPDATE_CRON_JOB
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_UPDATE_CRON_JOB
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_update_cron_job(uint64_t ptr, RustBuffer id, RustBuffer patch_json, RustCallStatus *_Nonnull out_status
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_update_cron_job(void*_Nonnull ptr, RustBuffer id, RustBuffer patch_json, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_UPDATE_SKILL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_METHOD_NATIVEAGENTHANDLE_UPDATE_SKILL
-void uniffi_native_agent_ffi_fn_method_nativeagenthandle_update_skill(uint64_t ptr, RustBuffer id, RustBuffer patch_json, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_INIT_CALLBACK_VTABLE_GOVERNANCEPROVIDER
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_INIT_CALLBACK_VTABLE_GOVERNANCEPROVIDER
-void uniffi_native_agent_ffi_fn_init_callback_vtable_governanceprovider(const UniffiVTableCallbackInterfaceGovernanceProvider* _Nonnull vtable
+void uniffi_native_agent_ffi_fn_method_nativeagenthandle_update_skill(void*_Nonnull ptr, RustBuffer id, RustBuffer patch_json, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_INIT_CALLBACK_VTABLE_MEMORYPROVIDER
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_INIT_CALLBACK_VTABLE_MEMORYPROVIDER
-void uniffi_native_agent_ffi_fn_init_callback_vtable_memoryprovider(const UniffiVTableCallbackInterfaceMemoryProvider* _Nonnull vtable
+void uniffi_native_agent_ffi_fn_init_callback_vtable_memoryprovider(UniffiVTableCallbackInterfaceMemoryProvider* _Nonnull vtable
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_INIT_CALLBACK_VTABLE_NATIVEEVENTCALLBACK
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_INIT_CALLBACK_VTABLE_NATIVEEVENTCALLBACK
-void uniffi_native_agent_ffi_fn_init_callback_vtable_nativeeventcallback(const UniffiVTableCallbackInterfaceNativeEventCallback* _Nonnull vtable
+void uniffi_native_agent_ffi_fn_init_callback_vtable_nativeeventcallback(UniffiVTableCallbackInterfaceNativeEventCallback* _Nonnull vtable
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_INIT_CALLBACK_VTABLE_NATIVENOTIFIER
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_INIT_CALLBACK_VTABLE_NATIVENOTIFIER
-void uniffi_native_agent_ffi_fn_init_callback_vtable_nativenotifier(const UniffiVTableCallbackInterfaceNativeNotifier* _Nonnull vtable
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_INIT_CALLBACK_VTABLE_AUTHPROFILESTORE
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_INIT_CALLBACK_VTABLE_AUTHPROFILESTORE
-void uniffi_native_agent_ffi_fn_init_callback_vtable_authprofilestore(const UniffiVTableCallbackInterfaceAuthProfileStore* _Nonnull vtable
+void uniffi_native_agent_ffi_fn_init_callback_vtable_nativenotifier(UniffiVTableCallbackInterfaceNativeNotifier* _Nonnull vtable
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_FUNC_CREATE_HANDLE_FROM_PERSISTED_CONFIG
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_FUNC_CREATE_HANDLE_FROM_PERSISTED_CONFIG
-uint64_t uniffi_native_agent_ffi_fn_func_create_handle_from_persisted_config(RustBuffer config_path, RustCallStatus *_Nonnull out_status
+void*_Nonnull uniffi_native_agent_ffi_fn_func_create_handle_from_persisted_config(RustBuffer config_path, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_FN_FUNC_INIT_WORKSPACE
@@ -933,6 +798,26 @@ void ffi_native_agent_ffi_rust_future_free_f64(uint64_t handle
 double ffi_native_agent_ffi_rust_future_complete_f64(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_FFI_NATIVE_AGENT_FFI_RUST_FUTURE_POLL_POINTER
+#define UNIFFI_FFIDEF_FFI_NATIVE_AGENT_FFI_RUST_FUTURE_POLL_POINTER
+void ffi_native_agent_ffi_rust_future_poll_pointer(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
+);
+#endif
+#ifndef UNIFFI_FFIDEF_FFI_NATIVE_AGENT_FFI_RUST_FUTURE_CANCEL_POINTER
+#define UNIFFI_FFIDEF_FFI_NATIVE_AGENT_FFI_RUST_FUTURE_CANCEL_POINTER
+void ffi_native_agent_ffi_rust_future_cancel_pointer(uint64_t handle
+);
+#endif
+#ifndef UNIFFI_FFIDEF_FFI_NATIVE_AGENT_FFI_RUST_FUTURE_FREE_POINTER
+#define UNIFFI_FFIDEF_FFI_NATIVE_AGENT_FFI_RUST_FUTURE_FREE_POINTER
+void ffi_native_agent_ffi_rust_future_free_pointer(uint64_t handle
+);
+#endif
+#ifndef UNIFFI_FFIDEF_FFI_NATIVE_AGENT_FFI_RUST_FUTURE_COMPLETE_POINTER
+#define UNIFFI_FFIDEF_FFI_NATIVE_AGENT_FFI_RUST_FUTURE_COMPLETE_POINTER
+void*_Nonnull ffi_native_agent_ffi_rust_future_complete_pointer(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_FFI_NATIVE_AGENT_FFI_RUST_FUTURE_POLL_RUST_BUFFER
 #define UNIFFI_FFIDEF_FFI_NATIVE_AGENT_FFI_RUST_FUTURE_POLL_RUST_BUFFER
 void ffi_native_agent_ffi_rust_future_poll_rust_buffer(uint64_t handle, UniffiRustFutureContinuationCallback _Nonnull callback, uint64_t callback_data
@@ -1015,12 +900,6 @@ uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_delete_auth(v
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_DISPATCH_AGENT_COMMAND_JSON
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_DISPATCH_AGENT_COMMAND_JSON
-uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_dispatch_agent_command_json(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_END_SKILL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_END_SKILL
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_end_skill(void
@@ -1093,12 +972,6 @@ uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_cron_run
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LIST_NATIVE_TOOLS
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LIST_NATIVE_TOOLS
-uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_native_tools(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LIST_SESSIONS
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LIST_SESSIONS
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_sessions(void
@@ -1111,21 +984,9 @@ uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_skills(v
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LIST_TOOL_PERMISSIONS
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LIST_TOOL_PERMISSIONS
-uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_tool_permissions(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LOAD_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LOAD_SESSION
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_load_session(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LOAD_SURFACED_MESSAGES
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LOAD_SURFACED_MESSAGES
-uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_load_surfaced_messages(void
     
 );
 #endif
@@ -1150,12 +1011,6 @@ uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_remove_cron_j
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_REMOVE_SKILL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_REMOVE_SKILL
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_remove_skill(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_RESET_TOOL_PERMISSIONS
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_RESET_TOOL_PERMISSIONS
-uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_reset_tool_permissions(void
     
 );
 #endif
@@ -1195,21 +1050,9 @@ uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_run_cron_job(
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SEED_TOOL_PERMISSIONS
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SEED_TOOL_PERMISSIONS
-uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_seed_tool_permissions(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SEND_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SEND_MESSAGE
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_send_message(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SERIALIZE_AGENT_EVENT_JSON
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SERIALIZE_AGENT_EVENT_JSON
-uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_serialize_agent_event_json(void
     
 );
 #endif
@@ -1225,21 +1068,9 @@ uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_event_cal
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_GOVERNANCE_PROVIDER
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_GOVERNANCE_PROVIDER
-uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_governance_provider(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_HEARTBEAT_CONFIG
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_HEARTBEAT_CONFIG
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_heartbeat_config(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_MCP_TOOLS
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_MCP_TOOLS
-uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_mcp_tools(void
     
 );
 #endif
@@ -1258,12 +1089,6 @@ uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_notifier(
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_SCHEDULER_CONFIG
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_SCHEDULER_CONFIG
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_scheduler_config(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_TOOL_PERMISSION
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_TOOL_PERMISSION
-uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_tool_permission(void
     
 );
 #endif
@@ -1300,42 +1125,6 @@ uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_update_skill(
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_CONSTRUCTOR_NATIVEAGENTHANDLE_NEW
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_CONSTRUCTOR_NATIVEAGENTHANDLE_NEW
 uint16_t uniffi_native_agent_ffi_checksum_constructor_nativeagenthandle_new(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_GOVERNANCEPROVIDER_CHECK_LOOP
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_GOVERNANCEPROVIDER_CHECK_LOOP
-uint16_t uniffi_native_agent_ffi_checksum_method_governanceprovider_check_loop(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_GOVERNANCEPROVIDER_RECORD_OUTCOME
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_GOVERNANCEPROVIDER_RECORD_OUTCOME
-uint16_t uniffi_native_agent_ffi_checksum_method_governanceprovider_record_outcome(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_GOVERNANCEPROVIDER_RECORD_AUDIT
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_GOVERNANCEPROVIDER_RECORD_AUDIT
-uint16_t uniffi_native_agent_ffi_checksum_method_governanceprovider_record_audit(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_GOVERNANCEPROVIDER_CHECK_SINK
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_GOVERNANCEPROVIDER_CHECK_SINK
-uint16_t uniffi_native_agent_ffi_checksum_method_governanceprovider_check_sink(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_GOVERNANCEPROVIDER_RESET
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_GOVERNANCEPROVIDER_RESET
-uint16_t uniffi_native_agent_ffi_checksum_method_governanceprovider_reset(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_GOVERNANCEPROVIDER_RECORD_USAGE
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_GOVERNANCEPROVIDER_RECORD_USAGE
-uint16_t uniffi_native_agent_ffi_checksum_method_governanceprovider_record_usage(void
     
 );
 #endif
@@ -1378,18 +1167,6 @@ uint16_t uniffi_native_agent_ffi_checksum_method_nativeeventcallback_on_event(vo
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVENOTIFIER_SEND_NOTIFICATION
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVENOTIFIER_SEND_NOTIFICATION
 uint16_t uniffi_native_agent_ffi_checksum_method_nativenotifier_send_notification(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_AUTHPROFILESTORE_LOAD
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_AUTHPROFILESTORE_LOAD
-uint16_t uniffi_native_agent_ffi_checksum_method_authprofilestore_load(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_AUTHPROFILESTORE_SAVE
-#define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_AUTHPROFILESTORE_SAVE
-uint16_t uniffi_native_agent_ffi_checksum_method_authprofilestore_save(void
     
 );
 #endif

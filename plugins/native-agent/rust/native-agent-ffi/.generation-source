@@ -1,0 +1,6 @@
+source=https://github.com/rogelioRuiz/capacitor-native-agent.git
+ref=v0.5.2
+upstreamCommit=7b42bb59fca8ac3496ddc76b9f4e6c3be6446b7b
+switchedAt=2026-09-19
+engineGeneration=0.5.2-public
+uniffiContractVersion=26

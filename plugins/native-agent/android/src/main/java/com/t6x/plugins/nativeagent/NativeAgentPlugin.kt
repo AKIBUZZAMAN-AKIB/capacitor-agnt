@@ -1,11 +1,15 @@
 package com.t6x.plugins.nativeagent
 
+import android.content.Context
 import android.os.Build
+import android.util.Log
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
+import com.sun.jna.Library
+import com.sun.jna.Native
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -13,45 +17,50 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import uniffi.native_agent_ffi.InitConfig
 import uniffi.native_agent_ffi.NativeAgentHandle
+import uniffi.native_agent_ffi.NativeEventCallback
+import uniffi.native_agent_ffi.SendMessageParams
 
 @CapacitorPlugin(name = "NativeAgent")
 class NativeAgentPlugin : Plugin() {
 
-    private val job = SupervisorJob()
-    private val scope = CoroutineScope(Dispatchers.IO + job)
+    private var handle: NativeAgentHandle? = null
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    companion object {
+        private const val TAG = "NativeAgentPlugin"
+        private const val STORAGE_FILE = "CapacitorStorage"
+        private const val CONFIG_PATH_KEY = "mobilecron:native-agent-config-path"
+
+        /** Which public upstream generation this module was pinned to. */
+        private const val ENGINE_GENERATION = "0.5.2-public"
+    }
 
     // ── Helper: wrap common pattern ────────────────────────────────────
 
     private fun withHandle(call: PluginCall, block: (NativeAgentHandle) -> Unit) {
-        if (!job.isActive) {
-            call.reject("NativeAgent plugin is shutting down — this call was dropped")
-            return
-        }
-        val h = NativeAgentRegistry.get() ?: return call.reject("NativeAgent not initialized — call initialize() first")
+        val h = handle ?: return call.reject("NativeAgent not initialized — call initialize() first")
         scope.launch {
             try {
                 block(h)
-            } catch (e: OutOfMemoryError) {
-                throw e
             } catch (t: Throwable) {
-                // Throwable, not Exception: UniFFI/JNA surface can throw
-                // Errors (e.g. UnsatisfiedLinkError on an ABI without the
-                // .so). Those must become a clean JS reject, not a crash —
-                // an uncaught Error would kill the scope and leave every
-                // subsequent JS promise hanging forever.
-                call.reject("${call.methodName} failed: ${t.message ?: t::class.java.simpleName}", t as? Exception)
+                // UnsatisfiedLinkError (missing .so for this ABI) is an Error, not an
+                // Exception: without catching Throwable it escapes the coroutine and
+                // kills the app. Backported crash-safety fix (0.9.x "C1").
+                if (t is OutOfMemoryError) throw t
+                call.reject("${call.methodName} failed: ${t.message ?: t::class.java.simpleName}", t)
             }
         }
     }
 
-    // ── Diagnostics ─────────────────────────────────────────────────────
+    // ── Diagnostics ────────────────────────────────────────────────────
+
+    /** JNA probe interface: we only care whether dlopen succeeds. */
+    private interface NativeProbeLib : Library
 
     /**
-     * Probes whether the native library is loadable on this device ABI.
-     * Safe to call before initialize(); never crashes — a missing
-     * libnative_agent_ffi.so for the current architecture (e.g. a 32-bit
-     * device when only arm64-v8a was shipped) resolves with
-     * `available: false` so the app can show a friendly message.
+     * Never rejects. Reports whether libnative_agent_ffi.so can be loaded on this
+     * device's ABI, so the UI can hide agent features instead of failing later.
+     * Backported from the 0.9.x plugin generation (it did not exist in 0.5.2).
      */
     @PluginMethod
     fun checkAvailability(call: PluginCall) {
@@ -59,21 +68,22 @@ class NativeAgentPlugin : Plugin() {
         val ret = JSObject()
         ret.put("abi", abi)
         ret.put("is64Bit", Build.SUPPORTED_64_BIT_ABIS.isNotEmpty())
+        ret.put("engineGeneration", ENGINE_GENERATION)
         try {
-            // Forces <clinit> of the JNA-registered FFI library. If the .so
-            // for this ABI is not in the package, Native.register throws
-            // UnsatisfiedLinkError here and nowhere else.
-            Class.forName("uniffi.native_agent_ffi.IntegrityCheckingUniffiLib")
+            // Same resolution uniffi uses when it loads its own bindings
+            // (UniffiLib -> loadIndirect(componentName = "native_agent_ffi")).
+            Native.load("native_agent_ffi", NativeProbeLib::class.java)
             ret.put("available", true)
             ret.put("reason", "")
         } catch (t: Throwable) {
+            if (t is OutOfMemoryError) throw t
             ret.put("available", false)
             ret.put("reason", "native library not loadable on ABI '$abi': ${t.message ?: t::class.java.simpleName}")
         }
         call.resolve(ret)
     }
 
-    // ── Lifecycle ───────────────────────────────────────────────────────
+    // ── Lifecycle ──────────────────────────────────────────────────────
 
     @PluginMethod
     fun initWorkspace(call: PluginCall) {
@@ -83,8 +93,6 @@ class NativeAgentPlugin : Plugin() {
             ?: return call.reject("workspacePath is required")
         val authProfilesPath = call.getString("authProfilesPath")
             ?: return call.reject("authProfilesPath is required")
-        val defaultProvider = call.getString("defaultProvider")
-        val defaultModel = call.getString("defaultModel")
 
         scope.launch {
             try {
@@ -93,15 +101,12 @@ class NativeAgentPlugin : Plugin() {
                         dbPath = resolvePath(dbPath),
                         workspacePath = resolvePath(workspacePath),
                         authProfilesPath = resolvePath(authProfilesPath),
-                        defaultProvider = defaultProvider,
-                        defaultModel = defaultModel,
                     )
                 )
                 call.resolve()
-            } catch (e: OutOfMemoryError) {
-                throw e
             } catch (t: Throwable) {
-                call.reject("initWorkspace failed: ${t.message ?: t::class.java.simpleName}", t as? Exception)
+                if (t is OutOfMemoryError) throw t
+                call.reject("initWorkspace failed: ${t.message ?: t::class.java.simpleName}", t)
             }
         }
     }
@@ -114,118 +119,66 @@ class NativeAgentPlugin : Plugin() {
             ?: return call.reject("workspacePath is required")
         val authProfilesPath = call.getString("authProfilesPath")
             ?: return call.reject("authProfilesPath is required")
-        val defaultProvider = call.getString("defaultProvider")
-        val defaultModel = call.getString("defaultModel")
 
         scope.launch {
             try {
+                val resolvedWorkspacePath = resolvePath(workspacePath)
                 val config = InitConfig(
                     dbPath = resolvePath(dbPath),
-                    workspacePath = resolvePath(workspacePath),
+                    workspacePath = resolvedWorkspacePath,
                     authProfilesPath = resolvePath(authProfilesPath),
-                    defaultProvider = defaultProvider,
-                    defaultModel = defaultModel,
                 )
-                // Process-wide singleton: re-initializing closes the previous
-                // handle explicitly (no GC-timing races, no double DB handles).
-                NativeAgentRegistry.initialize(
-                    context.applicationContext,
-                    config,
-                    object : NativeEventListener {
-                        override fun onEvent(eventType: String, payloadJson: String) {
-                            val data = JSObject()
-                            data.put("eventType", eventType)
-                            data.put("payloadJson", payloadJson)
-                            notifyListeners("nativeAgentEvent", data)
-                        }
-                    },
-                )
+                val h = NativeAgentHandle(config)
+                h.setEventCallback(object : NativeEventCallback {
+                    override fun onEvent(eventType: String, payloadJson: String) {
+                        val data = JSObject()
+                        data.put("eventType", eventType)
+                        data.put("payloadJson", payloadJson)
+                        notifyListeners("nativeAgentEvent", data)
+                    }
+                })
+                h.setNotifier(NativeNotifierImpl(context.applicationContext))
+                // Memory (LanceDB) is optional and its Kotlin class only exists when
+                // the host app also integrates capacitor-lancedb, so it is wired
+                // reflectively — no compile-time reference (0.9.x "C2" fix).
+                runCatching {
+                    val clazz = Class.forName("com.t6x.plugins.nativeagent.MemoryProviderImpl")
+                    val instance = clazz.getConstructor(Context::class.java).newInstance(context.applicationContext)
+                    val available = clazz.getMethod("isAvailable").invoke(instance) as? Boolean ?: false
+                    if (available) {
+                        h.setMemoryProvider(instance as uniffi.native_agent_ffi.MemoryProvider)
+                    }
+                }.onFailure { Log.w(TAG, "memory provider unavailable: ${it.message}") }
+                h.persistConfig()
+                handle = h
+                context
+                    .getSharedPreferences(STORAGE_FILE, android.content.Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(CONFIG_PATH_KEY, resolveConfigPath(resolvedWorkspacePath))
+                    .apply()
                 call.resolve()
-            } catch (e: OutOfMemoryError) {
-                throw e
             } catch (t: Throwable) {
-                val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown"
-                val linkError = t is java.lang.UnsatisfiedLinkError ||
-                    t.cause is java.lang.UnsatisfiedLinkError ||
-                    (t.message ?: "").contains("native_agent_ffi")
-                val msg = if (linkError) {
-                    "Failed to load the native library on ABI '$abi'. The package is missing " +
-                        "libnative_agent_ffi.so for this architecture — run scripts/build-android.sh " +
-                        "(builds arm64-v8a, armeabi-v7a, x86, x86_64) and rebuild the app."
-                } else {
-                    "Failed to initialize NativeAgent: ${t.message ?: t::class.java.simpleName}"
-                }
-                android.util.Log.w("NativeAgent", msg)
-                call.reject(msg, t as? Exception)
+                if (t is OutOfMemoryError) throw t
+                call.reject("Failed to initialize NativeAgent: ${t.message ?: t::class.java.simpleName}", t)
             }
         }
     }
 
-    // ── Background wakes (framework JobScheduler; no androidx) ─────────
-
-    @PluginMethod
-    fun scheduleBackgroundWakes(call: PluginCall) {
-        val intervalMinutes = call.getInt("intervalMinutes") ?: 30
-        val ret = JSObject()
-        if (!NativeAgentRegistry.isInitialized()) {
-            ret.put("jobScheduled", false)
-            ret.put("intervalMinutes", intervalMinutes)
-            ret.put("reason", "NativeAgent not initialized yet — call initialize() first so its config can be restored in the background")
-            call.resolve(ret)
-            return
-        }
-        try {
-            val result = NativeAgentSchedule.schedulePeriodicWakes(context.applicationContext, intervalMinutes)
-            ret.put("jobScheduled", true)
-            ret.put("intervalMinutes", result.effectiveIntervalMinutes)
-            call.resolve(ret)
-        } catch (t: Throwable) {
-            ret.put("jobScheduled", false)
-            ret.put("intervalMinutes", intervalMinutes)
-            ret.put("reason", t.message ?: "failed to schedule background wakes")
-            call.resolve(ret)
-        }
-    }
-
-    @PluginMethod
-    fun cancelBackgroundWakes(call: PluginCall) {
-        val ret = JSObject()
-        try {
-            ret.put("cancelled", NativeAgentSchedule.cancelWakes(context.applicationContext))
-        } catch (t: Throwable) {
-            ret.put("cancelled", false)
-        }
-        call.resolve(ret)
-    }
-
-    // ── Governance (native-to-native, not a @PluginMethod) ──────────
-
-    /**
-     * Register an optional governance provider for taint, audit, loop-guard, and cost tracking.
-     * Called by capacitor-agent-os at init time — not exposed to JavaScript.
-     */
-    fun registerGovernance(provider: uniffi.native_agent_ffi.GovernanceProvider) {
-        NativeAgentRegistry.get()?.setGovernanceProvider(provider)
-    }
-
-    // ── Agent ───────────────────────────────────────────────────────────
+    // ── Agent ──────────────────────────────────────────────────────────
 
     @PluginMethod
     fun sendMessage(call: PluginCall) = withHandle(call) { h ->
-        val sessionKey = call.getString("sessionKey") ?: return@withHandle call.reject("sessionKey is required")
-        trace("sendMessage sessionKey=$sessionKey")
-        val params = uniffi.native_agent_ffi.SendMessageParams(
+        val params = SendMessageParams(
             prompt = call.getString("prompt") ?: return@withHandle call.reject("prompt is required"),
-            sessionKey = sessionKey,
+            sessionKey = call.getString("sessionKey") ?: return@withHandle call.reject("sessionKey is required"),
             model = call.getString("model"),
             provider = call.getString("provider"),
             systemPrompt = call.getString("systemPrompt") ?: "",
             maxTurns = call.getInt("maxTurns")?.toUInt(),
-            skillAllowedToolsJson = call.getString("skillAllowedToolsJson"),
+            allowedToolsJson = call.getString("allowedToolsJson"),
             priorMessagesJson = call.getString("priorMessagesJson"),
         )
         val runId = h.sendMessage(params)
-        trace("sendMessage OK runId=$runId")
         val ret = JSObject()
         ret.put("runId", runId)
         call.resolve(ret)
@@ -233,10 +186,7 @@ class NativeAgentPlugin : Plugin() {
 
     @PluginMethod
     fun followUp(call: PluginCall) = withHandle(call) { h ->
-        val prompt = call.getString("prompt") ?: ""
-        trace("followUp prompt_len=${prompt.length}")
-        h.followUp(prompt)
-        trace("followUp OK")
+        h.followUp(call.getString("prompt") ?: "")
         call.resolve()
     }
 
@@ -252,7 +202,7 @@ class NativeAgentPlugin : Plugin() {
         call.resolve()
     }
 
-    // ── Approval gate ───────────────────────────────────────────────────
+    // ── Approval gate ──────────────────────────────────────────────────
 
     @PluginMethod
     fun respondToApproval(call: PluginCall) = withHandle(call) { h ->
@@ -272,15 +222,6 @@ class NativeAgentPlugin : Plugin() {
             call.getBoolean("isError") ?: false,
         )
         call.resolve()
-    }
-
-    @PluginMethod
-    fun setMcpTools(call: PluginCall) = withHandle(call) { h ->
-        val toolsJson = call.getString("toolsJson") ?: return@withHandle call.reject("toolsJson is required")
-        val count = h.setMcpTools(toolsJson).toInt()
-        val result = JSObject()
-        result.put("count", count)
-        call.resolve(result)
     }
 
     @PluginMethod
@@ -309,8 +250,6 @@ class NativeAgentPlugin : Plugin() {
             call.getString("key") ?: return@withHandle call.reject("key is required"),
             call.getString("provider") ?: "anthropic",
             call.getString("authType") ?: "api_key",
-            call.getString("refresh"),
-            if (call.hasOption("expiresAt")) call.getLong("expiresAt") else null,
         )
         call.resolve()
     }
@@ -354,10 +293,7 @@ class NativeAgentPlugin : Plugin() {
 
     @PluginMethod
     fun listSessions(call: PluginCall) = withHandle(call) { h ->
-        val agentId = call.getString("agentId") ?: "main"
-        trace("listSessions agentId=$agentId")
-        val json = h.listSessions(agentId)
-        trace("listSessions result_len=${json.length}")
+        val json = h.listSessions(call.getString("agentId") ?: "main")
         val ret = JSObject()
         ret.put("sessionsJson", json)
         call.resolve(ret)
@@ -366,9 +302,7 @@ class NativeAgentPlugin : Plugin() {
     @PluginMethod
     fun loadSession(call: PluginCall) = withHandle(call) { h ->
         val sessKey = call.getString("sessionKey") ?: return@withHandle call.reject("sessionKey is required")
-        trace("loadSession sessionKey=$sessKey")
         val json = h.loadSession(sessKey)
-        trace("loadSession result_len=${json.length}")
         val ret = JSObject()
         ret.put("sessionKey", sessKey)
         ret.put("messagesJson", json)
@@ -377,20 +311,14 @@ class NativeAgentPlugin : Plugin() {
 
     @PluginMethod
     fun resumeSession(call: PluginCall) = withHandle(call) { h ->
-        val sessKey = call.getString("sessionKey") ?: return@withHandle call.reject("sessionKey is required")
-        val agentId = call.getString("agentId") ?: "main"
-        trace("resumeSession sessionKey=$sessKey agentId=$agentId")
-        val wasInterrupted = h.resumeSession(
-            sessKey,
-            agentId,
+        h.resumeSession(
+            call.getString("sessionKey") ?: return@withHandle call.reject("sessionKey is required"),
+            call.getString("agentId") ?: "main",
             call.getString("messagesJson"),
             call.getString("provider"),
             call.getString("model"),
         )
-        trace("resumeSession OK wasInterrupted=$wasInterrupted")
-        val ret = JSObject()
-        ret.put("wasInterrupted", wasInterrupted)
-        call.resolve(ret)
+        call.resolve()
     }
 
     @PluginMethod
@@ -449,16 +377,6 @@ class NativeAgentPlugin : Plugin() {
     }
 
     @PluginMethod
-    fun loadSurfacedMessages(call: PluginCall) = withHandle(call) { h ->
-        val json = h.loadSurfacedMessages(
-            (call.getInt("limit") ?: 50).toLong(),
-        )
-        val ret = JSObject()
-        ret.put("messagesJson", json)
-        call.resolve(ret)
-    }
-
-    @PluginMethod
     fun handleWake(call: PluginCall) = withHandle(call) { h ->
         h.handleWake(call.getString("source") ?: "unknown")
         call.resolve()
@@ -507,7 +425,7 @@ class NativeAgentPlugin : Plugin() {
 
     @PluginMethod
     fun removeSkill(call: PluginCall) = withHandle(call) { h ->
-        h.removeSkill(call.getString("skillId") ?: return@withHandle call.reject("skillId is required"))
+        h.removeSkill(call.getString("id") ?: return@withHandle call.reject("id is required"))
         call.resolve()
     }
 
@@ -615,45 +533,22 @@ class NativeAgentPlugin : Plugin() {
     // ── Cleanup ───────────────────────────────────────────────────────
 
     override fun handleOnDestroy() {
-        // Cancel only THIS plugin instance's coroutines. The native handle is
-        // process-wide (see NativeAgentRegistry) on purpose: background jobs
-        // and other webview instances must keep working after one bridge is
-        // torn down. The handle is released by the next initialize() or when
-        // the process dies.
         scope.cancel()
+        handle = null
     }
 
-    // ── Path & logging helpers ─────────────────────────────────────────
-
-    /**
-     * Resolves `files://` URLs to absolute paths and makes sure the target
-     * (or its parent) exists — matches the iOS plugin behavior, which the
-     * old Android side was missing.
-     */
     private fun resolvePath(path: String): String {
-        val absolute = if (path.startsWith("files://")) {
+        return if (path.startsWith("files://")) {
             val rel = path.removePrefix("files://")
             "${context.filesDir.absolutePath}/$rel"
         } else {
             path
         }
-        val file = java.io.File(absolute)
-        if (file.extension.isEmpty()) {
-            // Looks like a directory (e.g. workspace root): create it.
-            file.mkdirs()
-        } else {
-            // Looks like a file (e.g. agent.db): create its parent.
-            file.parentFile?.mkdirs()
-        }
-        return absolute
     }
 
-    private fun trace(msg: String) {
-        if (DEBUG) android.util.Log.i("TRACE:kt", msg)
-    }
-
-    private companion object {
-        // TRACE logging leaks session keys into logcat; off by default.
-        const val DEBUG = false
+    private fun resolveConfigPath(workspacePath: String): String {
+        val workspace = java.io.File(workspacePath)
+        val parent = workspace.parentFile ?: workspace
+        return java.io.File(parent, ".native-agent-config.json").absolutePath
     }
 }

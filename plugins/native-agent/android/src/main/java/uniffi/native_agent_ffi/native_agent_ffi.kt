@@ -59,7 +59,7 @@ open class RustBuffer : Structure() {
     companion object {
         internal fun alloc(size: ULong = 0UL) = uniffiRustCall() { status ->
             // Note: need to convert the size to a `Long` value to make this work with JVM.
-            UniffiLib.ffi_native_agent_ffi_rustbuffer_alloc(size.toLong(), status)
+            UniffiLib.INSTANCE.ffi_native_agent_ffi_rustbuffer_alloc(size.toLong(), status)
         }.also {
             if(it.data == null) {
                throw RuntimeException("RustBuffer.alloc() returned null data pointer (size=${size})")
@@ -75,15 +75,49 @@ open class RustBuffer : Structure() {
         }
 
         internal fun free(buf: RustBuffer.ByValue) = uniffiRustCall() { status ->
-            UniffiLib.ffi_native_agent_ffi_rustbuffer_free(buf, status)
+            UniffiLib.INSTANCE.ffi_native_agent_ffi_rustbuffer_free(buf, status)
         }
     }
 
     @Suppress("TooGenericExceptionThrown")
     fun asByteBuffer() =
-        this.data?.getByteBuffer(0, this.len)?.also {
+        this.data?.getByteBuffer(0, this.len.toLong())?.also {
             it.order(ByteOrder.BIG_ENDIAN)
         }
+}
+
+/**
+ * The equivalent of the `*mut RustBuffer` type.
+ * Required for callbacks taking in an out pointer.
+ *
+ * Size is the sum of all values in the struct.
+ *
+ * @suppress
+ */
+class RustBufferByReference : ByReference(16) {
+    /**
+     * Set the pointed-to `RustBuffer` to the given value.
+     */
+    fun setValue(value: RustBuffer.ByValue) {
+        // NOTE: The offsets are as they are in the C-like struct.
+        val pointer = getPointer()
+        pointer.setLong(0, value.capacity)
+        pointer.setLong(8, value.len)
+        pointer.setPointer(16, value.data)
+    }
+
+    /**
+     * Get a `RustBuffer.ByValue` from this reference.
+     */
+    fun getValue(): RustBuffer.ByValue {
+        val pointer = getPointer()
+        val value = RustBuffer.ByValue()
+        value.writeField("capacity", pointer.getLong(0))
+        value.writeField("len", pointer.getLong(8))
+        value.writeField("data", pointer.getLong(16))
+
+        return value
+    }
 }
 
 // This is a helper for safely passing byte references into the rust code.
@@ -282,9 +316,8 @@ internal inline fun<T> uniffiTraitInterfaceCall(
     try {
         writeReturn(makeCall())
     } catch(e: kotlin.Exception) {
-        val err = try { e.stackTraceToString() } catch(_: Throwable) { "" }
         callStatus.code = UNIFFI_CALL_UNEXPECTED_ERROR
-        callStatus.error_buf = FfiConverterString.lower(err)
+        callStatus.error_buf = FfiConverterString.lower(e.toString())
     }
 }
 
@@ -301,39 +334,26 @@ internal inline fun<T, reified E: Throwable> uniffiTraitInterfaceCallWithError(
             callStatus.code = UNIFFI_CALL_ERROR
             callStatus.error_buf = lowerError(e)
         } else {
-            val err = try { e.stackTraceToString() } catch(_: Throwable) { "" }
             callStatus.code = UNIFFI_CALL_UNEXPECTED_ERROR
-            callStatus.error_buf = FfiConverterString.lower(err)
+            callStatus.error_buf = FfiConverterString.lower(e.toString())
         }
     }
 }
-// Initial value and increment amount for handles. 
-// These ensure that Kotlin-generated handles always have the lowest bit set
-private const val UNIFFI_HANDLEMAP_INITIAL = 1.toLong()
-private const val UNIFFI_HANDLEMAP_DELTA = 2.toLong()
-
 // Map handles to objects
 //
 // This is used pass an opaque 64-bit handle representing a foreign object to the Rust code.
 internal class UniffiHandleMap<T: Any> {
     private val map = ConcurrentHashMap<Long, T>()
-    // Start 
-    private val counter = java.util.concurrent.atomic.AtomicLong(UNIFFI_HANDLEMAP_INITIAL)
+    private val counter = java.util.concurrent.atomic.AtomicLong(0)
 
     val size: Int
         get() = map.size
 
     // Insert a new object into the handle map and get a handle for it
     fun insert(obj: T): Long {
-        val handle = counter.getAndAdd(UNIFFI_HANDLEMAP_DELTA)
+        val handle = counter.getAndAdd(1)
         map.put(handle, obj)
         return handle
-    }
-
-    // Clone a handle, creating a new one
-    fun clone(handle: Long): Long {
-        val obj = map.get(handle) ?: throw InternalException("UniffiHandleMap.clone: Invalid handle")
-        return insert(obj)
     }
 
     // Get an object from the handle map
@@ -358,278 +378,281 @@ private fun findLibraryName(componentName: String): String {
     return "native_agent_ffi"
 }
 
+private inline fun <reified Lib : Library> loadIndirect(
+    componentName: String
+): Lib {
+    return Native.load<Lib>(findLibraryName(componentName), Lib::class.java)
+}
+
 // Define FFI callback types
 internal interface UniffiRustFutureContinuationCallback : com.sun.jna.Callback {
     fun callback(`data`: Long,`pollResult`: Byte,)
 }
-internal interface UniffiForeignFutureDroppedCallback : com.sun.jna.Callback {
+internal interface UniffiForeignFutureFree : com.sun.jna.Callback {
     fun callback(`handle`: Long,)
 }
 internal interface UniffiCallbackInterfaceFree : com.sun.jna.Callback {
     fun callback(`handle`: Long,)
 }
-internal interface UniffiCallbackInterfaceClone : com.sun.jna.Callback {
-    fun callback(`handle`: Long,)
-    : Long
-}
 @Structure.FieldOrder("handle", "free")
-internal open class UniffiForeignFutureDroppedCallbackStruct(
+internal open class UniffiForeignFuture(
     @JvmField internal var `handle`: Long = 0.toLong(),
-    @JvmField internal var `free`: UniffiForeignFutureDroppedCallback? = null,
+    @JvmField internal var `free`: UniffiForeignFutureFree? = null,
 ) : Structure() {
     class UniffiByValue(
         `handle`: Long = 0.toLong(),
-        `free`: UniffiForeignFutureDroppedCallback? = null,
-    ): UniffiForeignFutureDroppedCallbackStruct(`handle`,`free`,), Structure.ByValue
+        `free`: UniffiForeignFutureFree? = null,
+    ): UniffiForeignFuture(`handle`,`free`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureDroppedCallbackStruct) {
+   internal fun uniffiSetValue(other: UniffiForeignFuture) {
         `handle` = other.`handle`
         `free` = other.`free`
     }
 
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureResultU8(
+internal open class UniffiForeignFutureStructU8(
     @JvmField internal var `returnValue`: Byte = 0.toByte(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Byte = 0.toByte(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureResultU8(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureStructU8(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureResultU8) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureStructU8) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteU8 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU8.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructU8.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureResultI8(
+internal open class UniffiForeignFutureStructI8(
     @JvmField internal var `returnValue`: Byte = 0.toByte(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Byte = 0.toByte(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureResultI8(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureStructI8(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureResultI8) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureStructI8) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteI8 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI8.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructI8.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureResultU16(
+internal open class UniffiForeignFutureStructU16(
     @JvmField internal var `returnValue`: Short = 0.toShort(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Short = 0.toShort(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureResultU16(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureStructU16(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureResultU16) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureStructU16) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteU16 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU16.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructU16.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureResultI16(
+internal open class UniffiForeignFutureStructI16(
     @JvmField internal var `returnValue`: Short = 0.toShort(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Short = 0.toShort(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureResultI16(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureStructI16(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureResultI16) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureStructI16) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteI16 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI16.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructI16.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureResultU32(
+internal open class UniffiForeignFutureStructU32(
     @JvmField internal var `returnValue`: Int = 0,
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Int = 0,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureResultU32(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureStructU32(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureResultU32) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureStructU32) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteU32 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU32.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructU32.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureResultI32(
+internal open class UniffiForeignFutureStructI32(
     @JvmField internal var `returnValue`: Int = 0,
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Int = 0,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureResultI32(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureStructI32(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureResultI32) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureStructI32) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteI32 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI32.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructI32.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureResultU64(
+internal open class UniffiForeignFutureStructU64(
     @JvmField internal var `returnValue`: Long = 0.toLong(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Long = 0.toLong(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureResultU64(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureStructU64(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureResultU64) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureStructU64) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteU64 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU64.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructU64.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureResultI64(
+internal open class UniffiForeignFutureStructI64(
     @JvmField internal var `returnValue`: Long = 0.toLong(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Long = 0.toLong(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureResultI64(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureStructI64(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureResultI64) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureStructI64) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteI64 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI64.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructI64.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureResultF32(
+internal open class UniffiForeignFutureStructF32(
     @JvmField internal var `returnValue`: Float = 0.0f,
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Float = 0.0f,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureResultF32(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureStructF32(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureResultF32) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureStructF32) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteF32 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultF32.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructF32.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureResultF64(
+internal open class UniffiForeignFutureStructF64(
     @JvmField internal var `returnValue`: Double = 0.0,
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Double = 0.0,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureResultF64(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureStructF64(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureResultF64) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureStructF64) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteF64 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultF64.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructF64.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureResultRustBuffer(
+internal open class UniffiForeignFutureStructPointer(
+    @JvmField internal var `returnValue`: Pointer = Pointer.NULL,
+    @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
+) : Structure() {
+    class UniffiByValue(
+        `returnValue`: Pointer = Pointer.NULL,
+        `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
+    ): UniffiForeignFutureStructPointer(`returnValue`,`callStatus`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiForeignFutureStructPointer) {
+        `returnValue` = other.`returnValue`
+        `callStatus` = other.`callStatus`
+    }
+
+}
+internal interface UniffiForeignFutureCompletePointer : com.sun.jna.Callback {
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructPointer.UniffiByValue,)
+}
+@Structure.FieldOrder("returnValue", "callStatus")
+internal open class UniffiForeignFutureStructRustBuffer(
     @JvmField internal var `returnValue`: RustBuffer.ByValue = RustBuffer.ByValue(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: RustBuffer.ByValue = RustBuffer.ByValue(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureResultRustBuffer(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureStructRustBuffer(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureResultRustBuffer) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureStructRustBuffer) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteRustBuffer : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultRustBuffer.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructRustBuffer.UniffiByValue,)
 }
 @Structure.FieldOrder("callStatus")
-internal open class UniffiForeignFutureResultVoid(
+internal open class UniffiForeignFutureStructVoid(
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureResultVoid(`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureStructVoid(`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureResultVoid) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureStructVoid) {
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultVoid.UniffiByValue,)
-}
-internal interface UniffiCallbackInterfaceGovernanceProviderMethod0 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`toolName`: RustBuffer.ByValue,`paramsJson`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
-}
-internal interface UniffiCallbackInterfaceGovernanceProviderMethod1 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`toolName`: RustBuffer.ByValue,`paramsJson`: RustBuffer.ByValue,`result`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
-}
-internal interface UniffiCallbackInterfaceGovernanceProviderMethod2 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`agentId`: RustBuffer.ByValue,`action`: RustBuffer.ByValue,`detail`: RustBuffer.ByValue,`outcome`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
-}
-internal interface UniffiCallbackInterfaceGovernanceProviderMethod3 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`sinkType`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
-}
-internal interface UniffiCallbackInterfaceGovernanceProviderMethod4 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
-}
-internal interface UniffiCallbackInterfaceGovernanceProviderMethod5 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`modelId`: RustBuffer.ByValue,`inputTokens`: Int,`outputTokens`: Int,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructVoid.UniffiByValue,)
 }
 internal interface UniffiCallbackInterfaceMemoryProviderMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`key`: RustBuffer.ByValue,`text`: RustBuffer.ByValue,`metadataJson`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
@@ -652,570 +675,609 @@ internal interface UniffiCallbackInterfaceNativeEventCallbackMethod0 : com.sun.j
 internal interface UniffiCallbackInterfaceNativeNotifierMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`title`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`dataJson`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-internal interface UniffiCallbackInterfaceAuthProfileStoreMethod0 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
-}
-internal interface UniffiCallbackInterfaceAuthProfileStoreMethod1 : com.sun.jna.Callback {
-    fun callback(`uniffiHandle`: Long,`profilesJson`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
-}
-@Structure.FieldOrder("uniffiFree", "uniffiClone", "checkLoop", "recordOutcome", "recordAudit", "checkSink", "reset", "recordUsage")
-internal open class UniffiVTableCallbackInterfaceGovernanceProvider(
-    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
-    @JvmField internal var `checkLoop`: UniffiCallbackInterfaceGovernanceProviderMethod0? = null,
-    @JvmField internal var `recordOutcome`: UniffiCallbackInterfaceGovernanceProviderMethod1? = null,
-    @JvmField internal var `recordAudit`: UniffiCallbackInterfaceGovernanceProviderMethod2? = null,
-    @JvmField internal var `checkSink`: UniffiCallbackInterfaceGovernanceProviderMethod3? = null,
-    @JvmField internal var `reset`: UniffiCallbackInterfaceGovernanceProviderMethod4? = null,
-    @JvmField internal var `recordUsage`: UniffiCallbackInterfaceGovernanceProviderMethod5? = null,
-) : Structure() {
-    class UniffiByValue(
-        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
-        `checkLoop`: UniffiCallbackInterfaceGovernanceProviderMethod0? = null,
-        `recordOutcome`: UniffiCallbackInterfaceGovernanceProviderMethod1? = null,
-        `recordAudit`: UniffiCallbackInterfaceGovernanceProviderMethod2? = null,
-        `checkSink`: UniffiCallbackInterfaceGovernanceProviderMethod3? = null,
-        `reset`: UniffiCallbackInterfaceGovernanceProviderMethod4? = null,
-        `recordUsage`: UniffiCallbackInterfaceGovernanceProviderMethod5? = null,
-    ): UniffiVTableCallbackInterfaceGovernanceProvider(`uniffiFree`,`uniffiClone`,`checkLoop`,`recordOutcome`,`recordAudit`,`checkSink`,`reset`,`recordUsage`,), Structure.ByValue
-
-   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceGovernanceProvider) {
-        `uniffiFree` = other.`uniffiFree`
-        `uniffiClone` = other.`uniffiClone`
-        `checkLoop` = other.`checkLoop`
-        `recordOutcome` = other.`recordOutcome`
-        `recordAudit` = other.`recordAudit`
-        `checkSink` = other.`checkSink`
-        `reset` = other.`reset`
-        `recordUsage` = other.`recordUsage`
-    }
-
-}
-@Structure.FieldOrder("uniffiFree", "uniffiClone", "store", "recall", "forget", "search", "list")
+@Structure.FieldOrder("store", "recall", "forget", "search", "list", "uniffiFree")
 internal open class UniffiVTableCallbackInterfaceMemoryProvider(
-    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
     @JvmField internal var `store`: UniffiCallbackInterfaceMemoryProviderMethod0? = null,
     @JvmField internal var `recall`: UniffiCallbackInterfaceMemoryProviderMethod1? = null,
     @JvmField internal var `forget`: UniffiCallbackInterfaceMemoryProviderMethod2? = null,
     @JvmField internal var `search`: UniffiCallbackInterfaceMemoryProviderMethod3? = null,
     @JvmField internal var `list`: UniffiCallbackInterfaceMemoryProviderMethod4? = null,
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
 ) : Structure() {
     class UniffiByValue(
-        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
         `store`: UniffiCallbackInterfaceMemoryProviderMethod0? = null,
         `recall`: UniffiCallbackInterfaceMemoryProviderMethod1? = null,
         `forget`: UniffiCallbackInterfaceMemoryProviderMethod2? = null,
         `search`: UniffiCallbackInterfaceMemoryProviderMethod3? = null,
         `list`: UniffiCallbackInterfaceMemoryProviderMethod4? = null,
-    ): UniffiVTableCallbackInterfaceMemoryProvider(`uniffiFree`,`uniffiClone`,`store`,`recall`,`forget`,`search`,`list`,), Structure.ByValue
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    ): UniffiVTableCallbackInterfaceMemoryProvider(`store`,`recall`,`forget`,`search`,`list`,`uniffiFree`,), Structure.ByValue
 
    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceMemoryProvider) {
-        `uniffiFree` = other.`uniffiFree`
-        `uniffiClone` = other.`uniffiClone`
         `store` = other.`store`
         `recall` = other.`recall`
         `forget` = other.`forget`
         `search` = other.`search`
         `list` = other.`list`
+        `uniffiFree` = other.`uniffiFree`
     }
 
 }
-@Structure.FieldOrder("uniffiFree", "uniffiClone", "onEvent")
+@Structure.FieldOrder("onEvent", "uniffiFree")
 internal open class UniffiVTableCallbackInterfaceNativeEventCallback(
-    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
     @JvmField internal var `onEvent`: UniffiCallbackInterfaceNativeEventCallbackMethod0? = null,
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
 ) : Structure() {
     class UniffiByValue(
-        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
         `onEvent`: UniffiCallbackInterfaceNativeEventCallbackMethod0? = null,
-    ): UniffiVTableCallbackInterfaceNativeEventCallback(`uniffiFree`,`uniffiClone`,`onEvent`,), Structure.ByValue
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    ): UniffiVTableCallbackInterfaceNativeEventCallback(`onEvent`,`uniffiFree`,), Structure.ByValue
 
    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceNativeEventCallback) {
-        `uniffiFree` = other.`uniffiFree`
-        `uniffiClone` = other.`uniffiClone`
         `onEvent` = other.`onEvent`
+        `uniffiFree` = other.`uniffiFree`
     }
 
 }
-@Structure.FieldOrder("uniffiFree", "uniffiClone", "sendNotification")
+@Structure.FieldOrder("sendNotification", "uniffiFree")
 internal open class UniffiVTableCallbackInterfaceNativeNotifier(
-    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
     @JvmField internal var `sendNotification`: UniffiCallbackInterfaceNativeNotifierMethod0? = null,
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
 ) : Structure() {
     class UniffiByValue(
-        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
         `sendNotification`: UniffiCallbackInterfaceNativeNotifierMethod0? = null,
-    ): UniffiVTableCallbackInterfaceNativeNotifier(`uniffiFree`,`uniffiClone`,`sendNotification`,), Structure.ByValue
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    ): UniffiVTableCallbackInterfaceNativeNotifier(`sendNotification`,`uniffiFree`,), Structure.ByValue
 
    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceNativeNotifier) {
-        `uniffiFree` = other.`uniffiFree`
-        `uniffiClone` = other.`uniffiClone`
         `sendNotification` = other.`sendNotification`
-    }
-
-}
-@Structure.FieldOrder("uniffiFree", "uniffiClone", "load", "save")
-internal open class UniffiVTableCallbackInterfaceAuthProfileStore(
-    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
-    @JvmField internal var `load`: UniffiCallbackInterfaceAuthProfileStoreMethod0? = null,
-    @JvmField internal var `save`: UniffiCallbackInterfaceAuthProfileStoreMethod1? = null,
-) : Structure() {
-    class UniffiByValue(
-        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
-        `load`: UniffiCallbackInterfaceAuthProfileStoreMethod0? = null,
-        `save`: UniffiCallbackInterfaceAuthProfileStoreMethod1? = null,
-    ): UniffiVTableCallbackInterfaceAuthProfileStore(`uniffiFree`,`uniffiClone`,`load`,`save`,), Structure.ByValue
-
-   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceAuthProfileStore) {
         `uniffiFree` = other.`uniffiFree`
-        `uniffiClone` = other.`uniffiClone`
-        `load` = other.`load`
-        `save` = other.`save`
     }
 
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
-// For large crates we prevent `MethodTooLargeException` (see #2340)
-// N.B. the name of the extension is very misleading, since it is
-// rather `InterfaceTooLargeException`, caused by too many methods
-// in the interface for large crates.
-//
-// By splitting the otherwise huge interface into two parts
-// * UniffiLib (this)
-// * IntegrityCheckingUniffiLib
-// And all checksum methods are put into `IntegrityCheckingUniffiLib`
-// we allow for ~2x as many methods in the UniffiLib interface.
-//
-// Note: above all written when we used JNA's `loadIndirect` etc.
-// We now use JNA's "direct mapping" - unclear if same considerations apply exactly.
-internal object IntegrityCheckingUniffiLib {
-    init {
-        Native.register(IntegrityCheckingUniffiLib::class.java, findLibraryName(componentName = "native_agent_ffi"))
-        uniffiCheckContractApiVersion(this)
-        uniffiCheckApiChecksums(this)
+internal interface UniffiLib : Library {
+    companion object {
+        internal val INSTANCE: UniffiLib by lazy {
+            loadIndirect<UniffiLib>(componentName = "native_agent_ffi")
+            .also { lib: UniffiLib ->
+                uniffiCheckContractApiVersion(lib)
+                uniffiCheckApiChecksums(lib)
+                uniffiCallbackInterfaceMemoryProvider.register(lib)
+                uniffiCallbackInterfaceNativeEventCallback.register(lib)
+                uniffiCallbackInterfaceNativeNotifier.register(lib)
+                }
+        }
+        
+        // The Cleaner for the whole library
+        internal val CLEANER: UniffiCleaner by lazy {
+            UniffiCleaner.create()
+        }
     }
-    external fun uniffi_native_agent_ffi_checksum_func_create_handle_from_persisted_config(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_func_init_workspace(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_abort(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_add_cron_job(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_add_skill(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_clear_session(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_delete_auth(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_dispatch_agent_command_json(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_end_skill(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_exchange_oauth_code(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_follow_up(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_get_auth_status(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_get_auth_token(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_get_heartbeat_config(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_get_models(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_get_scheduler_config(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_handle_wake(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_invoke_tool(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_cron_jobs(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_cron_runs(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_native_tools(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_sessions(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_skills(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_tool_permissions(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_load_session(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_load_surfaced_messages(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_persist_config(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_refresh_token(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_remove_cron_job(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_remove_skill(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_reset_tool_permissions(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_respond_to_approval(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_respond_to_cron_approval(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_respond_to_mcp_tool(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_restart_mcp(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_resume_session(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_run_cron_job(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_seed_tool_permissions(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_send_message(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_serialize_agent_event_json(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_auth_key(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_event_callback(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_governance_provider(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_heartbeat_config(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_mcp_tools(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_memory_provider(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_notifier(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_scheduler_config(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_tool_permission(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_start_mcp(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_start_skill(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_steer(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_update_cron_job(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_update_skill(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_constructor_nativeagenthandle_new(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_governanceprovider_check_loop(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_governanceprovider_record_outcome(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_governanceprovider_record_audit(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_governanceprovider_check_sink(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_governanceprovider_reset(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_governanceprovider_record_usage(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_memoryprovider_store(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_memoryprovider_recall(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_memoryprovider_forget(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_memoryprovider_search(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_memoryprovider_list(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativeeventcallback_on_event(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_nativenotifier_send_notification(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_authprofilestore_load(
-    ): Short
-    external fun uniffi_native_agent_ffi_checksum_method_authprofilestore_save(
-    ): Short
-    external fun ffi_native_agent_ffi_uniffi_contract_version(
+
+    fun uniffi_native_agent_ffi_fn_clone_nativeagenthandle(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): Pointer
+    fun uniffi_native_agent_ffi_fn_free_nativeagenthandle(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_constructor_nativeagenthandle_new(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Pointer
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_abort(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_add_cron_job(`ptr`: Pointer,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_add_skill(`ptr`: Pointer,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_clear_session(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_delete_auth(`ptr`: Pointer,`provider`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_end_skill(`ptr`: Pointer,`skillId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_exchange_oauth_code(`ptr`: Pointer,`tokenUrl`: RustBuffer.ByValue,`bodyJson`: RustBuffer.ByValue,`contentType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_follow_up(`ptr`: Pointer,`prompt`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_auth_status(`ptr`: Pointer,`provider`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_auth_token(`ptr`: Pointer,`provider`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_heartbeat_config(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_models(`ptr`: Pointer,`provider`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_scheduler_config(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_handle_wake(`ptr`: Pointer,`source`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_invoke_tool(`ptr`: Pointer,`toolName`: RustBuffer.ByValue,`argsJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_cron_jobs(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_cron_runs(`ptr`: Pointer,`jobId`: RustBuffer.ByValue,`limit`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_sessions(`ptr`: Pointer,`agentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_skills(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_tool_permissions(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_load_session(`ptr`: Pointer,`sessionKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_persist_config(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_refresh_token(`ptr`: Pointer,`provider`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_remove_cron_job(`ptr`: Pointer,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_remove_skill(`ptr`: Pointer,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_reset_tool_permissions(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_respond_to_approval(`ptr`: Pointer,`toolCallId`: RustBuffer.ByValue,`approved`: Byte,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_respond_to_cron_approval(`ptr`: Pointer,`requestId`: RustBuffer.ByValue,`approved`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_respond_to_mcp_tool(`ptr`: Pointer,`toolCallId`: RustBuffer.ByValue,`resultJson`: RustBuffer.ByValue,`isError`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_restart_mcp(`ptr`: Pointer,`toolsJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
-
-        
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_resume_session(`ptr`: Pointer,`sessionKey`: RustBuffer.ByValue,`agentId`: RustBuffer.ByValue,`messagesJson`: RustBuffer.ByValue,`provider`: RustBuffer.ByValue,`model`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_run_cron_job(`ptr`: Pointer,`jobId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_seed_tool_permissions(`ptr`: Pointer,`defaultsJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_send_message(`ptr`: Pointer,`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_auth_key(`ptr`: Pointer,`key`: RustBuffer.ByValue,`provider`: RustBuffer.ByValue,`authType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_event_callback(`ptr`: Pointer,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_heartbeat_config(`ptr`: Pointer,`configJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_memory_provider(`ptr`: Pointer,`provider`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_notifier(`ptr`: Pointer,`notifier`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_scheduler_config(`ptr`: Pointer,`configJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_tool_permission(`ptr`: Pointer,`toolName`: RustBuffer.ByValue,`permission`: RustBuffer.ByValue,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_start_mcp(`ptr`: Pointer,`toolsJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_start_skill(`ptr`: Pointer,`skillId`: RustBuffer.ByValue,`configJson`: RustBuffer.ByValue,`provider`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_steer(`ptr`: Pointer,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_update_cron_job(`ptr`: Pointer,`id`: RustBuffer.ByValue,`patchJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_update_skill(`ptr`: Pointer,`id`: RustBuffer.ByValue,`patchJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_init_callback_vtable_memoryprovider(`vtable`: UniffiVTableCallbackInterfaceMemoryProvider,
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_init_callback_vtable_nativeeventcallback(`vtable`: UniffiVTableCallbackInterfaceNativeEventCallback,
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_init_callback_vtable_nativenotifier(`vtable`: UniffiVTableCallbackInterfaceNativeNotifier,
+    ): Unit
+    fun uniffi_native_agent_ffi_fn_func_create_handle_from_persisted_config(`configPath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Pointer
+    fun uniffi_native_agent_ffi_fn_func_init_workspace(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun ffi_native_agent_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun ffi_native_agent_ffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun ffi_native_agent_ffi_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun ffi_native_agent_ffi_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun ffi_native_agent_ffi_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_cancel_u8(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_free_u8(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    fun ffi_native_agent_ffi_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_cancel_i8(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_free_i8(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    fun ffi_native_agent_ffi_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_cancel_u16(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_free_u16(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Short
+    fun ffi_native_agent_ffi_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_cancel_i16(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_free_i16(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Short
+    fun ffi_native_agent_ffi_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_cancel_u32(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_free_u32(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    fun ffi_native_agent_ffi_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_cancel_i32(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_free_i32(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    fun ffi_native_agent_ffi_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_cancel_u64(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_free_u64(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    fun ffi_native_agent_ffi_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_cancel_i64(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_free_i64(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    fun ffi_native_agent_ffi_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_cancel_f32(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_free_f32(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Float
+    fun ffi_native_agent_ffi_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_cancel_f64(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_free_f64(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Double
+    fun ffi_native_agent_ffi_rust_future_poll_pointer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_cancel_pointer(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_free_pointer(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_complete_pointer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Pointer
+    fun ffi_native_agent_ffi_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_cancel_rust_buffer(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_free_rust_buffer(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun ffi_native_agent_ffi_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_cancel_void(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_free_void(`handle`: Long,
+    ): Unit
+    fun ffi_native_agent_ffi_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_native_agent_ffi_checksum_func_create_handle_from_persisted_config(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_func_init_workspace(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_abort(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_add_cron_job(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_add_skill(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_clear_session(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_delete_auth(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_end_skill(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_exchange_oauth_code(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_follow_up(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_get_auth_status(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_get_auth_token(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_get_heartbeat_config(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_get_models(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_get_scheduler_config(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_handle_wake(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_invoke_tool(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_cron_jobs(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_cron_runs(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_sessions(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_skills(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_tool_permissions(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_load_session(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_persist_config(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_refresh_token(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_remove_cron_job(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_remove_skill(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_reset_tool_permissions(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_respond_to_approval(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_respond_to_cron_approval(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_respond_to_mcp_tool(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_restart_mcp(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_resume_session(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_run_cron_job(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_seed_tool_permissions(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_send_message(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_auth_key(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_event_callback(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_heartbeat_config(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_memory_provider(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_notifier(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_scheduler_config(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_tool_permission(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_start_mcp(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_start_skill(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_steer(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_update_cron_job(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeagenthandle_update_skill(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_constructor_nativeagenthandle_new(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_memoryprovider_store(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_memoryprovider_recall(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_memoryprovider_forget(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_memoryprovider_search(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_memoryprovider_list(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativeeventcallback_on_event(
+    ): Short
+    fun uniffi_native_agent_ffi_checksum_method_nativenotifier_send_notification(
+    ): Short
+    fun ffi_native_agent_ffi_uniffi_contract_version(
+    ): Int
+    
 }
 
-internal object UniffiLib {
-    
-    // The Cleaner for the whole library
-    internal val CLEANER: UniffiCleaner by lazy {
-        UniffiCleaner.create()
-    }
-    
-
-    init {
-        Native.register(UniffiLib::class.java, findLibraryName(componentName = "native_agent_ffi"))
-        uniffiCallbackInterfaceAuthProfileStore.register(this)
-        uniffiCallbackInterfaceGovernanceProvider.register(this)
-        uniffiCallbackInterfaceMemoryProvider.register(this)
-        uniffiCallbackInterfaceNativeEventCallback.register(this)
-        uniffiCallbackInterfaceNativeNotifier.register(this)
-        
-    }
-    external fun uniffi_native_agent_ffi_fn_clone_nativeagenthandle(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun uniffi_native_agent_ffi_fn_free_nativeagenthandle(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_constructor_nativeagenthandle_new(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_abort(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_add_cron_job(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_add_skill(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_clear_session(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_delete_auth(`ptr`: Long,`provider`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_dispatch_agent_command_json(`ptr`: Long,`json`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_end_skill(`ptr`: Long,`skillId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_exchange_oauth_code(`ptr`: Long,`tokenUrl`: RustBuffer.ByValue,`bodyJson`: RustBuffer.ByValue,`contentType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_follow_up(`ptr`: Long,`prompt`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_auth_status(`ptr`: Long,`provider`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_auth_token(`ptr`: Long,`provider`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_heartbeat_config(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_models(`ptr`: Long,`provider`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_scheduler_config(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_handle_wake(`ptr`: Long,`source`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_invoke_tool(`ptr`: Long,`toolName`: RustBuffer.ByValue,`argsJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_cron_jobs(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_cron_runs(`ptr`: Long,`jobId`: RustBuffer.ByValue,`limit`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_native_tools(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_sessions(`ptr`: Long,`agentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_skills(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_tool_permissions(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_load_session(`ptr`: Long,`sessionKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_load_surfaced_messages(`ptr`: Long,`limit`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_persist_config(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_refresh_token(`ptr`: Long,`provider`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_remove_cron_job(`ptr`: Long,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_remove_skill(`ptr`: Long,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_reset_tool_permissions(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_respond_to_approval(`ptr`: Long,`toolCallId`: RustBuffer.ByValue,`approved`: Byte,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_respond_to_cron_approval(`ptr`: Long,`requestId`: RustBuffer.ByValue,`approved`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_respond_to_mcp_tool(`ptr`: Long,`toolCallId`: RustBuffer.ByValue,`resultJson`: RustBuffer.ByValue,`isError`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_restart_mcp(`ptr`: Long,`toolsJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Int
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_resume_session(`ptr`: Long,`sessionKey`: RustBuffer.ByValue,`agentId`: RustBuffer.ByValue,`messagesJson`: RustBuffer.ByValue,`provider`: RustBuffer.ByValue,`model`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_run_cron_job(`ptr`: Long,`jobId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_seed_tool_permissions(`ptr`: Long,`defaultsJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Int
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_send_message(`ptr`: Long,`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_serialize_agent_event_json(`ptr`: Long,`eventType`: RustBuffer.ByValue,`payloadJson`: RustBuffer.ByValue,`sessionKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_auth_key(`ptr`: Long,`key`: RustBuffer.ByValue,`provider`: RustBuffer.ByValue,`authType`: RustBuffer.ByValue,`refresh`: RustBuffer.ByValue,`expiresAt`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_event_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_governance_provider(`ptr`: Long,`provider`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_heartbeat_config(`ptr`: Long,`configJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_mcp_tools(`ptr`: Long,`toolsJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Int
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_memory_provider(`ptr`: Long,`provider`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_notifier(`ptr`: Long,`notifier`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_scheduler_config(`ptr`: Long,`configJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_tool_permission(`ptr`: Long,`toolName`: RustBuffer.ByValue,`permission`: RustBuffer.ByValue,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_start_mcp(`ptr`: Long,`toolsJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Int
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_start_skill(`ptr`: Long,`skillId`: RustBuffer.ByValue,`configJson`: RustBuffer.ByValue,`provider`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_steer(`ptr`: Long,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_update_cron_job(`ptr`: Long,`id`: RustBuffer.ByValue,`patchJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_method_nativeagenthandle_update_skill(`ptr`: Long,`id`: RustBuffer.ByValue,`patchJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_native_agent_ffi_fn_init_callback_vtable_governanceprovider(`vtable`: UniffiVTableCallbackInterfaceGovernanceProvider,
-): Unit
-external fun uniffi_native_agent_ffi_fn_init_callback_vtable_memoryprovider(`vtable`: UniffiVTableCallbackInterfaceMemoryProvider,
-): Unit
-external fun uniffi_native_agent_ffi_fn_init_callback_vtable_nativeeventcallback(`vtable`: UniffiVTableCallbackInterfaceNativeEventCallback,
-): Unit
-external fun uniffi_native_agent_ffi_fn_init_callback_vtable_nativenotifier(`vtable`: UniffiVTableCallbackInterfaceNativeNotifier,
-): Unit
-external fun uniffi_native_agent_ffi_fn_init_callback_vtable_authprofilestore(`vtable`: UniffiVTableCallbackInterfaceAuthProfileStore,
-): Unit
-external fun uniffi_native_agent_ffi_fn_func_create_handle_from_persisted_config(`configPath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun uniffi_native_agent_ffi_fn_func_init_workspace(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun ffi_native_agent_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun ffi_native_agent_ffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun ffi_native_agent_ffi_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun ffi_native_agent_ffi_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun ffi_native_agent_ffi_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_cancel_u8(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_free_u8(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun ffi_native_agent_ffi_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_cancel_i8(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_free_i8(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun ffi_native_agent_ffi_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_cancel_u16(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_free_u16(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Short
-external fun ffi_native_agent_ffi_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_cancel_i16(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_free_i16(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Short
-external fun ffi_native_agent_ffi_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_cancel_u32(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_free_u32(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Int
-external fun ffi_native_agent_ffi_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_cancel_i32(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_free_i32(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Int
-external fun ffi_native_agent_ffi_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_cancel_u64(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_free_u64(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun ffi_native_agent_ffi_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_cancel_i64(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_free_i64(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun ffi_native_agent_ffi_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_cancel_f32(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_free_f32(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Float
-external fun ffi_native_agent_ffi_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_cancel_f64(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_free_f64(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Double
-external fun ffi_native_agent_ffi_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_cancel_rust_buffer(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_free_rust_buffer(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun ffi_native_agent_ffi_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_cancel_void(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_free_void(`handle`: Long,
-): Unit
-external fun ffi_native_agent_ffi_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-
-    
-}
-
-private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
+private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
     // Get the bindings contract version from our ComponentInterface
-    val bindings_contract_version = 30
+    val bindings_contract_version = 26
     // Get the scaffolding contract version by calling the into the dylib
     val scaffolding_contract_version = lib.ffi_native_agent_ffi_uniffi_contract_version()
     if (bindings_contract_version != scaffolding_contract_version) {
         throw RuntimeException("UniFFI contract version mismatch: try cleaning and rebuilding your project")
     }
 }
+
 @Suppress("UNUSED_PARAMETER")
-private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
+private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_native_agent_ffi_checksum_func_create_handle_from_persisted_config() != 41643.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_native_agent_ffi_checksum_func_init_workspace() != 313.toShort()) {
+    if (lib.uniffi_native_agent_ffi_checksum_func_init_workspace() != 39423.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_abort() != 58908.toShort()) {
@@ -1233,9 +1295,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_delete_auth() != 2640.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_dispatch_agent_command_json() != 26137.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_end_skill() != 49984.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1245,10 +1304,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_follow_up() != 816.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_get_auth_status() != 19426.toShort()) {
+    if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_get_auth_status() != 31550.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_get_auth_token() != 36642.toShort()) {
+    if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_get_auth_token() != 58380.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_get_heartbeat_config() != 1627.toShort()) {
@@ -1272,9 +1331,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_cron_runs() != 27743.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_native_tools() != 614.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_sessions() != 20894.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1287,13 +1343,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_load_session() != 39832.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_load_surfaced_messages() != 38563.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_persist_config() != 63110.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_refresh_token() != 43469.toShort()) {
+    if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_refresh_token() != 13290.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_remove_cron_job() != 55519.toShort()) {
@@ -1317,7 +1370,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_restart_mcp() != 8963.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_resume_session() != 1498.toShort()) {
+    if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_resume_session() != 34699.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_run_cron_job() != 11263.toShort()) {
@@ -1326,25 +1379,16 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_seed_tool_permissions() != 39225.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_send_message() != 35046.toShort()) {
+    if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_send_message() != 53296.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_serialize_agent_event_json() != 40873.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_auth_key() != 1639.toShort()) {
+    if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_auth_key() != 40485.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_event_callback() != 56165.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_governance_provider() != 45093.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_heartbeat_config() != 33968.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_mcp_tools() != 15664.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_memory_provider() != 23171.toShort()) {
@@ -1374,25 +1418,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_native_agent_ffi_checksum_method_nativeagenthandle_update_skill() != 42452.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_native_agent_ffi_checksum_constructor_nativeagenthandle_new() != 28156.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_native_agent_ffi_checksum_method_governanceprovider_check_loop() != 64194.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_native_agent_ffi_checksum_method_governanceprovider_record_outcome() != 15801.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_native_agent_ffi_checksum_method_governanceprovider_record_audit() != 34049.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_native_agent_ffi_checksum_method_governanceprovider_check_sink() != 37338.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_native_agent_ffi_checksum_method_governanceprovider_reset() != 57214.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_native_agent_ffi_checksum_method_governanceprovider_record_usage() != 907.toShort()) {
+    if (lib.uniffi_native_agent_ffi_checksum_constructor_nativeagenthandle_new() != 18383.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_native_agent_ffi_checksum_method_memoryprovider_store() != 49136.toShort()) {
@@ -1416,22 +1442,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_native_agent_ffi_checksum_method_nativenotifier_send_notification() != 9573.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_native_agent_ffi_checksum_method_authprofilestore_load() != 44333.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_native_agent_ffi_checksum_method_authprofilestore_save() != 41441.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-}
-
-/**
- * @suppress
- */
-public fun uniffiEnsureInitialized() {
-    IntegrityCheckingUniffiLib
-    // UniffiLib() initialized as objects are used, but we still need to explicitly
-    // reference it so initialization across crates works as expected.
-    UniffiLib
 }
 
 // Async support
@@ -1451,33 +1461,8 @@ interface Disposable {
     fun destroy()
     companion object {
         fun destroy(vararg args: Any?) {
-            for (arg in args) {
-                when (arg) {
-                    is Disposable -> arg.destroy()
-                    is ArrayList<*> -> {
-                        for (idx in arg.indices) {
-                            val element = arg[idx]
-                            if (element is Disposable) {
-                                element.destroy()
-                            }
-                        }
-                    }
-                    is Map<*, *> -> {
-                        for (element in arg.values) {
-                            if (element is Disposable) {
-                                element.destroy()
-                            }
-                        }
-                    }
-                    is Iterable<*> -> {
-                        for (element in arg) {
-                            if (element is Disposable) {
-                                element.destroy()
-                            }
-                        }
-                    }
-                }
-            }
+            args.filterIsInstance<Disposable>()
+                .forEach(Disposable::destroy)
         }
     }
 }
@@ -1498,117 +1483,11 @@ inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
     }
 
 /** 
- * Placeholder object used to signal that we're constructing an interface with a FFI handle.
- *
- * This is the first argument for interface constructors that input a raw handle. It exists is that
- * so we can avoid signature conflicts when an interface has a regular constructor than inputs a
- * Long.
- *
- * @suppress
- * */
-object UniffiWithHandle
-
-/** 
  * Used to instantiate an interface without an actual pointer, for fakes in tests, mostly.
  *
  * @suppress
  * */
-object NoHandle// Magic number for the Rust proxy to call using the same mechanism as every other method,
-// to free the callback once it's dropped by Rust.
-internal const val IDX_CALLBACK_FREE = 0
-// Callback return codes
-internal const val UNIFFI_CALLBACK_SUCCESS = 0
-internal const val UNIFFI_CALLBACK_ERROR = 1
-internal const val UNIFFI_CALLBACK_UNEXPECTED_ERROR = 2
-
-/**
- * @suppress
- */
-public abstract class FfiConverterCallbackInterface<CallbackInterface: Any>: FfiConverter<CallbackInterface, Long> {
-    internal val handleMap = UniffiHandleMap<CallbackInterface>()
-
-    internal fun drop(handle: Long) {
-        handleMap.remove(handle)
-    }
-
-    override fun lift(value: Long): CallbackInterface {
-        return handleMap.get(value)
-    }
-
-    override fun read(buf: ByteBuffer) = lift(buf.getLong())
-
-    override fun lower(value: CallbackInterface) = handleMap.insert(value)
-
-    override fun allocationSize(value: CallbackInterface) = 8UL
-
-    override fun write(value: CallbackInterface, buf: ByteBuffer) {
-        buf.putLong(lower(value))
-    }
-}
-/**
- * The cleaner interface for Object finalization code to run.
- * This is the entry point to any implementation that we're using.
- *
- * The cleaner registers objects and returns cleanables, so now we are
- * defining a `UniffiCleaner` with a `UniffiClenaer.Cleanable` to abstract the
- * different implmentations available at compile time.
- *
- * @suppress
- */
-interface UniffiCleaner {
-    interface Cleanable {
-        fun clean()
-    }
-
-    fun register(value: Any, cleanUpTask: Runnable): UniffiCleaner.Cleanable
-
-    companion object
-}
-
-// The fallback Jna cleaner, which is available for both Android, and the JVM.
-private class UniffiJnaCleaner : UniffiCleaner {
-    private val cleaner = com.sun.jna.internal.Cleaner.getCleaner()
-
-    override fun register(value: Any, cleanUpTask: Runnable): UniffiCleaner.Cleanable =
-        UniffiJnaCleanable(cleaner.register(value, cleanUpTask))
-}
-
-private class UniffiJnaCleanable(
-    private val cleanable: com.sun.jna.internal.Cleaner.Cleanable,
-) : UniffiCleaner.Cleanable {
-    override fun clean() = cleanable.clean()
-}
-
-
-// We decide at uniffi binding generation time whether we were
-// using Android or not.
-// There are further runtime checks to chose the correct implementation
-// of the cleaner.
-private fun UniffiCleaner.Companion.create(): UniffiCleaner =
-    try {
-        // For safety's sake: if the library hasn't been run in android_cleaner = true
-        // mode, but is being run on Android, then we still need to think about
-        // Android API versions.
-        // So we check if java.lang.ref.Cleaner is there, and use that…
-        java.lang.Class.forName("java.lang.ref.Cleaner")
-        JavaLangRefCleaner()
-    } catch (e: ClassNotFoundException) {
-        // … otherwise, fallback to the JNA cleaner.
-        UniffiJnaCleaner()
-    }
-
-private class JavaLangRefCleaner : UniffiCleaner {
-    val cleaner = java.lang.ref.Cleaner.create()
-
-    override fun register(value: Any, cleanUpTask: Runnable): UniffiCleaner.Cleanable =
-        JavaLangRefCleanable(cleaner.register(value, cleanUpTask))
-}
-
-private class JavaLangRefCleanable(
-    val cleanable: java.lang.ref.Cleaner.Cleanable
-) : UniffiCleaner.Cleanable {
-    override fun clean() = cleanable.clean()
-}
+object NoPointer
 
 /**
  * @suppress
@@ -1737,18 +1616,21 @@ public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
 }
 
 
-// This template implements a class for working with a Rust struct via a handle
+// This template implements a class for working with a Rust struct via a Pointer/Arc<T>
 // to the live Rust struct on the other side of the FFI.
+//
+// Each instance implements core operations for working with the Rust `Arc<T>` and the
+// Kotlin Pointer to work with the live Rust struct on the other side of the FFI.
 //
 // There's some subtlety here, because we have to be careful not to operate on a Rust
 // struct after it has been dropped, and because we must expose a public API for freeing
 // theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
 //
-//   * Each instance holds an opaque handle to the underlying Rust struct.
-//     Method calls need to read this handle from the object's state and pass it in to
+//   * Each instance holds an opaque pointer to the underlying Rust struct.
+//     Method calls need to read this pointer from the object's state and pass it in to
 //     the Rust FFI.
 //
-//   * When an instance is no longer needed, its handle should be passed to a
+//   * When an instance is no longer needed, its pointer should be passed to a
 //     special destructor function provided by the Rust FFI, which will drop the
 //     underlying Rust struct.
 //
@@ -1773,13 +1655,13 @@ public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
 //      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
 //         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
 //
-// If we try to implement this with mutual exclusion on access to the handle, there is the
+// If we try to implement this with mutual exclusion on access to the pointer, there is the
 // possibility of a race between a method call and a concurrent call to `destroy`:
 //
-//    * Thread A starts a method call, reads the value of the handle, but is interrupted
-//      before it can pass the handle over the FFI to Rust.
+//    * Thread A starts a method call, reads the value of the pointer, but is interrupted
+//      before it can pass the pointer over the FFI to Rust.
 //    * Thread B calls `destroy` and frees the underlying Rust struct.
-//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//    * Thread A resumes, passing the already-read pointer value to Rust and triggering
 //      a use-after-free.
 //
 // One possible solution would be to use a `ReadWriteLock`, with each method call taking
@@ -1833,6 +1715,69 @@ public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
 
 
 /**
+ * The cleaner interface for Object finalization code to run.
+ * This is the entry point to any implementation that we're using.
+ *
+ * The cleaner registers objects and returns cleanables, so now we are
+ * defining a `UniffiCleaner` with a `UniffiClenaer.Cleanable` to abstract the
+ * different implmentations available at compile time.
+ *
+ * @suppress
+ */
+interface UniffiCleaner {
+    interface Cleanable {
+        fun clean()
+    }
+
+    fun register(value: Any, cleanUpTask: Runnable): UniffiCleaner.Cleanable
+
+    companion object
+}
+
+// The fallback Jna cleaner, which is available for both Android, and the JVM.
+private class UniffiJnaCleaner : UniffiCleaner {
+    private val cleaner = com.sun.jna.internal.Cleaner.getCleaner()
+
+    override fun register(value: Any, cleanUpTask: Runnable): UniffiCleaner.Cleanable =
+        UniffiJnaCleanable(cleaner.register(value, cleanUpTask))
+}
+
+private class UniffiJnaCleanable(
+    private val cleanable: com.sun.jna.internal.Cleaner.Cleanable,
+) : UniffiCleaner.Cleanable {
+    override fun clean() = cleanable.clean()
+}
+
+// We decide at uniffi binding generation time whether we were
+// using Android or not.
+// There are further runtime checks to chose the correct implementation
+// of the cleaner.
+private fun UniffiCleaner.Companion.create(): UniffiCleaner =
+    try {
+        // For safety's sake: if the library hasn't been run in android_cleaner = true
+        // mode, but is being run on Android, then we still need to think about
+        // Android API versions.
+        // So we check if java.lang.ref.Cleaner is there, and use that…
+        java.lang.Class.forName("java.lang.ref.Cleaner")
+        JavaLangRefCleaner()
+    } catch (e: ClassNotFoundException) {
+        // … otherwise, fallback to the JNA cleaner.
+        UniffiJnaCleaner()
+    }
+
+private class JavaLangRefCleaner : UniffiCleaner {
+    val cleaner = java.lang.ref.Cleaner.create()
+
+    override fun register(value: Any, cleanUpTask: Runnable): UniffiCleaner.Cleanable =
+        JavaLangRefCleanable(cleaner.register(value, cleanUpTask))
+}
+
+private class JavaLangRefCleanable(
+    val cleanable: java.lang.ref.Cleaner.Cleanable
+) : UniffiCleaner.Cleanable {
+    override fun clean() = cleanable.clean()
+}
+/**
  * Long-lived handle — one per app lifecycle.
  */
 public interface NativeAgentHandleInterface {
@@ -1863,19 +1808,6 @@ public interface NativeAgentHandleInterface {
      * Delete auth for a provider.
      */
     fun `deleteAuth`(`provider`: kotlin.String)
-    
-    /**
-     * Parse a canonical `wire::AgentCommand` JSON string, dispatch to the
-     * matching internal method, and return the JSON-encoded
-     * `wire::CommandAck`. The boundary is JSON strings only — see the
-     * wire module docs for shape details.
-     *
-     * `ListSessions` and `ResumeSession` commands assume agent_id `"main"`
-     * (aigenthive runs one agent per pod). Hosts that need a different
-     * agent_id should call `list_sessions(agent_id)` / `resume_session(...)`
-     * directly.
-     */
-    fun `dispatchAgentCommandJson`(`json`: kotlin.String): kotlin.String
     
     /**
      * End a skill session.
@@ -1938,13 +1870,6 @@ public interface NativeAgentHandleInterface {
     fun `listCronRuns`(`jobId`: kotlin.String?, `limit`: kotlin.Long): kotlin.String
     
     /**
-     * Return the embedded native tool catalog. Hosts use this to seed
-     * permissions UI / tables on first run, and to check that local
-     * callers stay in sync with the FFI's known tools.
-     */
-    fun `listNativeTools`(): List<NativeToolDescriptor>
-    
-    /**
      * List sessions for an agent.
      */
     fun `listSessions`(`agentId`: kotlin.String): kotlin.String
@@ -1963,11 +1888,6 @@ public interface NativeAgentHandleInterface {
      * Load session message history.
      */
     fun `loadSession`(`sessionKey`: kotlin.String): kotlin.String
-    
-    /**
-     * Load surfaced messages from background/cron jobs.
-     */
-    fun `loadSurfacedMessages`(`limit`: kotlin.Long): kotlin.String
     
     fun `persistConfig`()
     
@@ -2013,10 +1933,8 @@ public interface NativeAgentHandleInterface {
     
     /**
      * Resume a session (load messages into agent context).
-     * Returns `was_interrupted: true` if the session had an in-progress turn
-     * that was killed (e.g. app force-close). The caller can auto-resume.
      */
-    fun `resumeSession`(`sessionKey`: kotlin.String, `agentId`: kotlin.String, `messagesJson`: kotlin.String?, `provider`: kotlin.String?, `model`: kotlin.String?): kotlin.Boolean
+    fun `resumeSession`(`sessionKey`: kotlin.String, `agentId`: kotlin.String, `messagesJson`: kotlin.String?, `provider`: kotlin.String?, `model`: kotlin.String?)
     
     /**
      * Force-trigger a cron job.
@@ -2034,16 +1952,9 @@ public interface NativeAgentHandleInterface {
     fun `sendMessage`(`params`: SendMessageParams): kotlin.String
     
     /**
-     * Build a canonical `wire::AgentEvent` JSON envelope from the raw
-     * event-type + payload pair the agent loop emits, stamping a fresh
-     * `received_at`. Hosts call this to produce wire bytes for AMQP/STOMP.
-     */
-    fun `serializeAgentEventJson`(`eventType`: kotlin.String, `payloadJson`: kotlin.String, `sessionKey`: kotlin.String?): kotlin.String
-    
-    /**
      * Set an auth key for a provider.
      */
-    fun `setAuthKey`(`key`: kotlin.String, `provider`: kotlin.String, `authType`: kotlin.String, `refresh`: kotlin.String?, `expiresAt`: kotlin.Long?)
+    fun `setAuthKey`(`key`: kotlin.String, `provider`: kotlin.String, `authType`: kotlin.String)
     
     /**
      * Set the event callback for receiving agent events.
@@ -2051,23 +1962,9 @@ public interface NativeAgentHandleInterface {
     fun `setEventCallback`(`callback`: NativeEventCallback)
     
     /**
-     * Set the optional governance provider (taint, audit, loop-guard, cost tracking).
-     * Typically called by capacitor-agent-os when it auto-registers at init time.
-     */
-    fun `setGovernanceProvider`(`provider`: GovernanceProvider)
-    
-    /**
      * Set heartbeat config.
      */
     fun `setHeartbeatConfig`(`configJson`: kotlin.String)
-    
-    /**
-     * Replace the FFI's MCP tool manifest. Tools registered here become
-     * visible to the LLM and, when called, surface as `mcp_tool_call`
-     * events that the host must answer with `respond_to_mcp_tool`.
-     * Idempotent — every call replaces the prior manifest.
-     */
-    fun `setMcpTools`(`toolsJson`: kotlin.String): kotlin.UInt
     
     fun `setMemoryProvider`(`provider`: MemoryProvider)
     
@@ -2114,44 +2011,36 @@ public interface NativeAgentHandleInterface {
 /**
  * Long-lived handle — one per app lifecycle.
  */
-open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterface
-{
+open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterface {
 
-    @Suppress("UNUSED_PARAMETER")
-    /**
-     * @suppress
-     */
-    constructor(withHandle: UniffiWithHandle, handle: Long) {
-        this.handle = handle
-        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    constructor(pointer: Pointer) {
+        this.pointer = pointer
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
     }
 
     /**
-     * @suppress
-     *
      * This constructor can be used to instantiate a fake object. Only used for tests. Any
      * attempt to actually use an object constructed this way will fail as there is no
      * connected Rust object.
      */
     @Suppress("UNUSED_PARAMETER")
-    constructor(noHandle: NoHandle) {
-        this.handle = 0
-        this.cleanable = null
+    constructor(noPointer: NoPointer) {
+        this.pointer = null
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
     }
     /**
      * Create a new native agent handle.
      */
     constructor(`config`: InitConfig) :
-        this(UniffiWithHandle, 
+        this(
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_constructor_nativeagenthandle_new(
-    
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_constructor_nativeagenthandle_new(
         FfiConverterTypeInitConfig.lower(`config`),_status)
 }
     )
 
-    protected val handle: Long
-    protected val cleanable: UniffiCleaner.Cleanable?
+    protected val pointer: Pointer?
+    protected val cleanable: UniffiCleaner.Cleanable
 
     private val wasDestroyed = AtomicBoolean(false)
     private val callCounter = AtomicLong(1)
@@ -2162,7 +2051,7 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
-                cleanable?.clean()
+                cleanable.clean()
             }
         }
     }
@@ -2172,7 +2061,7 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
         this.destroy()
     }
 
-    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
         // Check and increment the call counter, to keep the object alive.
         // This needs a compare-and-set retry loop in case of concurrent updates.
         do {
@@ -2184,40 +2073,32 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
         } while (! this.callCounter.compareAndSet(c, c + 1L))
-        // Now we can safely do the method call without the handle being freed concurrently.
+        // Now we can safely do the method call without the pointer being freed concurrently.
         try {
-            return block(this.uniffiCloneHandle())
+            return block(this.uniffiClonePointer())
         } finally {
             // This decrement always matches the increment we performed above.
             if (this.callCounter.decrementAndGet() == 0L) {
-                cleanable?.clean()
+                cleanable.clean()
             }
         }
     }
 
     // Use a static inner class instead of a closure so as not to accidentally
     // capture `this` as part of the cleanable's action.
-    private class UniffiCleanAction(private val handle: Long) : Runnable {
+    private class UniffiCleanAction(private val pointer: Pointer?) : Runnable {
         override fun run() {
-            if (handle == 0.toLong()) {
-                // Fake object created with `NoHandle`, don't try to free.
-                return;
-            }
-            uniffiRustCall { status ->
-                UniffiLib.uniffi_native_agent_ffi_fn_free_nativeagenthandle(handle, status)
+            pointer?.let { ptr ->
+                uniffiRustCall { status ->
+                    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_free_nativeagenthandle(ptr, status)
+                }
             }
         }
     }
 
-    /**
-     * @suppress
-     */
-    fun uniffiCloneHandle(): Long {
-        if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object");
-        }
+    fun uniffiClonePointer(): Pointer {
         return uniffiRustCall() { status ->
-            UniffiLib.uniffi_native_agent_ffi_fn_clone_nativeagenthandle(handle, status)
+            UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_clone_nativeagenthandle(pointer!!, status)
         }
     }
 
@@ -2227,11 +2108,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `abort`()
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_abort(
-        it,
-        _status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_abort(
+        it, _status)
 }
     }
     
@@ -2243,11 +2123,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `addCronJob`(`inputJson`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_add_cron_job(
-        it,
-        FfiConverterString.lower(`inputJson`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_add_cron_job(
+        it, FfiConverterString.lower(`inputJson`),_status)
 }
     }
     )
@@ -2260,11 +2139,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `addSkill`(`inputJson`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_add_skill(
-        it,
-        FfiConverterString.lower(`inputJson`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_add_skill(
+        it, FfiConverterString.lower(`inputJson`),_status)
 }
     }
     )
@@ -2279,11 +2157,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `clearSession`()
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_clear_session(
-        it,
-        _status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_clear_session(
+        it, _status)
 }
     }
     
@@ -2295,39 +2172,13 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `deleteAuth`(`provider`: kotlin.String)
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_delete_auth(
-        it,
-        FfiConverterString.lower(`provider`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_delete_auth(
+        it, FfiConverterString.lower(`provider`),_status)
 }
     }
     
-    
-
-    
-    /**
-     * Parse a canonical `wire::AgentCommand` JSON string, dispatch to the
-     * matching internal method, and return the JSON-encoded
-     * `wire::CommandAck`. The boundary is JSON strings only — see the
-     * wire module docs for shape details.
-     *
-     * `ListSessions` and `ResumeSession` commands assume agent_id `"main"`
-     * (aigenthive runs one agent per pod). Hosts that need a different
-     * agent_id should call `list_sessions(agent_id)` / `resume_session(...)`
-     * directly.
-     */
-    @Throws(NativeAgentException::class)override fun `dispatchAgentCommandJson`(`json`: kotlin.String): kotlin.String {
-            return FfiConverterString.lift(
-    callWithHandle {
-    uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_dispatch_agent_command_json(
-        it,
-        FfiConverterString.lower(`json`),_status)
-}
-    }
-    )
-    }
     
 
     
@@ -2336,11 +2187,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `endSkill`(`skillId`: kotlin.String)
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_end_skill(
-        it,
-        FfiConverterString.lower(`skillId`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_end_skill(
+        it, FfiConverterString.lower(`skillId`),_status)
 }
     }
     
@@ -2352,11 +2202,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `exchangeOauthCode`(`tokenUrl`: kotlin.String, `bodyJson`: kotlin.String, `contentType`: kotlin.String?): kotlin.String {
             return FfiConverterString.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_exchange_oauth_code(
-        it,
-        FfiConverterString.lower(`tokenUrl`),FfiConverterString.lower(`bodyJson`),FfiConverterOptionalString.lower(`contentType`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_exchange_oauth_code(
+        it, FfiConverterString.lower(`tokenUrl`),FfiConverterString.lower(`bodyJson`),FfiConverterOptionalString.lower(`contentType`),_status)
 }
     }
     )
@@ -2369,11 +2218,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `followUp`(`prompt`: kotlin.String)
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_follow_up(
-        it,
-        FfiConverterString.lower(`prompt`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_follow_up(
+        it, FfiConverterString.lower(`prompt`),_status)
 }
     }
     
@@ -2385,11 +2233,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `getAuthStatus`(`provider`: kotlin.String): AuthStatusResult {
             return FfiConverterTypeAuthStatusResult.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_auth_status(
-        it,
-        FfiConverterString.lower(`provider`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_auth_status(
+        it, FfiConverterString.lower(`provider`),_status)
 }
     }
     )
@@ -2402,11 +2249,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `getAuthToken`(`provider`: kotlin.String): AuthTokenResult {
             return FfiConverterTypeAuthTokenResult.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_auth_token(
-        it,
-        FfiConverterString.lower(`provider`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_auth_token(
+        it, FfiConverterString.lower(`provider`),_status)
 }
     }
     )
@@ -2419,11 +2265,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `getHeartbeatConfig`(): kotlin.String {
             return FfiConverterString.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_heartbeat_config(
-        it,
-        _status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_heartbeat_config(
+        it, _status)
 }
     }
     )
@@ -2436,11 +2281,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `getModels`(`provider`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_models(
-        it,
-        FfiConverterString.lower(`provider`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_models(
+        it, FfiConverterString.lower(`provider`),_status)
 }
     }
     )
@@ -2453,11 +2297,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `getSchedulerConfig`(): kotlin.String {
             return FfiConverterString.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_scheduler_config(
-        it,
-        _status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_get_scheduler_config(
+        it, _status)
 }
     }
     )
@@ -2470,11 +2313,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `handleWake`(`source`: kotlin.String)
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_handle_wake(
-        it,
-        FfiConverterString.lower(`source`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_handle_wake(
+        it, FfiConverterString.lower(`source`),_status)
 }
     }
     
@@ -2486,11 +2328,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `invokeTool`(`toolName`: kotlin.String, `argsJson`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_invoke_tool(
-        it,
-        FfiConverterString.lower(`toolName`),FfiConverterString.lower(`argsJson`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_invoke_tool(
+        it, FfiConverterString.lower(`toolName`),FfiConverterString.lower(`argsJson`),_status)
 }
     }
     )
@@ -2503,11 +2344,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `listCronJobs`(): kotlin.String {
             return FfiConverterString.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_cron_jobs(
-        it,
-        _status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_cron_jobs(
+        it, _status)
 }
     }
     )
@@ -2520,29 +2360,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `listCronRuns`(`jobId`: kotlin.String?, `limit`: kotlin.Long): kotlin.String {
             return FfiConverterString.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_cron_runs(
-        it,
-        FfiConverterOptionalString.lower(`jobId`),FfiConverterLong.lower(`limit`),_status)
-}
-    }
-    )
-    }
-    
-
-    
-    /**
-     * Return the embedded native tool catalog. Hosts use this to seed
-     * permissions UI / tables on first run, and to check that local
-     * callers stay in sync with the FFI's known tools.
-     */override fun `listNativeTools`(): List<NativeToolDescriptor> {
-            return FfiConverterSequenceTypeNativeToolDescriptor.lift(
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_native_tools(
-        it,
-        _status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_cron_runs(
+        it, FfiConverterOptionalString.lower(`jobId`),FfiConverterLong.lower(`limit`),_status)
 }
     }
     )
@@ -2555,11 +2376,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `listSessions`(`agentId`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_sessions(
-        it,
-        FfiConverterString.lower(`agentId`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_sessions(
+        it, FfiConverterString.lower(`agentId`),_status)
 }
     }
     )
@@ -2572,11 +2392,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `listSkills`(): kotlin.String {
             return FfiConverterString.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_skills(
-        it,
-        _status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_skills(
+        it, _status)
 }
     }
     )
@@ -2589,11 +2408,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `listToolPermissions`(): kotlin.String {
             return FfiConverterString.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_tool_permissions(
-        it,
-        _status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_list_tool_permissions(
+        it, _status)
 }
     }
     )
@@ -2606,28 +2424,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `loadSession`(`sessionKey`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_load_session(
-        it,
-        FfiConverterString.lower(`sessionKey`),_status)
-}
-    }
-    )
-    }
-    
-
-    
-    /**
-     * Load surfaced messages from background/cron jobs.
-     */
-    @Throws(NativeAgentException::class)override fun `loadSurfacedMessages`(`limit`: kotlin.Long): kotlin.String {
-            return FfiConverterString.lift(
-    callWithHandle {
-    uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_load_surfaced_messages(
-        it,
-        FfiConverterLong.lower(`limit`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_load_session(
+        it, FfiConverterString.lower(`sessionKey`),_status)
 }
     }
     )
@@ -2637,11 +2437,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
     
     @Throws(NativeAgentException::class)override fun `persistConfig`()
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_persist_config(
-        it,
-        _status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_persist_config(
+        it, _status)
 }
     }
     
@@ -2653,11 +2452,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `refreshToken`(`provider`: kotlin.String): AuthTokenResult {
             return FfiConverterTypeAuthTokenResult.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_refresh_token(
-        it,
-        FfiConverterString.lower(`provider`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_refresh_token(
+        it, FfiConverterString.lower(`provider`),_status)
 }
     }
     )
@@ -2670,11 +2468,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `removeCronJob`(`id`: kotlin.String)
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_remove_cron_job(
-        it,
-        FfiConverterString.lower(`id`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_remove_cron_job(
+        it, FfiConverterString.lower(`id`),_status)
 }
     }
     
@@ -2686,11 +2483,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `removeSkill`(`id`: kotlin.String)
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_remove_skill(
-        it,
-        FfiConverterString.lower(`id`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_remove_skill(
+        it, FfiConverterString.lower(`id`),_status)
 }
     }
     
@@ -2702,11 +2498,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `resetToolPermissions`()
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_reset_tool_permissions(
-        it,
-        _status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_reset_tool_permissions(
+        it, _status)
 }
     }
     
@@ -2718,11 +2513,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `respondToApproval`(`toolCallId`: kotlin.String, `approved`: kotlin.Boolean, `reason`: kotlin.String?)
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_respond_to_approval(
-        it,
-        FfiConverterString.lower(`toolCallId`),FfiConverterBoolean.lower(`approved`),FfiConverterOptionalString.lower(`reason`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_respond_to_approval(
+        it, FfiConverterString.lower(`toolCallId`),FfiConverterBoolean.lower(`approved`),FfiConverterOptionalString.lower(`reason`),_status)
 }
     }
     
@@ -2734,11 +2528,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `respondToCronApproval`(`requestId`: kotlin.String, `approved`: kotlin.Boolean)
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_respond_to_cron_approval(
-        it,
-        FfiConverterString.lower(`requestId`),FfiConverterBoolean.lower(`approved`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_respond_to_cron_approval(
+        it, FfiConverterString.lower(`requestId`),FfiConverterBoolean.lower(`approved`),_status)
 }
     }
     
@@ -2750,11 +2543,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `respondToMcpTool`(`toolCallId`: kotlin.String, `resultJson`: kotlin.String, `isError`: kotlin.Boolean)
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_respond_to_mcp_tool(
-        it,
-        FfiConverterString.lower(`toolCallId`),FfiConverterString.lower(`resultJson`),FfiConverterBoolean.lower(`isError`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_respond_to_mcp_tool(
+        it, FfiConverterString.lower(`toolCallId`),FfiConverterString.lower(`resultJson`),FfiConverterBoolean.lower(`isError`),_status)
 }
     }
     
@@ -2766,11 +2558,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `restartMcp`(`toolsJson`: kotlin.String): kotlin.UInt {
             return FfiConverterUInt.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_restart_mcp(
-        it,
-        FfiConverterString.lower(`toolsJson`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_restart_mcp(
+        it, FfiConverterString.lower(`toolsJson`),_status)
 }
     }
     )
@@ -2780,20 +2571,16 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
     
     /**
      * Resume a session (load messages into agent context).
-     * Returns `was_interrupted: true` if the session had an in-progress turn
-     * that was killed (e.g. app force-close). The caller can auto-resume.
      */
-    @Throws(NativeAgentException::class)override fun `resumeSession`(`sessionKey`: kotlin.String, `agentId`: kotlin.String, `messagesJson`: kotlin.String?, `provider`: kotlin.String?, `model`: kotlin.String?): kotlin.Boolean {
-            return FfiConverterBoolean.lift(
-    callWithHandle {
+    @Throws(NativeAgentException::class)override fun `resumeSession`(`sessionKey`: kotlin.String, `agentId`: kotlin.String, `messagesJson`: kotlin.String?, `provider`: kotlin.String?, `model`: kotlin.String?)
+        = 
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_resume_session(
-        it,
-        FfiConverterString.lower(`sessionKey`),FfiConverterString.lower(`agentId`),FfiConverterOptionalString.lower(`messagesJson`),FfiConverterOptionalString.lower(`provider`),FfiConverterOptionalString.lower(`model`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_resume_session(
+        it, FfiConverterString.lower(`sessionKey`),FfiConverterString.lower(`agentId`),FfiConverterOptionalString.lower(`messagesJson`),FfiConverterOptionalString.lower(`provider`),FfiConverterOptionalString.lower(`model`),_status)
 }
     }
-    )
-    }
+    
     
 
     
@@ -2802,11 +2589,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `runCronJob`(`jobId`: kotlin.String)
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_run_cron_job(
-        it,
-        FfiConverterString.lower(`jobId`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_run_cron_job(
+        it, FfiConverterString.lower(`jobId`),_status)
 }
     }
     
@@ -2818,11 +2604,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `seedToolPermissions`(`defaultsJson`: kotlin.String): kotlin.UInt {
             return FfiConverterUInt.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_seed_tool_permissions(
-        it,
-        FfiConverterString.lower(`defaultsJson`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_seed_tool_permissions(
+        it, FfiConverterString.lower(`defaultsJson`),_status)
 }
     }
     )
@@ -2835,30 +2620,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `sendMessage`(`params`: SendMessageParams): kotlin.String {
             return FfiConverterString.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_send_message(
-        it,
-        FfiConverterTypeSendMessageParams.lower(`params`),_status)
-}
-    }
-    )
-    }
-    
-
-    
-    /**
-     * Build a canonical `wire::AgentEvent` JSON envelope from the raw
-     * event-type + payload pair the agent loop emits, stamping a fresh
-     * `received_at`. Hosts call this to produce wire bytes for AMQP/STOMP.
-     */
-    @Throws(NativeAgentException::class)override fun `serializeAgentEventJson`(`eventType`: kotlin.String, `payloadJson`: kotlin.String, `sessionKey`: kotlin.String?): kotlin.String {
-            return FfiConverterString.lift(
-    callWithHandle {
-    uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_serialize_agent_event_json(
-        it,
-        FfiConverterString.lower(`eventType`),FfiConverterString.lower(`payloadJson`),FfiConverterOptionalString.lower(`sessionKey`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_send_message(
+        it, FfiConverterTypeSendMessageParams.lower(`params`),_status)
 }
     }
     )
@@ -2869,13 +2634,12 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
     /**
      * Set an auth key for a provider.
      */
-    @Throws(NativeAgentException::class)override fun `setAuthKey`(`key`: kotlin.String, `provider`: kotlin.String, `authType`: kotlin.String, `refresh`: kotlin.String?, `expiresAt`: kotlin.Long?)
+    @Throws(NativeAgentException::class)override fun `setAuthKey`(`key`: kotlin.String, `provider`: kotlin.String, `authType`: kotlin.String)
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_auth_key(
-        it,
-        FfiConverterString.lower(`key`),FfiConverterString.lower(`provider`),FfiConverterString.lower(`authType`),FfiConverterOptionalString.lower(`refresh`),FfiConverterOptionalLong.lower(`expiresAt`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_auth_key(
+        it, FfiConverterString.lower(`key`),FfiConverterString.lower(`provider`),FfiConverterString.lower(`authType`),_status)
 }
     }
     
@@ -2887,28 +2651,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `setEventCallback`(`callback`: NativeEventCallback)
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_event_callback(
-        it,
-        FfiConverterTypeNativeEventCallback.lower(`callback`),_status)
-}
-    }
-    
-    
-
-    
-    /**
-     * Set the optional governance provider (taint, audit, loop-guard, cost tracking).
-     * Typically called by capacitor-agent-os when it auto-registers at init time.
-     */
-    @Throws(NativeAgentException::class)override fun `setGovernanceProvider`(`provider`: GovernanceProvider)
-        = 
-    callWithHandle {
-    uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_governance_provider(
-        it,
-        FfiConverterTypeGovernanceProvider.lower(`provider`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_event_callback(
+        it, FfiConverterTypeNativeEventCallback.lower(`callback`),_status)
 }
     }
     
@@ -2920,44 +2666,22 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `setHeartbeatConfig`(`configJson`: kotlin.String)
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_heartbeat_config(
-        it,
-        FfiConverterString.lower(`configJson`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_heartbeat_config(
+        it, FfiConverterString.lower(`configJson`),_status)
 }
     }
     
-    
-
-    
-    /**
-     * Replace the FFI's MCP tool manifest. Tools registered here become
-     * visible to the LLM and, when called, surface as `mcp_tool_call`
-     * events that the host must answer with `respond_to_mcp_tool`.
-     * Idempotent — every call replaces the prior manifest.
-     */
-    @Throws(NativeAgentException::class)override fun `setMcpTools`(`toolsJson`: kotlin.String): kotlin.UInt {
-            return FfiConverterUInt.lift(
-    callWithHandle {
-    uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_mcp_tools(
-        it,
-        FfiConverterString.lower(`toolsJson`),_status)
-}
-    }
-    )
-    }
     
 
     
     @Throws(NativeAgentException::class)override fun `setMemoryProvider`(`provider`: MemoryProvider)
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_memory_provider(
-        it,
-        FfiConverterTypeMemoryProvider.lower(`provider`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_memory_provider(
+        it, FfiConverterTypeMemoryProvider.lower(`provider`),_status)
 }
     }
     
@@ -2966,11 +2690,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
     
     @Throws(NativeAgentException::class)override fun `setNotifier`(`notifier`: NativeNotifier)
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_notifier(
-        it,
-        FfiConverterTypeNativeNotifier.lower(`notifier`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_notifier(
+        it, FfiConverterTypeNativeNotifier.lower(`notifier`),_status)
 }
     }
     
@@ -2982,11 +2705,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `setSchedulerConfig`(`configJson`: kotlin.String)
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_scheduler_config(
-        it,
-        FfiConverterString.lower(`configJson`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_scheduler_config(
+        it, FfiConverterString.lower(`configJson`),_status)
 }
     }
     
@@ -2998,11 +2720,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `setToolPermission`(`toolName`: kotlin.String, `permission`: kotlin.String, `enabled`: kotlin.Boolean)
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_tool_permission(
-        it,
-        FfiConverterString.lower(`toolName`),FfiConverterString.lower(`permission`),FfiConverterBoolean.lower(`enabled`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_set_tool_permission(
+        it, FfiConverterString.lower(`toolName`),FfiConverterString.lower(`permission`),FfiConverterBoolean.lower(`enabled`),_status)
 }
     }
     
@@ -3014,11 +2735,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `startMcp`(`toolsJson`: kotlin.String): kotlin.UInt {
             return FfiConverterUInt.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_start_mcp(
-        it,
-        FfiConverterString.lower(`toolsJson`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_start_mcp(
+        it, FfiConverterString.lower(`toolsJson`),_status)
 }
     }
     )
@@ -3031,11 +2751,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `startSkill`(`skillId`: kotlin.String, `configJson`: kotlin.String, `provider`: kotlin.String?): kotlin.String {
             return FfiConverterString.lift(
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_start_skill(
-        it,
-        FfiConverterString.lower(`skillId`),FfiConverterString.lower(`configJson`),FfiConverterOptionalString.lower(`provider`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_start_skill(
+        it, FfiConverterString.lower(`skillId`),FfiConverterString.lower(`configJson`),FfiConverterOptionalString.lower(`provider`),_status)
 }
     }
     )
@@ -3048,11 +2767,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `steer`(`text`: kotlin.String)
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_steer(
-        it,
-        FfiConverterString.lower(`text`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_steer(
+        it, FfiConverterString.lower(`text`),_status)
 }
     }
     
@@ -3064,11 +2782,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `updateCronJob`(`id`: kotlin.String, `patchJson`: kotlin.String)
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_update_cron_job(
-        it,
-        FfiConverterString.lower(`id`),FfiConverterString.lower(`patchJson`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_update_cron_job(
+        it, FfiConverterString.lower(`id`),FfiConverterString.lower(`patchJson`),_status)
 }
     }
     
@@ -3080,11 +2797,10 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
      */
     @Throws(NativeAgentException::class)override fun `updateSkill`(`id`: kotlin.String, `patchJson`: kotlin.String)
         = 
-    callWithHandle {
+    callWithPointer {
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_method_nativeagenthandle_update_skill(
-        it,
-        FfiConverterString.lower(`id`),FfiConverterString.lower(`patchJson`),_status)
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_method_nativeagenthandle_update_skill(
+        it, FfiConverterString.lower(`id`),FfiConverterString.lower(`patchJson`),_status)
 }
     }
     
@@ -3093,38 +2809,36 @@ open class NativeAgentHandle: Disposable, AutoCloseable, NativeAgentHandleInterf
     
 
     
-
-
     
-    
-    /**
-     * @suppress
-     */
     companion object
     
 }
 
-
 /**
  * @suppress
  */
-public object FfiConverterTypeNativeAgentHandle: FfiConverter<NativeAgentHandle, Long> {
-    override fun lower(value: NativeAgentHandle): Long {
-        return value.uniffiCloneHandle()
+public object FfiConverterTypeNativeAgentHandle: FfiConverter<NativeAgentHandle, Pointer> {
+
+    override fun lower(value: NativeAgentHandle): Pointer {
+        return value.uniffiClonePointer()
     }
 
-    override fun lift(value: Long): NativeAgentHandle {
-        return NativeAgentHandle(UniffiWithHandle, value)
+    override fun lift(value: Pointer): NativeAgentHandle {
+        return NativeAgentHandle(value)
     }
 
     override fun read(buf: ByteBuffer): NativeAgentHandle {
-        return lift(buf.getLong())
+        // The Rust code always writes pointers as 8 bytes, and will
+        // fail to compile if they don't fit.
+        return lift(Pointer(buf.getLong()))
     }
 
     override fun allocationSize(value: NativeAgentHandle) = 8UL
 
     override fun write(value: NativeAgentHandle, buf: ByteBuffer) {
-        buf.putLong(lower(value))
+        // The Rust code always expects pointers written as 8 bytes,
+        // and will fail to compile if they don't fit.
+        buf.putLong(Pointer.nativeValue(lower(value)))
     }
 }
 
@@ -3134,17 +2848,10 @@ public object FfiConverterTypeNativeAgentHandle: FfiConverter<NativeAgentHandle,
  * Auth status result.
  */
 data class AuthStatusResult (
-    var `hasKey`: kotlin.Boolean
-    , 
-    var `masked`: kotlin.String
-    , 
+    var `hasKey`: kotlin.Boolean, 
+    var `masked`: kotlin.String, 
     var `provider`: kotlin.String
-    
-){
-    
-
-    
-
+) {
     
     companion object
 }
@@ -3180,15 +2887,9 @@ public object FfiConverterTypeAuthStatusResult: FfiConverterRustBuffer<AuthStatu
  * Auth token result.
  */
 data class AuthTokenResult (
-    var `apiKey`: kotlin.String?
-    , 
+    var `apiKey`: kotlin.String?, 
     var `isOauth`: kotlin.Boolean
-    
-){
-    
-
-    
-
+) {
     
     companion object
 }
@@ -3224,39 +2925,16 @@ data class InitConfig (
     /**
      * Path to the SQLite database.
      */
-    var `dbPath`: kotlin.String
-    , 
+    var `dbPath`: kotlin.String, 
     /**
      * Path to the workspace root.
      */
-    var `workspacePath`: kotlin.String
-    , 
+    var `workspacePath`: kotlin.String, 
     /**
      * Path to auth-profiles.json.
      */
     var `authProfilesPath`: kotlin.String
-    , 
-    /**
-     * Configured default LLM provider for this agent. When a per-call
-     * `SendMessageParams.provider` is unset, the resolver falls back to
-     * this value. `None` falls through to the hardcoded "anthropic"
-     * safety net — which any properly-configured install should never hit.
-     */
-    var `defaultProvider`: kotlin.String?
-    , 
-    /**
-     * Configured default model. Only used when the resolver also took
-     * `default_provider` (i.e. the caller didn't override provider) — if
-     * provider is overridden, the per-provider default model is used
-     * instead, since model strings are tied to providers.
-     */
-    var `defaultModel`: kotlin.String?
-    
-){
-    
-
-    
-
+) {
     
     companion object
 }
@@ -3270,98 +2948,19 @@ public object FfiConverterTypeInitConfig: FfiConverterRustBuffer<InitConfig> {
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
-            FfiConverterOptionalString.read(buf),
-            FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: InitConfig) = (
             FfiConverterString.allocationSize(value.`dbPath`) +
             FfiConverterString.allocationSize(value.`workspacePath`) +
-            FfiConverterString.allocationSize(value.`authProfilesPath`) +
-            FfiConverterOptionalString.allocationSize(value.`defaultProvider`) +
-            FfiConverterOptionalString.allocationSize(value.`defaultModel`)
+            FfiConverterString.allocationSize(value.`authProfilesPath`)
     )
 
     override fun write(value: InitConfig, buf: ByteBuffer) {
             FfiConverterString.write(value.`dbPath`, buf)
             FfiConverterString.write(value.`workspacePath`, buf)
             FfiConverterString.write(value.`authProfilesPath`, buf)
-            FfiConverterOptionalString.write(value.`defaultProvider`, buf)
-            FfiConverterOptionalString.write(value.`defaultModel`, buf)
-    }
-}
-
-
-
-/**
- * One entry in the catalog. Field names mirror the JSON's camelCase
- * shape. Hosts use this to populate their permissions UI and to seed
- * the AgentStore's tool_permissions table on first run.
- */
-data class NativeToolDescriptor (
-    var `name`: kotlin.String
-    , 
-    var `description`: kotlin.String
-    , 
-    var `source`: kotlin.String
-    , 
-    var `groupId`: kotlin.String
-    , 
-    var `groupLabel`: kotlin.String
-    , 
-    var `category`: kotlin.String
-    , 
-    var `defaultPermission`: kotlin.String
-    , 
-    var `defaultEnabled`: kotlin.Boolean
-    
-){
-    
-
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeNativeToolDescriptor: FfiConverterRustBuffer<NativeToolDescriptor> {
-    override fun read(buf: ByteBuffer): NativeToolDescriptor {
-        return NativeToolDescriptor(
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterBoolean.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: NativeToolDescriptor) = (
-            FfiConverterString.allocationSize(value.`name`) +
-            FfiConverterString.allocationSize(value.`description`) +
-            FfiConverterString.allocationSize(value.`source`) +
-            FfiConverterString.allocationSize(value.`groupId`) +
-            FfiConverterString.allocationSize(value.`groupLabel`) +
-            FfiConverterString.allocationSize(value.`category`) +
-            FfiConverterString.allocationSize(value.`defaultPermission`) +
-            FfiConverterBoolean.allocationSize(value.`defaultEnabled`)
-    )
-
-    override fun write(value: NativeToolDescriptor, buf: ByteBuffer) {
-            FfiConverterString.write(value.`name`, buf)
-            FfiConverterString.write(value.`description`, buf)
-            FfiConverterString.write(value.`source`, buf)
-            FfiConverterString.write(value.`groupId`, buf)
-            FfiConverterString.write(value.`groupLabel`, buf)
-            FfiConverterString.write(value.`category`, buf)
-            FfiConverterString.write(value.`defaultPermission`, buf)
-            FfiConverterBoolean.write(value.`defaultEnabled`, buf)
     }
 }
 
@@ -3371,19 +2970,11 @@ public object FfiConverterTypeNativeToolDescriptor: FfiConverterRustBuffer<Nativ
  * Buffered event emitted while no foreground callback is attached.
  */
 data class PendingEvent (
-    var `id`: kotlin.Long
-    , 
-    var `eventType`: kotlin.String
-    , 
-    var `payloadJson`: kotlin.String
-    , 
+    var `id`: kotlin.Long, 
+    var `eventType`: kotlin.String, 
+    var `payloadJson`: kotlin.String, 
     var `createdAt`: kotlin.Long
-    
-){
-    
-
-    
-
+) {
     
     companion object
 }
@@ -3422,35 +3013,21 @@ public object FfiConverterTypePendingEvent: FfiConverterRustBuffer<PendingEvent>
  * Parameters for sending a message.
  */
 data class SendMessageParams (
-    var `prompt`: kotlin.String
-    , 
-    var `sessionKey`: kotlin.String
-    , 
-    var `model`: kotlin.String?
-    , 
-    var `provider`: kotlin.String?
-    , 
-    var `systemPrompt`: kotlin.String
-    , 
-    var `maxTurns`: kotlin.UInt?
-    , 
+    var `prompt`: kotlin.String, 
+    var `sessionKey`: kotlin.String, 
+    var `model`: kotlin.String?, 
+    var `provider`: kotlin.String?, 
+    var `systemPrompt`: kotlin.String, 
+    var `maxTurns`: kotlin.UInt?, 
     /**
-     * Optional skill-mode whitelist of allowed tool names (JSON-encoded array).
-     * `None` or empty = no skill restriction. The FFI also applies its own
-     * per-turn permission filter from the AgentStore on top of this list.
+     * JSON-encoded list of allowed tool names. Empty = all tools.
      */
-    var `skillAllowedToolsJson`: kotlin.String?
-    , 
+    var `allowedToolsJson`: kotlin.String?, 
     /**
      * JSON-encoded prior conversation messages for multi-turn sessions.
      */
     var `priorMessagesJson`: kotlin.String?
-    
-){
-    
-
-    
-
+) {
     
     companion object
 }
@@ -3479,7 +3056,7 @@ public object FfiConverterTypeSendMessageParams: FfiConverterRustBuffer<SendMess
             FfiConverterOptionalString.allocationSize(value.`provider`) +
             FfiConverterString.allocationSize(value.`systemPrompt`) +
             FfiConverterOptionalUInt.allocationSize(value.`maxTurns`) +
-            FfiConverterOptionalString.allocationSize(value.`skillAllowedToolsJson`) +
+            FfiConverterOptionalString.allocationSize(value.`allowedToolsJson`) +
             FfiConverterOptionalString.allocationSize(value.`priorMessagesJson`)
     )
 
@@ -3490,7 +3067,7 @@ public object FfiConverterTypeSendMessageParams: FfiConverterRustBuffer<SendMess
             FfiConverterOptionalString.write(value.`provider`, buf)
             FfiConverterString.write(value.`systemPrompt`, buf)
             FfiConverterOptionalUInt.write(value.`maxTurns`, buf)
-            FfiConverterOptionalString.write(value.`skillAllowedToolsJson`, buf)
+            FfiConverterOptionalString.write(value.`allowedToolsJson`, buf)
             FfiConverterOptionalString.write(value.`priorMessagesJson`, buf)
     }
 }
@@ -3501,17 +3078,10 @@ public object FfiConverterTypeSendMessageParams: FfiConverterRustBuffer<SendMess
  * Token usage from an agent turn.
  */
 data class TokenUsage (
-    var `inputTokens`: kotlin.UInt
-    , 
-    var `outputTokens`: kotlin.UInt
-    , 
+    var `inputTokens`: kotlin.UInt, 
+    var `outputTokens`: kotlin.UInt, 
     var `totalTokens`: kotlin.UInt
-    
-){
-    
-
-    
-
+) {
     
     companion object
 }
@@ -3604,9 +3174,6 @@ sealed class NativeAgentException: kotlin.Exception() {
             get() = ""
     }
     
-
-    
-
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<NativeAgentException> {
         override fun lift(error_buf: RustBuffer.ByValue): NativeAgentException = FfiConverterTypeNativeAgentError.lift(error_buf)
@@ -3731,274 +3298,6 @@ public object FfiConverterTypeNativeAgentError : FfiConverterRustBuffer<NativeAg
 
 
 /**
- * Callback interface implemented by hosts to store the auth-profiles
- * envelope. Methods cross the FFI as JSON strings.
- */
-public interface AuthProfileStore {
-    
-    /**
-     * Return the full auth-profiles JSON envelope. When the host has
-     * nothing stored yet, return an empty default envelope:
-     * `{"version":1,"profiles":{},"lastGood":{},"usageStats":{}}`.
-     */
-    fun `load`(): kotlin.String
-    
-    /**
-     * Persist the full auth-profiles JSON envelope. The host is
-     * responsible for atomicity + permissions (e.g. file mode 0600).
-     *
-     * Returns an error on failure so callers like `set_auth_key` can
-     * surface the problem instead of silently losing the user's auth
-     * update. Use `NativeAgentError::Auth { msg }` so the variant
-     * matches the rest of `auth.rs`'s error vocabulary; UniFFI bindgens
-     * accept this type because `AgentStore`'s methods already do.
-     */
-    fun `save`(`profilesJson`: kotlin.String)
-    
-    companion object
-}
-
-
-
-// Put the implementation in an object so we don't pollute the top-level namespace
-internal object uniffiCallbackInterfaceAuthProfileStore {
-    internal object `load`: UniffiCallbackInterfaceAuthProfileStoreMethod0 {
-        override fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeAuthProfileStore.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`load`(
-                )
-            }
-            val writeReturn = { value: kotlin.String -> uniffiOutReturn.setValue(FfiConverterString.lower(value)) }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-    internal object `save`: UniffiCallbackInterfaceAuthProfileStoreMethod1 {
-        override fun callback(`uniffiHandle`: Long,`profilesJson`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeAuthProfileStore.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`save`(
-                    FfiConverterString.lift(`profilesJson`),
-                )
-            }
-            val writeReturn = { _: Unit -> Unit }
-            uniffiTraitInterfaceCallWithError(
-                uniffiCallStatus,
-                makeCall,
-                writeReturn,
-                { e: NativeAgentException -> FfiConverterTypeNativeAgentError.lower(e) }
-            )
-        }
-    }
-
-    internal object uniffiFree: UniffiCallbackInterfaceFree {
-        override fun callback(handle: Long) {
-            FfiConverterTypeAuthProfileStore.handleMap.remove(handle)
-        }
-    }
-
-    internal object uniffiClone: UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long {
-            return FfiConverterTypeAuthProfileStore.handleMap.clone(handle)
-        }
-    }
-
-    internal var vtable = UniffiVTableCallbackInterfaceAuthProfileStore.UniffiByValue(
-        uniffiFree,
-        uniffiClone,
-        `load`,
-        `save`,
-    )
-
-    // Registers the foreign callback with the Rust side.
-    // This method is generated for each callback interface.
-    internal fun register(lib: UniffiLib) {
-        lib.uniffi_native_agent_ffi_fn_init_callback_vtable_authprofilestore(vtable)
-    }
-}
-
-/**
- * The ffiConverter which transforms the Callbacks in to handles to pass to Rust.
- *
- * @suppress
- */
-public object FfiConverterTypeAuthProfileStore: FfiConverterCallbackInterface<AuthProfileStore>()
-
-
-
-
-
-/**
- * Optional governance provider for security, audit, and loop-guard checks.
- * Implemented by Kotlin/Swift — typically backed by capacitor-agent-os when
- * that plugin is installed. When absent, the agent loop runs without
- * governance checks.
- */
-public interface GovernanceProvider {
-    
-    /**
-     * Check if a tool call should proceed. Returns JSON verdict:
-     * `{"type":"Allow"}` | `{"type":"Warn","reason":"..."}` |
-     * `{"type":"Block","reason":"..."}` | `{"type":"CircuitBreak","reason":"..."}`
-     */
-    fun `checkLoop`(`toolName`: kotlin.String, `paramsJson`: kotlin.String): kotlin.String
-    
-    /**
-     * Record tool outcome for loop detection. Returns optional warning string.
-     */
-    fun `recordOutcome`(`toolName`: kotlin.String, `paramsJson`: kotlin.String, `result`: kotlin.String): kotlin.String?
-    
-    /**
-     * Record an audit trail entry.
-     */
-    fun `recordAudit`(`agentId`: kotlin.String, `action`: kotlin.String, `detail`: kotlin.String, `outcome`: kotlin.String)
-    
-    /**
-     * Check if content is tainted before passing to LLM. Returns JSON:
-     * `{"blocked":true/false,"reason":"...","matchedLabels":[...]}`
-     */
-    fun `checkSink`(`sinkType`: kotlin.String, `content`: kotlin.String): kotlin.String
-    
-    /**
-     * Reset loop guard state (e.g. on new session).
-     */
-    fun `reset`()
-    
-    /**
-     * Record token usage for cost tracking.
-     */
-    fun `recordUsage`(`modelId`: kotlin.String, `inputTokens`: kotlin.UInt, `outputTokens`: kotlin.UInt)
-    
-    companion object
-}
-
-
-
-// Put the implementation in an object so we don't pollute the top-level namespace
-internal object uniffiCallbackInterfaceGovernanceProvider {
-    internal object `checkLoop`: UniffiCallbackInterfaceGovernanceProviderMethod0 {
-        override fun callback(`uniffiHandle`: Long,`toolName`: RustBuffer.ByValue,`paramsJson`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeGovernanceProvider.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`checkLoop`(
-                    FfiConverterString.lift(`toolName`),
-                    FfiConverterString.lift(`paramsJson`),
-                )
-            }
-            val writeReturn = { value: kotlin.String -> uniffiOutReturn.setValue(FfiConverterString.lower(value)) }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-    internal object `recordOutcome`: UniffiCallbackInterfaceGovernanceProviderMethod1 {
-        override fun callback(`uniffiHandle`: Long,`toolName`: RustBuffer.ByValue,`paramsJson`: RustBuffer.ByValue,`result`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeGovernanceProvider.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`recordOutcome`(
-                    FfiConverterString.lift(`toolName`),
-                    FfiConverterString.lift(`paramsJson`),
-                    FfiConverterString.lift(`result`),
-                )
-            }
-            val writeReturn = { value: kotlin.String? -> uniffiOutReturn.setValue(FfiConverterOptionalString.lower(value)) }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-    internal object `recordAudit`: UniffiCallbackInterfaceGovernanceProviderMethod2 {
-        override fun callback(`uniffiHandle`: Long,`agentId`: RustBuffer.ByValue,`action`: RustBuffer.ByValue,`detail`: RustBuffer.ByValue,`outcome`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeGovernanceProvider.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`recordAudit`(
-                    FfiConverterString.lift(`agentId`),
-                    FfiConverterString.lift(`action`),
-                    FfiConverterString.lift(`detail`),
-                    FfiConverterString.lift(`outcome`),
-                )
-            }
-            val writeReturn = { _: Unit -> Unit }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-    internal object `checkSink`: UniffiCallbackInterfaceGovernanceProviderMethod3 {
-        override fun callback(`uniffiHandle`: Long,`sinkType`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeGovernanceProvider.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`checkSink`(
-                    FfiConverterString.lift(`sinkType`),
-                    FfiConverterString.lift(`content`),
-                )
-            }
-            val writeReturn = { value: kotlin.String -> uniffiOutReturn.setValue(FfiConverterString.lower(value)) }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-    internal object `reset`: UniffiCallbackInterfaceGovernanceProviderMethod4 {
-        override fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeGovernanceProvider.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`reset`(
-                )
-            }
-            val writeReturn = { _: Unit -> Unit }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-    internal object `recordUsage`: UniffiCallbackInterfaceGovernanceProviderMethod5 {
-        override fun callback(`uniffiHandle`: Long,`modelId`: RustBuffer.ByValue,`inputTokens`: Int,`outputTokens`: Int,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
-            val uniffiObj = FfiConverterTypeGovernanceProvider.handleMap.get(uniffiHandle)
-            val makeCall = { ->
-                uniffiObj.`recordUsage`(
-                    FfiConverterString.lift(`modelId`),
-                    FfiConverterUInt.lift(`inputTokens`),
-                    FfiConverterUInt.lift(`outputTokens`),
-                )
-            }
-            val writeReturn = { _: Unit -> Unit }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-
-    internal object uniffiFree: UniffiCallbackInterfaceFree {
-        override fun callback(handle: Long) {
-            FfiConverterTypeGovernanceProvider.handleMap.remove(handle)
-        }
-    }
-
-    internal object uniffiClone: UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long {
-            return FfiConverterTypeGovernanceProvider.handleMap.clone(handle)
-        }
-    }
-
-    internal var vtable = UniffiVTableCallbackInterfaceGovernanceProvider.UniffiByValue(
-        uniffiFree,
-        uniffiClone,
-        `checkLoop`,
-        `recordOutcome`,
-        `recordAudit`,
-        `checkSink`,
-        `reset`,
-        `recordUsage`,
-    )
-
-    // Registers the foreign callback with the Rust side.
-    // This method is generated for each callback interface.
-    internal fun register(lib: UniffiLib) {
-        lib.uniffi_native_agent_ffi_fn_init_callback_vtable_governanceprovider(vtable)
-    }
-}
-
-/**
- * The ffiConverter which transforms the Callbacks in to handles to pass to Rust.
- *
- * @suppress
- */
-public object FfiConverterTypeGovernanceProvider: FfiConverterCallbackInterface<GovernanceProvider>()
-
-
-
-
-
-/**
  * Callback interface for memory operations (LanceDB or any vector store).
  * Implemented by Kotlin/Swift, which bridges to the actual memory backend.
  */
@@ -4017,7 +3316,38 @@ public interface MemoryProvider {
     companion object
 }
 
+// Magic number for the Rust proxy to call using the same mechanism as every other method,
+// to free the callback once it's dropped by Rust.
+internal const val IDX_CALLBACK_FREE = 0
+// Callback return codes
+internal const val UNIFFI_CALLBACK_SUCCESS = 0
+internal const val UNIFFI_CALLBACK_ERROR = 1
+internal const val UNIFFI_CALLBACK_UNEXPECTED_ERROR = 2
 
+/**
+ * @suppress
+ */
+public abstract class FfiConverterCallbackInterface<CallbackInterface: Any>: FfiConverter<CallbackInterface, Long> {
+    internal val handleMap = UniffiHandleMap<CallbackInterface>()
+
+    internal fun drop(handle: Long) {
+        handleMap.remove(handle)
+    }
+
+    override fun lift(value: Long): CallbackInterface {
+        return handleMap.get(value)
+    }
+
+    override fun read(buf: ByteBuffer) = lift(buf.getLong())
+
+    override fun lower(value: CallbackInterface) = handleMap.insert(value)
+
+    override fun allocationSize(value: CallbackInterface) = 8UL
+
+    override fun write(value: CallbackInterface, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
 
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfaceMemoryProvider {
@@ -4093,20 +3423,13 @@ internal object uniffiCallbackInterfaceMemoryProvider {
         }
     }
 
-    internal object uniffiClone: UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long {
-            return FfiConverterTypeMemoryProvider.handleMap.clone(handle)
-        }
-    }
-
     internal var vtable = UniffiVTableCallbackInterfaceMemoryProvider.UniffiByValue(
-        uniffiFree,
-        uniffiClone,
         `store`,
         `recall`,
         `forget`,
         `search`,
         `list`,
+        uniffiFree,
     )
 
     // Registers the foreign callback with the Rust side.
@@ -4166,16 +3489,9 @@ internal object uniffiCallbackInterfaceNativeEventCallback {
         }
     }
 
-    internal object uniffiClone: UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long {
-            return FfiConverterTypeNativeEventCallback.handleMap.clone(handle)
-        }
-    }
-
     internal var vtable = UniffiVTableCallbackInterfaceNativeEventCallback.UniffiByValue(
-        uniffiFree,
-        uniffiClone,
         `onEvent`,
+        uniffiFree,
     )
 
     // Registers the foreign callback with the Rust side.
@@ -4231,16 +3547,9 @@ internal object uniffiCallbackInterfaceNativeNotifier {
         }
     }
 
-    internal object uniffiClone: UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long {
-            return FfiConverterTypeNativeNotifier.handleMap.clone(handle)
-        }
-    }
-
     internal var vtable = UniffiVTableCallbackInterfaceNativeNotifier.UniffiByValue(
-        uniffiFree,
-        uniffiClone,
         `sendNotification`,
+        uniffiFree,
     )
 
     // Registers the foreign callback with the Rust side.
@@ -4295,38 +3604,6 @@ public object FfiConverterOptionalUInt: FfiConverterRustBuffer<kotlin.UInt?> {
 /**
  * @suppress
  */
-public object FfiConverterOptionalLong: FfiConverterRustBuffer<kotlin.Long?> {
-    override fun read(buf: ByteBuffer): kotlin.Long? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterLong.read(buf)
-    }
-
-    override fun allocationSize(value: kotlin.Long?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterLong.allocationSize(value)
-        }
-    }
-
-    override fun write(value: kotlin.Long?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterLong.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
 public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?> {
     override fun read(buf: ByteBuffer): kotlin.String? {
         if (buf.get().toInt() == 0) {
@@ -4352,39 +3629,10 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
         }
     }
 }
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterSequenceTypeNativeToolDescriptor: FfiConverterRustBuffer<List<NativeToolDescriptor>> {
-    override fun read(buf: ByteBuffer): List<NativeToolDescriptor> {
-        val len = buf.getInt()
-        return List<NativeToolDescriptor>(len) {
-            FfiConverterTypeNativeToolDescriptor.read(buf)
-        }
-    }
-
-    override fun allocationSize(value: List<NativeToolDescriptor>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeNativeToolDescriptor.allocationSize(it) }.sum()
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<NativeToolDescriptor>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypeNativeToolDescriptor.write(it, buf)
-        }
-    }
-}
     @Throws(NativeAgentException::class) fun `createHandleFromPersistedConfig`(`configPath`: kotlin.String): NativeAgentHandle {
             return FfiConverterTypeNativeAgentHandle.lift(
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_func_create_handle_from_persisted_config(
-    
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_func_create_handle_from_persisted_config(
         FfiConverterString.lower(`configPath`),_status)
 }
     )
@@ -4397,8 +3645,7 @@ public object FfiConverterSequenceTypeNativeToolDescriptor: FfiConverterRustBuff
     @Throws(NativeAgentException::class) fun `initWorkspace`(`config`: InitConfig)
         = 
     uniffiRustCallWithError(NativeAgentException) { _status ->
-    UniffiLib.uniffi_native_agent_ffi_fn_func_init_workspace(
-    
+    UniffiLib.INSTANCE.uniffi_native_agent_ffi_fn_func_init_workspace(
         FfiConverterTypeInitConfig.lower(`config`),_status)
 }
     

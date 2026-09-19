@@ -1,0 +1,29 @@
+{
+  "fileCount": 16,
+  "files": {
+    ".cargo/config.toml": "8f9ed74f2278ffe1a3e794c7c892ae9fdf8a106d8b71870201e68a427ca92ad1",
+    ".generation-source": "b842d7315c8213faa4649c1b7216294f5794186e3b8954f0eddda4e663e929c7",
+    "Cargo.lock": "b1ce9f82a54f92d9c5ba1fdf6afb2e81925fd9a2a051ec38209b2ccd388e47e2",
+    "Cargo.toml": "3adbbb553047b03905a85828b2c6a79851192c9f40f920fea9dde876e9ccfcc7",
+    "build.rs": "6adf11f779bca14a5dddfcdc0531739425a4d68f5e9534dfc16b0cfa1b94cea9",
+    "src/agent_loop.rs": "35f28262e4c6bf2a6dcd9784b4172ca390aa4a224dc92f11508d66205cd583ad",
+    "src/auth.rs": "884977af646ff28015a4daad4a69fc6cca34f47ee09c8be333663aa9d14df594",
+    "src/config_store.rs": "3a0e52753757fecb0062bf3ee5053292770592f7771fc30b78fa94470fb2a1fb",
+    "src/db.rs": "0a3f1fdb9a45f6638948180b4939568c9b30f77247609595d7e340fd87e9d000",
+    "src/event_bus.rs": "c99cc09dba17db96f890a633f4b79b095c5a8452157d2cada3fba2a0ece29160",
+    "src/lib.rs": "69bdb0f84599522cb4426d48151cfe30f2eb7bff582bb9690569f65f243dad01",
+    "src/llm_driver.rs": "62bd37200b6fc8a894f6607cb415ead30fbc33c53a6a3260da13905a3e6ea246",
+    "src/tool_runner.rs": "ca065f5457357096c5a5c8cfffe051d606d3acbf8a49a2dbfe83687e893df3b8",
+    "src/types.rs": "382bd03f06580760e6345fd3e0e5118ee9e59d1f530773724d0d2ebc4dac067f",
+    "src/workspace.rs": "cd323b8b7dc9a2484acf08726f69be2704bd59b691761a2df20cea8b81f9c6c3",
+    "uniffi-bindgen.rs": "55a5501b6239f6f219489db85de7ead6d2bf0c927f4fa1cfd674779e33d59c31"
+  },
+  "license": "MIT (Copyright (c) 2025 Techxagon) \u2014 see plugins/native-agent/LICENSE",
+  "note": "Vendored copy of the native agent FFI crate, taken from the PUBLIC upstream tag v0.5.2 (the last tag where the crate is committed in-repo instead of being a submodule pointer to a private GitLab). Ordinary files: no submodule and no private-repository access is required to build libnative_agent_ffi.so for every Android ABI.",
+  "ref": "v0.5.2",
+  "source": "https://github.com/rogelioRuiz/capacitor-native-agent.git",
+  "totalBytes": 304905,
+  "uniffiContractVersion": 26,
+  "upstreamCommit": "7b42bb59fca8ac3496ddc76b9f4e6c3be6446b7b",
+  "vendoredAt": "2026-09-19T03:11:59Z"
+}

@@ -668,8 +668,19 @@ const NativeKit: any = {
   // On-device Rust AI agent. Every call below runs entirely inside the app
   // process (LLM client, tool loop, SQLite store, cron scheduler) — the only
   // network traffic is the agent talking to its configured LLM provider.
+  //
+  // The plugin is pinned to the PUBLIC upstream generation "0.5.2" (see
+  // docs/AGENT-ENGINE-0.5.2-BACKPORT.bn.md), whose Rust crate source is public
+  // and therefore buildable for every Android ABI. Five methods that only exist
+  // in the newer (private-source) generation are provided here as compatibility
+  // shims instead of raw pass-throughs: checkAvailability (native probe added),
+  // scheduleBackgroundWakes, cancelBackgroundWakes, loadSurfacedMessages and
+  // setMcpTools.
   agent: {
     supported: (): boolean => config.features.agent && isNative,
+
+    /** Which engine generation the pinned plugin builds against. */
+    engineGeneration: '0.5.2-public',
 
     // ── Diagnostics ──
     // Never rejects: an unsupported device ABI resolves { available: false }.
@@ -680,11 +691,27 @@ const NativeKit: any = {
     initialize: async (options: Record<string, unknown>) => { feature('agent'); requireNative(); return NativeAgent.initialize(options as any); },
 
     // ── Background wakes (Android JobScheduler / iOS BGProcessingTask) ──
+    // Not part of the 0.5.2 engine. Resolves (never rejects) with an explicit
+    // "unsupported" envelope so UI code can show a truthful message; scheduled
+    // agent work is still available through cron jobs + handleWake().
     scheduleBackgroundWakes: async (intervalMinutes?: number) => {
       feature('agent'); requireNative();
-      return NativeAgent.scheduleBackgroundWakes(intervalMinutes === undefined ? {} : { intervalMinutes });
+      return {
+        supported: false,
+        engineGeneration: '0.5.2-public',
+        intervalMinutes: intervalMinutes ?? null,
+        reason: 'scheduleBackgroundWakes() is a newer-engine (>=0.6) API; the pinned 0.5.2 build has no OS wake scheduler.',
+        alternative: 'Use addCronJob() for scheduled runs and handleWake() from your own JobService/BackgroundRunner task.',
+      };
     },
-    cancelBackgroundWakes: async () => { feature('agent'); requireNative(); return NativeAgent.cancelBackgroundWakes(); },
+    cancelBackgroundWakes: async () => {
+      feature('agent'); requireNative();
+      return {
+        supported: false,
+        engineGeneration: '0.5.2-public',
+        reason: 'cancelBackgroundWakes() is a newer-engine (>=0.6) API; nothing was scheduled by this build.',
+      };
+    },
 
     // ── Agent turns ──
     sendMessage: async (options: Record<string, unknown>) => { feature('agent'); requireNative(); return NativeAgent.sendMessage(options as any); },
@@ -710,7 +737,9 @@ const NativeKit: any = {
     getAuthToken: async (provider = 'anthropic') => { feature('agent'); requireNative(); return NativeAgent.getAuthToken({ provider }); },
     setAuthKey: async (key: string, provider = 'anthropic', authType = 'api_key', refresh?: string, expiresAt?: number) => {
       feature('agent'); requireNative();
-      return NativeAgent.setAuthKey({ key, provider, authType, refresh, expiresAt });
+      // `refresh`/`expiresAt` are newer-engine fields; the 0.5.2 binding accepts
+      // key/provider/authType only (OAuth tokens go through exchangeOAuthCode()).
+      return NativeAgent.setAuthKey({ key, provider, authType });
     },
     deleteAuth: async (provider = 'anthropic') => { feature('agent'); requireNative(); return NativeAgent.deleteAuth({ provider }); },
     refreshToken: async (provider = 'anthropic') => { feature('agent'); requireNative(); return NativeAgent.refreshToken({ provider }); },
@@ -722,7 +751,7 @@ const NativeKit: any = {
 
     // ── Sessions ──
     listSessions: async (agentId = 'main') => { feature('agent'); requireNative(); return NativeAgent.listSessions({ agentId }); },
-    loadSession: async (sessionKey: string, agentId?: string) => { feature('agent'); requireNative(); return NativeAgent.loadSession({ sessionKey, agentId }); },
+    loadSession: async (sessionKey: string, agentId?: string) => { feature('agent'); requireNative(); return NativeAgent.loadSession({ sessionKey, agentId: agentId ?? 'main' }); },
     resumeSession: async (options: Record<string, unknown>) => { feature('agent'); requireNative(); return NativeAgent.resumeSession(options as any); },
     clearSession: async () => { feature('agent'); requireNative(); return NativeAgent.clearSession(); },
 
@@ -733,8 +762,25 @@ const NativeKit: any = {
     listCronJobs: async () => { feature('agent'); requireNative(); return NativeAgent.listCronJobs(); },
     runCronJob: async (jobId: string) => { feature('agent'); requireNative(); return NativeAgent.runCronJob({ jobId }); },
     listCronRuns: async (jobId?: string, limit?: number) => { feature('agent'); requireNative(); return NativeAgent.listCronRuns({ jobId, limit }); },
-    loadSurfacedMessages: async (limit?: number) => { feature('agent'); requireNative(); return NativeAgent.loadSurfacedMessages({ limit }); },
-    handleWake: async (source?: string) => { feature('agent'); requireNative(); return NativeAgent.handleWake(source === undefined ? {} : { source }); },
+    loadSurfacedMessages: async (limit?: number) => {
+      feature('agent'); requireNative();
+      // 0.5.2 has no "surfaced messages" API: return the session list instead of
+      // throwing, so the lab UI can still render something meaningful.
+      const out: Record<string, unknown> = {
+        supported: false,
+        engineGeneration: '0.5.2-public',
+        limit: limit ?? 20,
+        reason: 'loadSurfacedMessages() is a newer-engine (>=0.6) API.',
+        alternative: 'listSessions() + loadSession() give the stored conversation.',
+      };
+      try {
+        out.sessions = await NativeAgent.listSessions({ agentId: 'main' });
+      } catch (error) {
+        out.sessionsError = error instanceof Error ? error.message : String(error);
+      }
+      return out;
+    },
+    handleWake: async (source?: string) => { feature('agent'); requireNative(); return NativeAgent.handleWake({ source: source ?? 'manual' }); },
     getSchedulerConfig: async () => { feature('agent'); requireNative(); return NativeAgent.getSchedulerConfig(); },
     setSchedulerConfig: async (configJson: string) => { feature('agent'); requireNative(); return NativeAgent.setSchedulerConfig({ configJson }); },
     setHeartbeatConfig: async (configJson: string) => { feature('agent'); requireNative(); return NativeAgent.setHeartbeatConfig({ configJson }); },
@@ -742,11 +788,15 @@ const NativeKit: any = {
     // ── Skills ──
     addSkill: async (inputJson: string) => { feature('agent'); requireNative(); return NativeAgent.addSkill({ inputJson }); },
     updateSkill: async (id: string, patchJson: string) => { feature('agent'); requireNative(); return NativeAgent.updateSkill({ id, patchJson }); },
-    removeSkill: async (skillId: string) => { feature('agent'); requireNative(); return NativeAgent.removeSkill({ skillId }); },
+    removeSkill: async (skillId: string) => { feature('agent'); requireNative(); return NativeAgent.removeSkill({ id: skillId }); },
     listSkills: async () => { feature('agent'); requireNative(); return NativeAgent.listSkills(); },
     startSkill: async (skillId: string, configJson?: string, provider?: string) => {
       feature('agent'); requireNative();
-      return NativeAgent.startSkill({ skillId, configJson, provider });
+      return NativeAgent.startSkill({
+        skillId,
+        configJson: configJson ?? '{}',
+        ...(provider === undefined ? {} : { provider }),
+      });
     },
     endSkill: async (skillId: string) => { feature('agent'); requireNative(); return NativeAgent.endSkill({ skillId }); },
 
@@ -754,7 +804,7 @@ const NativeKit: any = {
     seedToolPermissions: async (defaultsJson: string) => { feature('agent'); requireNative(); return NativeAgent.seedToolPermissions({ defaultsJson }); },
     setToolPermission: async (toolName: string, permission: string, enabled?: boolean) => {
       feature('agent'); requireNative();
-      return NativeAgent.setToolPermission({ toolName, permission, enabled });
+      return NativeAgent.setToolPermission({ toolName, permission, enabled: enabled ?? true });
     },
     listToolPermissions: async () => { feature('agent'); requireNative(); return NativeAgent.listToolPermissions(); },
     resetToolPermissions: async () => { feature('agent'); requireNative(); return NativeAgent.resetToolPermissions(); },
@@ -762,7 +812,13 @@ const NativeKit: any = {
     // ── MCP ──
     startMcp: async (toolsJson: string) => { feature('agent'); requireNative(); return NativeAgent.startMcp({ toolsJson }); },
     restartMcp: async (toolsJson: string) => { feature('agent'); requireNative(); return NativeAgent.restartMcp({ toolsJson }); },
-    setMcpTools: async (toolsJson: string) => { feature('agent'); requireNative(); return NativeAgent.setMcpTools({ toolsJson }); },
+    setMcpTools: async (toolsJson: string) => {
+      feature('agent'); requireNative();
+      // No dedicated setter in 0.5.2 — restarting the MCP bridge with the new
+      // tool list has the same effect on this generation.
+      const result = await NativeAgent.restartMcp({ toolsJson });
+      return { ...(result as Record<string, unknown>), engineGeneration: '0.5.2-public', viaCompat: 'setMcpTools→restartMcp' };
+    },
 
     // ── Models & tools ──
     getModels: async (provider = 'anthropic') => { feature('agent'); requireNative(); return NativeAgent.getModels({ provider }); },

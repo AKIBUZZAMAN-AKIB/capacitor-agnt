@@ -1,4 +1,4 @@
-import { promises as fs } from 'node:fs';
+import { existsSync, promises as fs } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +10,16 @@ const wc = config.widget ?? { enabled: false, homeScreen: { enabled: false, resi
 // Must match NativeAgentBackgroundTask.taskIdentifier in the native-agent plugin
 // (plugins/native-agent/ios/Sources/NativeAgentPlugin/NativeAgentBackgroundTask.swift).
 const AGENT_WAKE_TASK_ID = 'io.t6x.nativeagent.wake';
+// …but that file only exists in newer plugin generations. The pinned public
+// 0.5.2 generation (docs/AGENT-ENGINE-0.5.2-BACKPORT.bn.md) has no iOS wake task,
+// and whitelisting an identifier nobody registers would silently promise iOS
+// scheduled agent runs that never happen — so the id is added only when the
+// implementation is really there.
+const agentWakeTaskFile = path.join(
+  root,
+  'plugins/native-agent/ios/Sources/NativeAgentPlugin/NativeAgentBackgroundTask.swift',
+);
+const agentWakeSupported = existsSync(agentWakeTaskFile);
 
 const xml = (value) => String(value)
   .replaceAll('&', '&amp;')
@@ -288,7 +298,7 @@ function infoPlist() {
   // On-device agent: cron jobs / heartbeat wakes are driven by a BGProcessingTask.
   // Without this identifier scheduleBackgroundWakes() resolves jobScheduled:false
   // and every scheduled agent job silently never runs on iOS.
-  if (config.features.agent) bgTaskIds.push(AGENT_WAKE_TASK_ID);
+  if (config.features.agent && agentWakeSupported) bgTaskIds.push(AGENT_WAKE_TASK_ID);
   if (bgTaskIds.length) {
     entries.set('BGTaskSchedulerPermittedIdentifiers', [...new Set(bgTaskIds)]);
   }
@@ -304,7 +314,7 @@ function infoPlist() {
   if (config.ios.backgroundFetch) modes.push('fetch');
   // The agent's wake task is a BGProcessingTask, which requires the 'processing'
   // background mode even if the host app did not opt into backgroundProcessing.
-  if (config.ios.backgroundProcessing || config.features.agent) modes.push('processing');
+  if (config.ios.backgroundProcessing || agentWakeSupported) modes.push('processing');
   if (config.features.backgroundLocation && config.ios.backgroundLocation) modes.push('location');
   if (config.ios.pushCapabilityConfigured) modes.push('remote-notification');
   if (modes.length) entries.set('UIBackgroundModes', modes);

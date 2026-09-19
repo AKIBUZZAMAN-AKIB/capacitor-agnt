@@ -3,7 +3,6 @@ package com.t6x.plugins.nativeagent
 import android.content.Context
 import java.util.Locale
 import java.util.UUID
-import java.util.concurrent.Executors
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -14,15 +13,6 @@ import uniffi.native_agent_ffi.MemoryProvider
 class MemoryProviderImpl(private val context: Context) : MemoryProvider {
     fun isAvailable(): Boolean = LanceDBBridge.getOrCreateHandle(context) != null
 
-    // UniFFI methods on LanceDbHandle are suspend → require runBlocking. The
-    // MemoryProvider callback is invoked by Rust on a JNA-managed native
-    // thread; running coroutines (and uniffiRustCallAsync's own JNA callbacks)
-    // on that thread races with JNA's thread-detach logic, producing
-    // SIGABRT "attempting to detach while still running code" on Android ART.
-    // Hop to a dedicated JVM-owned worker thread so the JNA callback thread
-    // only blocks on Future.get(), never executes coroutine continuations.
-    private fun <T> onWorker(block: () -> T): T = WORKER.submit(block).get()
-
     override fun store(key: String, text: String, metadataJson: String?): String {
         val handle = LanceDBBridge.getOrCreateHandle(context) ?: return unavailableJson()
         val resolvedKey = key.ifBlank {
@@ -30,10 +20,8 @@ class MemoryProviderImpl(private val context: Context) : MemoryProvider {
         }
         val embedding = localHashEmbed(text, LanceDBBridge.EMBEDDING_DIM)
         return runCatching {
-            onWorker {
-                runBlocking {
-                    handle.store(resolvedKey, DEFAULT_AGENT_ID, text, embedding, metadataJson)
-                }
+            runBlocking {
+                handle.store(resolvedKey, DEFAULT_AGENT_ID, text, embedding, metadataJson)
             }
             JSONObject()
                 .put("success", true)
@@ -46,17 +34,15 @@ class MemoryProviderImpl(private val context: Context) : MemoryProvider {
         val handle = LanceDBBridge.getOrCreateHandle(context) ?: return unavailableJson()
         val embedding = localHashEmbed(query, LanceDBBridge.EMBEDDING_DIM)
         return runCatching {
-            val results = onWorker {
-                runBlocking {
-                    handle.hybridSearch(
-                        embedding,
-                        query,
-                        limit,
-                        "agent_id = '$DEFAULT_AGENT_ID'",
-                        null,
-                        null,
-                    )
-                }
+            val results = runBlocking {
+                handle.hybridSearch(
+                    embedding,
+                    query,
+                    limit,
+                    "agent_id = '$DEFAULT_AGENT_ID'",
+                    null,
+                    null,
+                )
             }
             hybridResultsJson(results)
         }.getOrElse { errorJson(it) }
@@ -68,10 +54,8 @@ class MemoryProviderImpl(private val context: Context) : MemoryProvider {
             return JSONObject().put("error", "Provide query or key.").toString()
         }
         return runCatching {
-            onWorker {
-                runBlocking {
-                    handle.delete(key)
-                }
+            runBlocking {
+                handle.delete(key)
             }
             JSONObject()
                 .put("success", true)
@@ -84,10 +68,8 @@ class MemoryProviderImpl(private val context: Context) : MemoryProvider {
         val handle = LanceDBBridge.getOrCreateHandle(context) ?: return unavailableJson()
         val embedding = localHashEmbed(query, LanceDBBridge.EMBEDDING_DIM)
         return runCatching {
-            val results = onWorker {
-                runBlocking {
-                    handle.search(embedding, maxResults, "agent_id = '$DEFAULT_AGENT_ID'")
-                }
+            val results = runBlocking {
+                handle.search(embedding, maxResults, "agent_id = '$DEFAULT_AGENT_ID'")
             }
             searchResultsJson(results)
         }.getOrElse { errorJson(it) }
@@ -96,10 +78,8 @@ class MemoryProviderImpl(private val context: Context) : MemoryProvider {
     override fun list(prefix: String?, limit: UInt?): String {
         val handle = LanceDBBridge.getOrCreateHandle(context) ?: return unavailableJson()
         return runCatching {
-            val keys = onWorker {
-                runBlocking {
-                    handle.list(prefix, limit)
-                }
+            val keys = runBlocking {
+                handle.list(prefix, limit)
             }
             JSONArray(keys).toString()
         }.getOrElse { errorJson(it) }
@@ -151,9 +131,6 @@ class MemoryProviderImpl(private val context: Context) : MemoryProvider {
 
     private companion object {
         private const val DEFAULT_AGENT_ID = "main"
-        private val WORKER = Executors.newSingleThreadExecutor { r ->
-            Thread(r, "memory-provider-worker").apply { isDaemon = true }
-        }
         private val WHITESPACE = Regex("\\s+")
         private val UINT_MAX_DOUBLE = 0xffffffffu.toDouble()
         private const val FNV_OFFSET = 0x811c9dc5u

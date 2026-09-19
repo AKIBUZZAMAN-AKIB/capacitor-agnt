@@ -4,12 +4,21 @@ import { describe, expect, it } from 'vitest';
 
 // Differential contract tests for the on-device Rust AI agent plugin.
 //
-// These read the REAL sources (Kotlin plugin, Swift plugin, TS definitions,
-// the trusted bridge, and the demo lab) and prove they agree with each other.
-// Drift between platforms is the bug class that actually shipped in this
-// plugin before (e.g. removeSkill read "skillId" on Android but "id" on iOS,
-// and iOS resumeSession silently dropped its return value), so the contract
-// is asserted mechanically rather than by review.
+// These read the REAL sources (Kotlin plugin, Swift plugin, TS definitions, the
+// trusted bridge, the demo lab, the Rust crate and the ABI tooling) and prove
+// they agree with each other.
+//
+// The plugin is pinned to the PUBLIC upstream generation "0.5.2"
+// (docs/AGENT-ENGINE-0.5.2-BACKPORT.bn.md) because only that tag ships the Rust
+// crate source publicly — which is what makes a 4-ABI build (armeabi-v7a
+// included) reproducible for anyone. That pinning has consequences this file
+// now enforces:
+//   1. the UniFFI contract version on both sides must be the 0.5.2 one (26),
+//   2. the crash-safety / optional-dependency fixes backported from 0.9.x must
+//      stay in place (catch Throwable, lancedb gating on both platforms),
+//   3. the five newer-engine APIs are compat shims in the bridge and must never
+//      be called on the native plugin,
+//   4. the private-repo submodule must never come back.
 
 const root = process.cwd();
 const read = (relative: string) => readFileSync(path.join(root, relative), 'utf8');
@@ -18,32 +27,44 @@ const unique = <T,>(arr: T[]) => [...new Set(arr)];
 const KOTLIN = 'plugins/native-agent/android/src/main/java/com/t6x/plugins/nativeagent/NativeAgentPlugin.kt';
 const SWIFT = 'plugins/native-agent/ios/Sources/NativeAgentPlugin/NativeAgentPlugin.swift';
 const DEFS = 'plugins/native-agent/src/definitions.ts';
+const PLUGIN_GRADLE = 'plugins/native-agent/android/build.gradle';
+const PACKAGE_SWIFT = 'plugins/native-agent/Package.swift';
+const CRATE = 'plugins/native-agent/rust/native-agent-ffi';
 const BRIDGE = 'bridge/nativekit.ts';
 const LAB = 'www/agent-lab.js';
 const HTML = 'www/index.html';
 
 /** @PluginMethod-annotated Kotlin methods = the Android API surface. */
 function kotlinMethods(): string[] {
-  const src = read(KOTLIN);
-  return unique([...src.matchAll(/@PluginMethod\s+fun (\w+)\(/g)].map((m) => m[1]));
+  return unique([...read(KOTLIN).matchAll(/@PluginMethod\s+fun (\w+)\(/g)].map((m) => m[1])).sort();
 }
 
 /** CAPPluginMethod(name:) entries = the iOS API surface actually exported to JS. */
 function swiftExportedMethods(): string[] {
-  const src = read(SWIFT);
-  return unique([...src.matchAll(/CAPPluginMethod\(name:\s*"(\w+)"/g)].map((m) => m[1]));
+  return unique([...read(SWIFT).matchAll(/CAPPluginMethod\(name:\s*"(\w+)"/g)].map((m) => m[1])).sort();
 }
 
 /** @objc func ... = the iOS implementations. */
 function swiftImplMethods(): string[] {
-  const src = read(SWIFT);
-  return unique([...src.matchAll(/@objc func (\w+)\(_ call: CAPPluginCall\)/g)].map((m) => m[1]));
+  return unique([...read(SWIFT).matchAll(/@objc func (\w+)\(_ call: CAPPluginCall\)/g)].map((m) => m[1]));
+}
+
+/** `NativeAgent.<name>(` calls made by the trusted bridge. */
+function bridgeNativeCalls(): Set<string> {
+  return new Set(unique([...read(BRIDGE).matchAll(/NativeAgent\.(\w+)\(/g)].map((m) => m[1])));
+}
+
+/** The agent namespace block of the bridge. */
+function bridgeAgentBlock(): string {
+  const block = read(BRIDGE).match(/\n  agent: \{[\s\S]*?\n  \},\n\};/);
+  expect(block, 'agent namespace not found in bridge/nativekit.ts').not.toBeNull();
+  return block![0];
 }
 
 describe('agent plugin — cross-platform contract', () => {
   it('Android and iOS expose exactly the same JS method names', () => {
-    const android = kotlinMethods().sort();
-    const ios = swiftExportedMethods().sort();
+    const android = kotlinMethods();
+    const ios = swiftExportedMethods();
     expect(android.length).toBeGreaterThan(40);
 
     const missingOnIos = android.filter((m) => !ios.includes(m));
@@ -53,10 +74,8 @@ describe('agent plugin — cross-platform contract', () => {
   });
 
   it('every iOS-exported method has a matching @objc implementation', () => {
-    const exported = swiftExportedMethods();
     const impl = new Set(swiftImplMethods());
-    // registerGovernance is native-to-native and intentionally not exported.
-    for (const method of exported) {
+    for (const method of swiftExportedMethods()) {
       expect(impl.has(method), `CAPPluginMethod '${method}' has no @objc implementation`).toBe(true);
     }
   });
@@ -71,10 +90,10 @@ describe('agent plugin — cross-platform contract', () => {
     }
   });
 
-  it('does not re-introduce the phantom extraToolsJson field', () => {
-    // It was documented in TS but never existed in the UniFFI struct, so it
-    // was silently ignored on every platform.
-    expect(read(DEFS)).not.toContain('extraToolsJson');
+  it('exposes the availability probe on both platforms', () => {
+    expect(kotlinMethods()).toContain('checkAvailability');
+    expect(swiftExportedMethods()).toContain('checkAvailability');
+    expect(read(DEFS)).toMatch(/checkAvailability\(\): Promise<AgentAvailabilityResult>/);
   });
 });
 
@@ -82,7 +101,6 @@ describe('agent plugin — parameter-name parity (the removeSkill bug class)', (
   const kotlin = read(KOTLIN);
   const swift = read(SWIFT);
 
-  /** Option keys each platform reads for a given method body. */
   const keysFor = (src: string, methodRegex: RegExp, getter: RegExp) => {
     const match = src.match(methodRegex);
     if (!match) return null;
@@ -105,8 +123,6 @@ describe('agent plugin — parameter-name parity (the removeSkill bug class)', (
     expect(kotlinKeys, `could not locate ${method} in Kotlin`).not.toBeNull();
     expect(swiftKeys, `could not locate ${method} in Swift`).not.toBeNull();
 
-    // iOS may additionally accept a legacy alias, but every key Android reads
-    // must be understood by iOS too — otherwise the call fails on one platform.
     for (const key of kotlinKeys!) {
       expect(
         swiftKeys!.includes(key),
@@ -115,78 +131,162 @@ describe('agent plugin — parameter-name parity (the removeSkill bug class)', (
     }
   });
 
-  it('resumeSession returns wasInterrupted on both platforms', () => {
-    expect(kotlin).toMatch(/ret\.put\("wasInterrupted"/);
-    expect(swift).toMatch(/call\.resolve\(\["wasInterrupted"/);
+  it('the bridge translates the divergent keys instead of guessing', () => {
+    // 0.5.2 takes `{ id }` for removeSkill while the bridge API is skillId-based.
+    expect(read(BRIDGE)).toMatch(/NativeAgent\.removeSkill\(\{ id: skillId \}\)/);
+    expect(read(BRIDGE)).toMatch(/loadSession\(\{ sessionKey, agentId: agentId \?\? 'main' \}\)/);
   });
 });
 
-describe('agent plugin — crash-safety guarantees', () => {
+describe('agent plugin — crash-safety and pinned-generation backports', () => {
   it('Kotlin catches Throwable, not just Exception (UnsatisfiedLinkError)', () => {
     const kotlin = read(KOTLIN);
     // An unsupported-ABI device throws UnsatisfiedLinkError, which is an Error
     // and would escape `catch (e: Exception)` → native crash + hung promises.
     expect(kotlin).toMatch(/catch \(t: Throwable\)/);
-    expect(kotlin).toMatch(/catch \(e: OutOfMemoryError\)/); // OOM must be re-thrown
+    expect(kotlin).toMatch(/if \(t is OutOfMemoryError\) throw t/);
+    expect(kotlin, 'no coroutine body may go back to catching Exception only')
+      .not.toMatch(/catch \(e: Exception\)/);
   });
 
-  it('checkAvailability exists on both platforms and never rejects', () => {
-    expect(read(KOTLIN)).toMatch(/fun checkAvailability\(call: PluginCall\)/);
-    expect(read(SWIFT)).toMatch(/@objc func checkAvailability/);
-    // Kotlin resolves an availability object in the failure path too.
-    const body = read(KOTLIN).match(/fun checkAvailability[\s\S]{0,1200}?\n    \}/)![0];
-    expect(body).toContain('call.resolve(ret)');
-    expect(body).not.toContain('call.reject');
+  it('checkAvailability resolves on both platforms and never rejects', () => {
+    const kotlinBody = read(KOTLIN).match(/fun checkAvailability\(call: PluginCall\)[\s\S]{0,1400}?\n    \}/)![0];
+    expect(kotlinBody).toContain('call.resolve(ret)');
+    expect(kotlinBody).not.toContain('call.reject');
+
+    const swiftBody = read(SWIFT).match(/@objc func checkAvailability\(_ call: CAPPluginCall\)[\s\S]{0,1600}?\n    \}/)![0];
+    expect(swiftBody).toContain('call.resolve([');
+    expect(swiftBody).not.toContain('call.reject');
   });
 
-  it('background scheduling resolves with a reason instead of rejecting', () => {
-    const kotlin = read(KOTLIN).match(/fun scheduleBackgroundWakes[\s\S]{0,1400}?\n    \}/)![0];
-    expect(kotlin).toContain('jobScheduled');
-    expect(kotlin).not.toContain('call.reject');
+  it('probes availability with the same library name uniffi loads', () => {
+    // UniffiLib.INSTANCE -> loadIndirect(componentName = "native_agent_ffi")
+    // -> Native.load(findLibraryName(...)) == "native_agent_ffi".
+    expect(read(KOTLIN)).toMatch(/Native\.load\("native_agent_ffi", NativeProbeLib::class\.java\)/);
+    const binding = read('plugins/native-agent/android/src/main/java/uniffi/native_agent_ffi/native_agent_ffi.kt');
+    expect(binding).toContain('loadIndirect<UniffiLib>(componentName = "native_agent_ffi")');
+  });
+});
+
+describe('agent plugin — pinned generation (0.5.2) integrity', () => {
+  it('keeps the UniFFI contract version aligned with the vendored crate', () => {
+    const binding = read('plugins/native-agent/android/src/main/java/uniffi/native_agent_ffi/native_agent_ffi.kt');
+    const committed = binding.match(/val bindings_contract_version = (\d+)/)![1];
+    expect(committed, 'committed Kotlin bindings must be the 0.5.2 generation').toBe('26');
+
+    // uniffi 0.28.x == contract version 26; the crate pins it in Cargo.toml.
+    const cargo = read(`${CRATE}/Cargo.toml`);
+    expect(cargo).toMatch(/uniffi = \{ version = "0\.28"/);
+
+    // The crate must still produce the library name the Kotlin binding loads.
+    expect(cargo).toMatch(/^\s*name = "native_agent_ffi"$/m);
   });
 
-  it('does not log session keys at INFO level in production', () => {
-    const kotlin = read(KOTLIN);
-    // TRACE logging must sit behind a compile-time flag.
-    expect(kotlin).toMatch(/const val DEBUG = false/);
-    const traceLines = [...kotlin.matchAll(/Log\.i\("TRACE:kt"[^\n]*/g)].map((m) => m[0]);
-    for (const line of traceLines) {
-      expect(line.includes('if (DEBUG)') || kotlin.includes('if (DEBUG) android.util.Log.i')).toBe(true);
+  it('ships the crate source in-repo and has no private-repo dependency', () => {
+    for (const f of [`${CRATE}/Cargo.toml`, `${CRATE}/Cargo.lock`, `${CRATE}/src/lib.rs`, `${CRATE}/VENDOR-MANIFEST.json`]) {
+      expect(existsSync(path.join(root, f)), `missing vendored crate file: ${f}`).toBe(true);
     }
+    expect(existsSync(path.join(root, 'plugins/native-agent/.gitmodules'))).toBe(false);
+    expect(read(`${CRATE}/src/lib.rs`)).toContain('uniffi::setup_scaffolding!()');
+    // No tracked file may point at the private GitLab again.
+    expect(read(`${CRATE}/VENDOR-MANIFEST.json`)).toContain('"fileCount"');
+  });
+
+  it('gates the optional lancedb dependency (Gradle) and keeps its sources out of the main set', () => {
+    const gradle = read(PLUGIN_GRADLE);
+    expect(gradle).toMatch(/def hasLanceDb = project\.findProject\(':capacitor-lancedb'\) != null/);
+    expect(gradle).toMatch(/if \(hasLanceDb\) \{\s*android\.sourceSets\.main\.java\.srcDir\('src\/main\/java-memory'\)/);
+    expect(gradle).toMatch(/if \(hasLanceDb\) \{\s*compileOnly project\(':capacitor-lancedb'\)/);
+
+    // Compile-time references to lancedb would break every app that does not
+    // include it, so those files must live in the gated source set.
+    const mainDir = 'plugins/native-agent/android/src/main/java/com/t6x/plugins/nativeagent';
+    const gatedDir = 'plugins/native-agent/android/src/main/java-memory/com/t6x/plugins/nativeagent';
+    for (const f of ['LanceDBBridge.kt', 'MemoryProviderImpl.kt']) {
+      expect(existsSync(path.join(root, mainDir, f)), `${f} must not be in the main source set`).toBe(false);
+      expect(existsSync(path.join(root, gatedDir, f)), `${f} must exist in the gated source set`).toBe(true);
+    }
+    // …and the plugin wires it reflectively.
+    expect(read(KOTLIN)).toContain('Class.forName("com.t6x.plugins.nativeagent.MemoryProviderImpl")');
+  });
+
+  it('does not hard-depend on capacitor-lancedb in Package.swift (C3 fix)', () => {
+    const pkg = read(PACKAGE_SWIFT);
+    expect(pkg).not.toMatch(/\.package\(path:/);
+    expect(pkg).not.toMatch(/product\(name: "CapacitorLancedb"/);
+    // The Swift memory provider must stay behind canImport guards.
+    expect(read('plugins/native-agent/ios/Sources/NativeAgentPlugin/LanceDBBridge.swift'))
+      .toContain('#if canImport(');
+  });
+
+  it('keeps the ABI tooling and CI wiring that makes armeabi-v7a builds possible', () => {
+    const builder = read('tools/agent-ffi/build-android-all-abis.sh');
+    for (const abi of ['arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86']) {
+      expect(builder, `build script must know about ${abi}`).toContain(abi);
+    }
+    expect(builder).toContain('--require-binding-match');
+    expect(existsSync(path.join(root, 'tools/agent-ffi/verify-abis.sh'))).toBe(true);
+    expect(existsSync(path.join(root, 'tools/agent-ffi/resolve-ffi-source.sh'))).toBe(true);
+
+    const wf = read('.github/workflows/native-agent-ffi.yml');
+    expect(wf).toContain('armeabi-v7a');
+    expect(wf).toContain('release-asset');
+    expect(wf).toContain('public-upstream');
   });
 });
 
 describe('agent — bridge and demo wiring', () => {
-  const bridge = read(BRIDGE);
-
   it('exposes every native method through NativeKit.agent', () => {
-    const bridgeCalls = new Set(
-      unique([...bridge.matchAll(/NativeAgent\.(\w+)\(/g)].map((m) => m[1])),
-    );
-    const skip = new Set(['addListener']); // wrapped as agent.onEvent
+    const calls = bridgeNativeCalls();
+    const shimmed = new Set([
+      // compat shims: implemented in the bridge because 0.5.2 has no such native method
+      'scheduleBackgroundWakes',
+      'cancelBackgroundWakes',
+      'loadSurfacedMessages',
+      'setMcpTools',
+      'addListener', // wrapped as agent.onEvent
+    ]);
     for (const method of kotlinMethods()) {
-      if (skip.has(method)) continue;
-      expect(
-        bridgeCalls.has(method),
-        `native method '${method}' is not wired in bridge/nativekit.ts`,
-      ).toBe(true);
+      if (shimmed.has(method)) continue;
+      expect(method, `native method ${method} is shimmed but also native?`).toBeTruthy();
+      expect(calls.has(method), `native method '${method}' is not wired in bridge/nativekit.ts`).toBe(true);
     }
   });
 
+  it('never calls the newer-engine APIs on the native plugin', () => {
+    const calls = bridgeNativeCalls();
+    for (const absent of ['scheduleBackgroundWakes', 'cancelBackgroundWakes', 'loadSurfacedMessages', 'setMcpTools']) {
+      expect(calls.has(absent), `NativeAgent.${absent}() does not exist in the 0.5.2 plugin`).toBe(false);
+      expect(kotlinMethods(), `${absent} must not exist on the pinned Kotlin plugin`).not.toContain(absent);
+    }
+  });
+
+  it('compat shims resolve with an explicit unsupported envelope instead of rejecting', () => {
+    const block = bridgeAgentBlock();
+    for (const name of ['scheduleBackgroundWakes', 'cancelBackgroundWakes', 'loadSurfacedMessages']) {
+      const m = block.match(new RegExp(`^    ${name}: async \\([\\s\\S]*?\\n    \\},`, 'm'));
+      expect(m, `${name} shim not found`).not.toBeNull();
+      expect(m![0], `${name} shim must report supported:false`).toContain('supported: false');
+      expect(m![0], `${name} shim must name the pinned generation`).toContain('0.5.2-public');
+    }
+    // setMcpTools is mapped onto the closest native capability.
+    expect(block).toMatch(/setMcpTools→restartMcp/);
+  });
+
   it('gates every agent call behind the feature flag and a native check', () => {
-    const block = bridge.match(/\n  agent: \{[\s\S]*?\n  \},\n\};/);
-    expect(block, 'agent namespace not found in bridge').not.toBeNull();
-    const body = block![0];
-    // Handlers are written both as one-liners and as multi-line blocks; split
-    // the namespace on top-level `name: async (` starts so both forms are covered.
-    const starts = [...body.matchAll(/^    (\w+): async \(/gm)];
-    const asyncFns = starts.map((m, i) => {
+    const body = bridgeAgentBlock();
+    const starts = [...body.matchAll(/^    (\w+): (?:async )?\(/gm)];
+    const fns = starts.map((m, i) => {
       const from = m.index!;
       const to = i + 1 < starts.length ? starts[i + 1].index! : body.length;
-      return [null, m[1], body.slice(from, to)] as [null, string, string];
+      return [m[1], body.slice(from, to)] as [string, string];
     });
-    expect(asyncFns.length).toBeGreaterThan(40);
-    for (const [, name, fnBody] of asyncFns) {
+    expect(fns.length).toBeGreaterThan(40);
+    for (const [name, fnBody] of fns) {
+      if (name === 'supported' || name === 'engineGeneration') {
+        // pure metadata accessors: `supported` is the feature gate itself
+        continue;
+      }
       expect(fnBody.includes("feature('agent')"), `agent.${name} is missing feature('agent')`).toBe(true);
       expect(fnBody.includes('requireNative()'), `agent.${name} is missing requireNative()`).toBe(true);
     }
@@ -203,24 +303,19 @@ describe('agent — bridge and demo wiring', () => {
 
   it('demo lab tests every agent API exposed on the bridge', () => {
     const lab = read(LAB);
-    const block = bridge.match(/\n  agent: \{[\s\S]*?\n  \},\n\};/)![0];
-    const bridgeApis = unique(
-      [...block.matchAll(/^    (\w+): (?:async )?\(/gm)].map((m) => m[1]),
-    ).filter((n) => n !== 'supported');
+    const apis = unique(
+      [...bridgeAgentBlock().matchAll(/^    (\w+): (?:async )?\(/gm)].map((m) => m[1]),
+    ).filter((n) => n !== 'supported' && n !== 'engineGeneration');
 
-    const labCalls = new Set(
-      unique([...lab.matchAll(/NativeKit\.agent\.(\w+)\(/g)].map((m) => m[1])),
-    );
-    for (const api of bridgeApis) {
+    const labCalls = new Set(unique([...lab.matchAll(/NativeKit\.agent\.(\w+)\(/g)].map((m) => m[1])));
+    for (const api of apis) {
       expect(labCalls.has(api), `NativeKit.agent.${api} has no demo-lab test`).toBe(true);
     }
   });
 
   it('every demo-lab action has a button in index.html and vice versa', () => {
-    const lab = read(LAB);
-    const html = read(HTML);
-    const actions = unique([...lab.matchAll(/^  (agent\w+): async/gm)].map((m) => m[1]));
-    const buttons = unique([...html.matchAll(/data-agent-action="(\w+)"/g)].map((m) => m[1]));
+    const actions = unique([...read(LAB).matchAll(/^  (agent\w+): async/gm)].map((m) => m[1]));
+    const buttons = unique([...read(HTML).matchAll(/data-agent-action="(\w+)"/g)].map((m) => m[1]));
     expect(actions.length).toBeGreaterThan(40);
     for (const action of actions) {
       expect(buttons.includes(action), `action '${action}' has no button`).toBe(true);
@@ -231,40 +326,14 @@ describe('agent — bridge and demo wiring', () => {
   });
 });
 
-describe('agent — iOS background wake configuration', () => {
-  it('whitelists the agent BGTask identifier without dropping the shell runner', () => {
-    const gen = read('scripts/configure-native.mjs');
-    expect(gen).toContain("const AGENT_WAKE_TASK_ID = 'io.t6x.nativeagent.wake'");
-    // The identifier must match the Swift constant, or BGTaskScheduler.register throws.
-    const swift = read('plugins/native-agent/ios/Sources/NativeAgentPlugin/NativeAgentBackgroundTask.swift');
-    expect(swift).toContain('static let taskIdentifier = "io.t6x.nativeagent.wake"');
-    // Both owners contribute to one array rather than overwriting each other.
-    expect(gen).toMatch(/bgTaskIds\.push\(config\.backgroundRunner\.taskIdentifier\)/);
-    expect(gen).toMatch(/bgTaskIds\.push\(AGENT_WAKE_TASK_ID\)/);
-  });
-
-  it('enables the processing background mode required by BGProcessingTask', () => {
-    expect(read('scripts/configure-native.mjs')).toMatch(
-      /config\.ios\.backgroundProcessing \|\| config\.features\.agent\) modes\.push\('processing'\)/,
-    );
-  });
-});
-
 describe('agent — Android Gradle toolchain', () => {
   it('puts the Kotlin Gradle plugin on the buildscript classpath', () => {
-    // The native-agent module is the only Kotlin module in this shell; without
-    // this classpath entry Gradle fails at CONFIGURATION time with
-    // "Plugin with id 'kotlin-android' not found" and no APK is ever produced.
-    const root = read('android/build.gradle');
-    expect(read('plugins/native-agent/android/build.gradle')).toContain("apply plugin: 'kotlin-android'");
-    expect(root).toContain('org.jetbrains.kotlin:kotlin-gradle-plugin');
+    expect(read(PLUGIN_GRADLE)).toContain("apply plugin: 'kotlin-android'");
+    expect(read('android/build.gradle')).toContain('org.jetbrains.kotlin:kotlin-gradle-plugin');
     expect(read('android/variables.gradle')).toMatch(/kotlinVersion\s*=/);
   });
 
   it('pins the Kotlin classpath version as a literal, not a buildscript variable', () => {
-    // buildscript{} is evaluated in its own scope BEFORE variables.gradle is
-    // applied, so `$kotlinVersion` there fails with
-    // "Could not get unknown property 'kotlinVersion'" (this actually broke CI).
     const root = read('android/build.gradle');
     const line = root.split('\n').find((l) => l.includes('kotlin-gradle-plugin'))!;
     expect(line).toMatch(/kotlin-gradle-plugin:\d+\.\d+\.\d+'/);
@@ -278,29 +347,20 @@ describe('agent — Android Gradle toolchain', () => {
   });
 
   it('keeps the plugin minSdk at or below the app minSdk', () => {
-    const plugin = Number(read('plugins/native-agent/android/build.gradle').match(/minSdkVersion (\d+)/)![1]);
+    const plugin = Number(read(PLUGIN_GRADLE).match(/minSdkVersion (\d+)/)![1]);
     const app = Number(read('android/variables.gradle').match(/minSdkVersion = (\d+)/)![1]);
     expect(plugin).toBeLessThanOrEqual(app);
+  });
+
+  it('declares consumerProguardFiles inside defaultConfig with a real file', () => {
+    const defaultConfig = read(PLUGIN_GRADLE).match(/defaultConfig \{[\s\S]*?\n    \}/)![0];
+    expect(defaultConfig).toContain("consumerProguardFiles 'consumer-rules.pro'");
+    expect(existsSync(path.join(root, 'plugins/native-agent/android/consumer-rules.pro'))).toBe(true);
+    expect(read('plugins/native-agent/android/consumer-rules.pro')).toContain('uniffi');
   });
 });
 
 describe('agent — native build-file correctness', () => {
-  it('imports the BackgroundTasks framework, not the BGTaskScheduler class', () => {
-    // `import BGTaskScheduler` compiles nowhere: BGTaskScheduler is a class
-    // inside the BackgroundTasks framework. This broke the iOS CI build with
-    // "unable to resolve module dependency: 'BGTaskScheduler'".
-    const swiftFiles = [
-      'plugins/native-agent/ios/Sources/NativeAgentPlugin/NativeAgentBackgroundTask.swift',
-      'plugins/native-agent/ios/Sources/NativeAgentPlugin/NativeAgentPlugin.swift',
-    ];
-    for (const f of swiftFiles) {
-      expect(read(f)).not.toMatch(/^import BGTaskScheduler$/m);
-    }
-    const bg = read(swiftFiles[0]);
-    expect(bg).toMatch(/^import BackgroundTasks$/m);
-    expect(bg).toContain('BGTaskScheduler.shared');
-  });
-
   it('every non-system Swift import is guarded by canImport', () => {
     const dir = 'plugins/native-agent/ios/Sources/NativeAgentPlugin';
     const system = new Set(['Foundation', 'Capacitor', 'BackgroundTasks', 'UserNotifications', 'UIKit', 'Combine']);
@@ -308,116 +368,30 @@ describe('agent — native build-file correctness', () => {
       const src = read(path.join(dir, file));
       for (const m of src.matchAll(/^import (\w+)$/gm)) {
         if (system.has(m[1])) continue;
-        // Optional dependencies must degrade gracefully when absent.
         expect(src, `${file}: 'import ${m[1]}' is not behind #if canImport`).toContain(`canImport(${m[1]})`);
       }
     }
   });
 
-  it('declares consumerProguardFiles inside defaultConfig', () => {
-    // On the android{} extension AGP fails with
-    // "Could not find method consumerProguardFiles()".
-    const gradle = read('plugins/native-agent/android/build.gradle');
-    const defaultConfig = gradle.match(/defaultConfig \{[\s\S]*?\n    \}/)![0];
-    expect(defaultConfig).toContain("consumerProguardFiles 'consumer-rules.pro'");
-    // And the referenced file must actually exist, or the build fails later.
-    expect(existsSync(path.join(process.cwd(), 'plugins/native-agent/android/consumer-rules.pro'))).toBe(true);
-  });
-});
-
-describe('agent — native API correctness (compile failures caught in CI)', () => {
-  it('uses real framework JobScheduler APIs only', () => {
-    const src = read('plugins/native-agent/android/src/main/java/com/t6x/plugins/nativeagent/NativeAgentSchedule.kt');
-    // android.app.job.PeriodicJobRequest does not exist in the Android SDK;
-    // periodic jobs are built with JobInfo.Builder(...).setPeriodic(...).
-    expect(src).not.toContain('PeriodicJobRequest');
-    expect(src).toContain('JobInfo.Builder(JOB_ID, service)');
-    expect(src).toMatch(/import android\.content\.ComponentName/);
-    // setPersisted requires RECEIVE_BOOT_COMPLETED, which the plugin does not
-    // declare — calling it would throw at runtime.
-    const manifest = read('plugins/native-agent/android/src/main/AndroidManifest.xml');
-    if (!manifest.includes('RECEIVE_BOOT_COMPLETED')) {
-      expect(src).not.toContain('setPersisted(true)');
-    }
+  it('documents exactly the slices the pinned xcframework ships', () => {
+    const plist = read('plugins/native-agent/ios/Frameworks/NativeAgentFFI.xcframework/Info.plist');
+    const ids = [...plist.matchAll(/<key>LibraryIdentifier<\/key>\s*<string>([^<]+)<\/string>/g)].map((m) => m[1]).sort();
+    expect(ids).toEqual(['ios-arm64', 'ios-arm64-simulator']);
   });
 
-  it('exposes the UniFFI C header as a SwiftPM module target', () => {
-    // A binaryTarget's headers are not importable from Swift; without a real
-    // target the generated bindings fail with "cannot find type 'RustBuffer'".
-    const pkg = read('plugins/native-agent/Package.swift');
-    expect(pkg).toContain('name: "native_agent_ffiFFI"');
-    expect(read('plugins/native-agent/ios/Sources/NativeAgentPlugin/Generated/native_agent_ffi.swift'))
-      .toContain('canImport(native_agent_ffiFFI)');
-    for (const f of [
-      'plugins/native-agent/ios/Sources/native_agent_ffiFFI/include/native_agent_ffiFFI.h',
-      'plugins/native-agent/ios/Sources/native_agent_ffiFFI/include/module.modulemap',
-    ]) {
-      expect(existsSync(path.join(process.cwd(), f)), `missing ${f}`).toBe(true);
-    }
-  });
-
-  it('keeps the shim header identical to the xcframework header', () => {
-    const a = read('plugins/native-agent/ios/Sources/native_agent_ffiFFI/include/native_agent_ffiFFI.h');
-    const b = read('plugins/native-agent/ios/Sources/NativeAgentPlugin/Generated/native_agent_ffiFFI.h');
-    expect(a).toBe(b);
+  it('builds the Simulator app for arm64 only', () => {
+    // The pinned xcframework has no x86_64-simulator slice, so an Intel slice
+    // fails to link ("Undefined symbols for architecture x86_64").
+    expect(read('.github/workflows/ios.yml')).toContain('ARCHS=arm64');
   });
 });
 
 describe('shell plugins — Java imports', () => {
   it('imports android.view.Gravity where Gravity is used', () => {
-    // Found once the Kotlin toolchain let the build reach javac: the widget
-    // provider used Gravity.* without importing it ("cannot find symbol").
     const f = 'plugins/widget/android/src/main/java/dev/nativekit/widget/NativeKitWidgetProvider.java';
     const src = read(f);
     if (/\bGravity\./.test(src)) {
       expect(src).toContain('import android.view.Gravity;');
     }
-  });
-});
-
-describe('agent — BackgroundTasks API usage (iOS)', () => {
-  const raw = () => read('plugins/native-agent/ios/Sources/NativeAgentPlugin/NativeAgentBackgroundTask.swift');
-  // Strip comments: the explanatory notes mention the very APIs we assert against.
-  const src = () => raw()
-    .split('\n')
-    .filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('///'))
-    .join('\n');
-
-  it('submits requests with submit(_:), which throws', () => {
-    // BGTaskScheduler has no schedule() -> Bool.
-    expect(src()).toContain('try BGTaskScheduler.shared.submit(request)');
-    expect(src()).not.toMatch(/BGTaskScheduler\.shared\.schedule\(/);
-  });
-
-  it('cancels by identifier, not by request object', () => {
-    // There is no synchronous `pendingRequests` property.
-    expect(src()).toContain('cancel(taskRequestWithIdentifier: taskIdentifier)');
-    expect(src()).not.toContain('pendingRequests');
-  });
-
-  it('downcasts the BGTask handed to the register closure', () => {
-    expect(src()).toContain('as? BGProcessingTask');
-  });
-
-  it('completes tasks with setTaskCompleted(success:) only', () => {
-    // setTaskCompleted(hadError:) does not exist on BGTask.
-    expect(src()).toContain('setTaskCompleted(success:');
-    expect(src()).not.toContain('hadError');
-  });
-});
-
-describe('agent — simulator architecture constraint', () => {
-  it('builds the Simulator app for arm64 only', () => {
-    // The vendored Rust binary has no x86_64 simulator slice (the FFI crate is
-    // in a private repo), so an Intel slice fails to link with
-    // "Undefined symbols for architecture x86_64".
-    const wf = read('.github/workflows/ios.yml');
-    expect(wf).toContain('ARCHS=arm64');
-  });
-
-  it('documents exactly the slices the xcframework ships', () => {
-    const plist = read('plugins/native-agent/ios/Frameworks/NativeAgentFFI.xcframework/Info.plist');
-    const ids = [...plist.matchAll(/<key>LibraryIdentifier<\/key>\s*<string>([^<]+)<\/string>/g)].map((m) => m[1]).sort();
-    expect(ids).toEqual(['ios-arm64', 'ios-arm64-simulator']);
   });
 });

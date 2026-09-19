@@ -1,3 +1,0 @@
-[submodule "rust/native-agent-ffi"]
-	path = rust/native-agent-ffi
-	url = https://gitlab.k8s.t6x.io/rruiz/native-agent-ffi.git

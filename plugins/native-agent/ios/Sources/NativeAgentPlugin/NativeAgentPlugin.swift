@@ -7,14 +7,11 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "NativeAgentPlugin"
     public let jsName = "NativeAgent"
     public let pluginMethods: [CAPPluginMethod] = [
+        // Diagnostics
+        CAPPluginMethod(name: "checkAvailability", returnType: CAPPluginReturnPromise),
         // Lifecycle
         CAPPluginMethod(name: "initWorkspace", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "initialize", returnType: CAPPluginReturnPromise),
-        // Diagnostics
-        CAPPluginMethod(name: "checkAvailability", returnType: CAPPluginReturnPromise),
-        // Background wakes
-        CAPPluginMethod(name: "scheduleBackgroundWakes", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "cancelBackgroundWakes", returnType: CAPPluginReturnPromise),
         // Agent
         CAPPluginMethod(name: "sendMessage", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "followUp", returnType: CAPPluginReturnPromise),
@@ -23,7 +20,6 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
         // Approval gate
         CAPPluginMethod(name: "respondToApproval", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "respondToMcpTool", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "setMcpTools", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "respondToCronApproval", returnType: CAPPluginReturnPromise),
         // Auth
         CAPPluginMethod(name: "getAuthToken", returnType: CAPPluginReturnPromise),
@@ -44,7 +40,6 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "listCronJobs", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "runCronJob", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "listCronRuns", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "loadSurfacedMessages", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "handleWake", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getSchedulerConfig", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setSchedulerConfig", returnType: CAPPluginReturnPromise),
@@ -70,32 +65,39 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "invokeTool", returnType: CAPPluginReturnPromise),
     ]
 
-    // Process-wide handle owner. A Capacitor app can host several bridges
-    // (multiple view controllers with webviews); the expensive native handle
-    // (SQLite, scheduler, auth) must be unique per process. Replacing it on
-    // re-initialize releases the previous handle deterministically (ARC
-    // deinit → rust free).
-    private static let processHandleLock = NSLock()
-    private static var processHandle: NativeAgentHandle?
+    // ── Diagnostics ─────────────────────────────────────────────────────────
 
-    private var handle: NativeAgentHandle? {
-        Self.processHandleLock.lock()
-        defer { Self.processHandleLock.unlock() }
-        return Self.processHandle
+    /// Never rejects: reports whether the native agent library is usable here, so
+    /// UI code can hide agent features instead of failing at call time. Mirrors
+    /// the Android implementation (see docs/AGENT-ENGINE-0.5.2-BACKPORT.bn.md).
+    @objc func checkAvailability(_ call: CAPPluginCall) {
+        var available = true
+        var reason = ""
+
+        #if targetEnvironment(simulator)
+        #if arch(arm64)
+        let abi = "arm64-simulator"
+        #else
+        // The pinned xcframework ships ios-arm64 and ios-arm64-simulator slices
+        // only — Intel Mac simulators have no matching slice.
+        let abi = "x86_64-simulator"
+        available = false
+        reason = "NativeAgentFFI.xcframework has no x86_64-simulator slice in this build"
+        #endif
+        #else
+        let abi = "arm64"
+        #endif
+
+        call.resolve([
+            "abi": abi,
+            "is64Bit": true,
+            "available": available,
+            "reason": reason,
+            "engineGeneration": "0.5.2-public",
+        ])
     }
 
-    private static func replaceProcessHandle(_ new: NativeAgentHandle?) {
-        processHandleLock.lock()
-        defer { processHandleLock.unlock() }
-        // Dropping the old reference here frees it immediately instead of
-        // waiting for an arbitrary deinit while the new handle is alive.
-        processHandle = nil
-        processHandle = new
-        NativeAgentBridge.setHandle(new)
-    }
-
-    // Deliberately no deinit cleanup: tearing down one bridge must not kill
-    // the process-wide handle (other bridges / background tasks keep using it).
+    private var handle: NativeAgentHandle?
 
     // ── Helper ──────────────────────────────────────────────────────────────
 
@@ -152,8 +154,6 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
         guard let authProfilesPath = call.getString("authProfilesPath") else {
             return call.reject("authProfilesPath is required")
         }
-        let defaultProvider = call.getString("defaultProvider")
-        let defaultModel = call.getString("defaultModel")
 
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             do {
@@ -161,9 +161,7 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
                     config: InitConfig(
                         dbPath: self.resolvePath(dbPath),
                         workspacePath: self.resolvePath(workspacePath),
-                        authProfilesPath: self.resolvePath(authProfilesPath),
-                        defaultProvider: defaultProvider,
-                        defaultModel: defaultModel
+                        authProfilesPath: self.resolvePath(authProfilesPath)
                     )
                 )
                 call.resolve()
@@ -183,8 +181,6 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
         guard let authProfilesPath = call.getString("authProfilesPath") else {
             return call.reject("authProfilesPath is required")
         }
-        let defaultProvider = call.getString("defaultProvider")
-        let defaultModel = call.getString("defaultModel")
 
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             do {
@@ -192,13 +188,8 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
                 let config = InitConfig(
                     dbPath: self.resolvePath(dbPath),
                     workspacePath: resolvedWorkspacePath,
-                    authProfilesPath: self.resolvePath(authProfilesPath),
-                    defaultProvider: defaultProvider,
-                    defaultModel: defaultModel
+                    authProfilesPath: self.resolvePath(authProfilesPath)
                 )
-                // Release any previous process handle deterministically
-                // (re-initialize must not leak the old Rust handle).
-                Self.replaceProcessHandle(nil)
                 let h = try NativeAgentHandle(config: config)
                 try h.setEventCallback(callback: NativeAgentEventBridge(plugin: self))
                 try h.setNotifier(notifier: NativeNotifierImpl())
@@ -206,21 +197,7 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
                     try h.setMemoryProvider(provider: memoryProvider)
                 }
                 try h.persistConfig()
-                Self.replaceProcessHandle(h)
-                // Persist the FULL config so the BGProcessingTask background
-                // wake can restore a handle when the app is launched without
-                // a webview. (Only the workspace config path was saved before.)
-                var configDict: [String: Any] = [
-                    "dbPath": self.resolvePath(dbPath),
-                    "workspacePath": resolvedWorkspacePath,
-                    "authProfilesPath": self.resolvePath(authProfilesPath),
-                ]
-                if let p = defaultProvider { configDict["defaultProvider"] = p }
-                if let m = defaultModel { configDict["defaultModel"] = m }
-                UserDefaults.standard.set(
-                    configDict,
-                    forKey: "mobilecron:native-agent-config"
-                )
+                self.handle = h
                 UserDefaults.standard.set(
                     self.resolveConfigPath(workspacePath: resolvedWorkspacePath),
                     forKey: Self.configPathKey
@@ -230,64 +207,6 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
                 call.reject("Failed to initialize NativeAgent: \(error.localizedDescription)")
             }
         }
-    }
-
-    // ── Diagnostics ─────────────────────────────────────────────────────────
-
-    /// Reports the device architecture. On iOS the FFI library is statically
-    /// linked into the app binary, so availability is always true; the method
-    /// exists for parity with the Android plugin (where a missing per-ABI .so
-    /// can make it false).
-    @objc func checkAvailability(_ call: CAPPluginCall) {
-        var info = utsname()
-        uname(&info)
-        let machine = withUnsafeBytes(of: &info.machine) { raw -> String in
-            let bytes = raw.prefix { $0 != 0 }
-            return String(decoding: bytes, as: UTF8.self)
-        }
-        call.resolve([
-            "abi": machine,
-            "is64Bit": true,
-            "available": true,
-            "reason": "",
-        ])
-    }
-
-    // ── Background wakes (BGProcessingTask) ─────────────────────────────────
-
-    /// Schedules a periodic background wake. The HOST APP must add to its
-    /// Info.plist: `BGTaskSchedulerPermittedIdentifiers` containing
-    /// `io.t6x.nativeagent.wake`, plus Background Modes → "Background fetch".
-    /// When unconfigured, this resolves with `jobScheduled: false` and a
-    /// reason instead of crashing.
-    @objc func scheduleBackgroundWakes(_ call: CAPPluginCall) {
-        let intervalMinutes = call.getInt("intervalMinutes") ?? 30
-        do {
-            try NativeAgentBackgroundTask.schedule(intervalMinutes: intervalMinutes)
-            call.resolve([
-                "jobScheduled": true,
-                "intervalMinutes": intervalMinutes,
-            ])
-        } catch {
-            call.resolve([
-                "jobScheduled": false,
-                "intervalMinutes": intervalMinutes,
-                "reason": error.localizedDescription,
-            ])
-        }
-    }
-
-    @objc func cancelBackgroundWakes(_ call: CAPPluginCall) {
-        NativeAgentBackgroundTask.cancel()
-        call.resolve(["cancelled": true])
-    }
-
-    // ── Governance (native-to-native, not a plugin method) ─────────────────
-
-    /// Register an optional governance provider for taint, audit, loop-guard, and cost tracking.
-    /// Called by capacitor-agent-os at init time — not exposed to JavaScript.
-    public func registerGovernance(_ provider: GovernanceProvider) {
-        try? handle?.setGovernanceProvider(provider: provider)
     }
 
     // ── Agent ────────────────────────────────────────────────────────────────
@@ -309,8 +228,7 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
                     provider: call.getString("provider"),
                     systemPrompt: call.getString("systemPrompt") ?? "",
                     maxTurns: call.getInt("maxTurns").map { UInt32($0) },
-                    skillAllowedToolsJson: call.getString("skillAllowedToolsJson"),
-                    priorMessagesJson: call.getString("priorMessagesJson")
+                    allowedToolsJson: call.getString("allowedToolsJson")
                 )
                 let runId = try h.sendMessage(params: params)
                 call.resolve(["runId": runId])
@@ -391,20 +309,6 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
-    @objc func setMcpTools(_ call: CAPPluginCall) {
-        withHandle(call) { h in
-            guard let toolsJson = call.getString("toolsJson") else {
-                return call.reject("toolsJson is required")
-            }
-            do {
-                let count = try h.setMcpTools(toolsJson: toolsJson)
-                call.resolve(["count": Int(count)])
-            } catch {
-                call.reject("setMcpTools failed: \(error.localizedDescription)")
-            }
-        }
-    }
-
     @objc func respondToCronApproval(_ call: CAPPluginCall) {
         withHandle(call) { h in
             guard let requestId = call.getString("requestId") else {
@@ -443,15 +347,11 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
             guard let key = call.getString("key") else {
                 return call.reject("key is required")
             }
-            let refresh: String? = call.getString("refresh")
-            let expiresAt: Int64? = (call.options["expiresAt"] as? NSNumber)?.int64Value
             do {
                 try h.setAuthKey(
                     key: key,
                     provider: call.getString("provider") ?? "anthropic",
-                    authType: call.getString("authType") ?? "api_key",
-                    refresh: refresh,
-                    expiresAt: expiresAt
+                    authType: call.getString("authType") ?? "api_key"
                 )
                 call.resolve()
             } catch {
@@ -563,17 +463,14 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
                 return call.reject("sessionKey is required")
             }
             do {
-                // `wasInterrupted` is part of the JS contract
-                // (Promise<{ wasInterrupted: boolean }>) — Android returns it,
-                // iOS used to drop it, breaking hosts that check the result.
-                let wasInterrupted = try h.resumeSession(
+                try h.resumeSession(
                     sessionKey: sessKey,
                     agentId: call.getString("agentId") ?? "main",
                     messagesJson: call.getString("messagesJson"),
                     provider: call.getString("provider"),
                     model: call.getString("model")
                 )
-                call.resolve(["wasInterrupted": wasInterrupted])
+                call.resolve()
             } catch {
                 call.reject("resumeSession failed: \(error.localizedDescription)")
             }
@@ -673,19 +570,6 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
-    @objc func loadSurfacedMessages(_ call: CAPPluginCall) {
-        withHandle(call) { h in
-            do {
-                let json = try h.loadSurfacedMessages(
-                    limit: Int64(call.getInt("limit") ?? 50)
-                )
-                call.resolve(["messagesJson": json])
-            } catch {
-                call.reject("loadSurfacedMessages failed: \(error.localizedDescription)")
-            }
-        }
-    }
-
     @objc func handleWake(_ call: CAPPluginCall) {
         withHandle(call) { h in
             do {
@@ -766,12 +650,8 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
 
     @objc func removeSkill(_ call: CAPPluginCall) {
         withHandle(call) { h in
-            // Cross-platform parity fix: Android reads "skillId" and the TS
-            // contract documents "skillId", but iOS only accepted "id" — so
-            // removeSkill() failed on exactly one platform for every caller.
-            // "id" stays accepted so existing iOS-only callers keep working.
-            guard let id = call.getString("skillId") ?? call.getString("id") else {
-                return call.reject("skillId is required")
+            guard let id = call.getString("id") else {
+                return call.reject("id is required")
             }
             do {
                 try h.removeSkill(id: id)
@@ -957,6 +837,5 @@ class NativeAgentEventBridge: NativeEventCallback {
             "eventType": eventType,
             "payloadJson": payloadJson,
         ])
-        NativeAgentBridge.dispatch(eventType: eventType, payloadJson: payloadJson)
     }
 }

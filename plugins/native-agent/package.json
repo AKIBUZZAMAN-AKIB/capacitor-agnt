@@ -1,6 +1,6 @@
 {
   "name": "capacitor-native-agent",
-  "version": "0.9.14",
+  "version": "0.5.2",
   "description": "Native AI agent loop for Capacitor — runs LLM completions, tool execution, and cron jobs in native Rust, enabling background execution.",
   "main": "dist/esm/index.js",
   "types": "dist/esm/index.d.ts",
@@ -49,11 +49,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/rogelioRuiz/capacitor-native-agent.git"
+    "url": "https://github.com/ArcadeLabsInc/capacitor-native-agent.git"
   },
-  "homepage": "https://github.com/rogelioRuiz/capacitor-native-agent#readme",
+  "homepage": "https://github.com/ArcadeLabsInc/capacitor-native-agent#readme",
   "bugs": {
-    "url": "https://github.com/rogelioRuiz/capacitor-native-agent/issues"
+    "url": "https://github.com/ArcadeLabsInc/capacitor-native-agent/issues"
   },
   "peerDependencies": {
     "@capacitor/core": "^6.0.0 || ^7.0.0 || ^8.0.0",

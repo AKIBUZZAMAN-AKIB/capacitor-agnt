@@ -5,6 +5,25 @@
  * The WebView engine.ts delegates ALL logic here — no agent logic in JS.
  */
 
+// ── Diagnostics ─────────────────────────────────────────────────────────────
+
+/**
+ * Result of the availability probe. Never rejects: on a device whose ABI has no
+ * packaged `.so` it resolves `{ available: false }` with a human-readable reason
+ * instead of throwing (and without crashing the app).
+ */
+export interface AgentAvailabilityResult {
+  /** Primary ABI reported by the platform, e.g. "armeabi-v7a". */
+  abi: string
+  /** Whether the device advertises any 64-bit ABI. */
+  is64Bit: boolean
+  available: boolean
+  /** Empty when available; otherwise why the native library could not load. */
+  reason: string
+  /** Which upstream plugin generation this build is pinned to, e.g. "0.5.2-public". */
+  engineGeneration?: string
+}
+
 // ── Config & params ─────────────────────────────────────────────────────────
 
 export interface InitConfig {
@@ -14,21 +33,6 @@ export interface InitConfig {
   workspacePath: string
   /** Path to auth-profiles.json */
   authProfilesPath: string
-  /**
-   * Configured default LLM provider for this agent. When a per-call
-   * `provider` is unset on `sendMessage` / cron / skill paths, the
-   * resolver falls back to this value. Omitting it falls through to
-   * the hardcoded "anthropic" safety net — properly-set-up agents
-   * should always specify this.
-   */
-  defaultProvider?: string
-  /**
-   * Configured default model. Only applies when the resolver also
-   * uses `defaultProvider` (i.e. caller didn't override provider).
-   * If provider is overridden, the per-provider default model is
-   * used instead, since model strings are tied to providers.
-   */
-  defaultModel?: string
 }
 
 export interface SendMessageParams {
@@ -38,12 +42,10 @@ export interface SendMessageParams {
   provider?: string
   systemPrompt: string
   maxTurns?: number
-  /**
-   * Optional skill-mode whitelist of allowed tool names (JSON-encoded array).
-   * Undefined or empty = no skill restriction. The FFI also applies its own
-   * per-turn permission filter from the AgentStore on top of this list.
-   */
-  skillAllowedToolsJson?: string
+  /** JSON-encoded list of allowed tool names. Empty = all tools. */
+  allowedToolsJson?: string
+  /** JSON-encoded extra tool definitions (account tools, MCP tools) */
+  extraToolsJson?: string
   /** JSON-encoded prior conversation messages for multi-turn skill sessions */
   priorMessagesJson?: string
 }
@@ -151,11 +153,6 @@ export interface CronSkillInput {
   allowedToolsJson?: string
   systemPrompt?: string
   model?: string
-  /**
-   * Optional per-skill provider override. When unset, the cron path
-   * falls back to the agent's `InitConfig.defaultProvider`.
-   */
-  provider?: string
   maxTurns?: number
   timeoutMs?: number
 }
@@ -166,8 +163,6 @@ export interface CronSkillRecord {
   allowedToolsJson?: string
   systemPrompt?: string
   model?: string
-  /** Per-skill provider override; null when the skill defers to the agent default. */
-  provider?: string
   maxTurns?: number
   timeoutMs?: number
   createdAt: number
@@ -222,67 +217,17 @@ export interface NativeAgentEvent {
   payloadJson: string
 }
 
-// ── Diagnostics ───────────────────────────────────────────────────────────────
-
-/**
- * Result of `checkAvailability()`. On Android, `available: false` means the
- * native library is missing for the device ABI (e.g. a 32-bit device when
- * only arm64-v8a was shipped) — the app should show a friendly message
- * instead of letting `initialize()` reject. On iOS the FFI library is
- * statically linked, so `available` is always true.
- */
-export interface AvailabilityInfo {
-  /** The device ABI (Android) or machine (iOS, e.g. "arm64"). */
-  abi: string
-  /** Whether the native library can be loaded/used on this device. */
-  available: boolean
-  /** True on 64-bit capable devices (Android). Always true on iOS. */
-  is64Bit?: boolean
-  /** Human-readable failure reason when `available` is false. */
-  reason?: string
-}
-
-/** Result of `scheduleBackgroundWakes()`. */
-export interface BackgroundWakeScheduleResult {
-  jobScheduled: boolean
-  /**
-   * The interval the OS actually honored. Android floors it at 15 min
-   * (API 24+) / 30 min (API 23); iOS BGProcessing is opportunistic and
-   * this value only sets the earliest begin date.
-   */
-  intervalMinutes: number
-  reason?: string
-}
-
 // ── Plugin interface ─────────────────────────────────────────────────────────
 
 export interface NativeAgentPlugin {
+  // ── Diagnostics ──
+
+  checkAvailability(): Promise<AgentAvailabilityResult>
+
   // ── Lifecycle ──
 
   initWorkspace(config: InitConfig): Promise<void>
   initialize(config: InitConfig): Promise<void>
-
-  // ── Diagnostics ──
-
-  /**
-   * Probe whether the native agent library is usable on this device without
-   * touching the agent state. Never rejects — an unsupported architecture
-   * resolves with `available: false`.
-   */
-  checkAvailability(): Promise<AvailabilityInfo>
-
-  // ── Background wakes ──
-
-  /**
-   * Schedule periodic background wakes (Android: framework JobScheduler,
-   * min 15 min; iOS: BGProcessingTask — requires the host app to add
-   * `BGTaskSchedulerPermittedIdentifiers` containing
-   * `io.t6x.nativeagent.wake` plus Background Modes → "Background fetch").
-   * Resolves (not rejects) with `jobScheduled: false` + `reason` when it
-   * cannot schedule.
-   */
-  scheduleBackgroundWakes(options?: { intervalMinutes?: number }): Promise<BackgroundWakeScheduleResult>
-  cancelBackgroundWakes(): Promise<{ cancelled: boolean }>
 
   // ── Agent ──
 
@@ -295,23 +240,11 @@ export interface NativeAgentPlugin {
 
   respondToApproval(options: { toolCallId: string; approved: boolean; reason?: string }): Promise<void>
   respondToMcpTool(options: { toolCallId: string; resultJson: string; isError?: boolean }): Promise<void>
-  /**
-   * Replace the FFI's MCP tool manifest. Tools registered here become
-   * visible to the LLM (subject to `webviewOnly` filtering in background
-   * mode) and, when invoked, surface as `mcp_tool_call` events that the
-   * host must answer with `respondToMcpTool`. Idempotent — every call
-   * replaces the prior manifest.
-   *
-   * `toolsJson` is a JSON-encoded array of
-   *   { name, description?, inputSchema?, webviewOnly?, approvalPolicy? }.
-   * Returns the count of registered tools.
-   */
-  setMcpTools(options: { toolsJson: string }): Promise<{ count: number }>
 
   // ── Auth ──
 
   getAuthToken(options: { provider: string }): Promise<AuthTokenResult>
-  setAuthKey(options: { key: string; provider: string; authType: string; refresh?: string; expiresAt?: number }): Promise<void>
+  setAuthKey(options: { key: string; provider: string; authType: string }): Promise<void>
   deleteAuth(options: { provider: string }): Promise<void>
   refreshToken(options: { provider: string }): Promise<AuthTokenResult>
   getAuthStatus(options: { provider: string }): Promise<AuthStatusResult>
@@ -319,9 +252,9 @@ export interface NativeAgentPlugin {
 
   // ── Sessions ──
 
-  listSessions(options: { agentId?: string }): Promise<{ sessionsJson: string }>
-  loadSession(options: { sessionKey: string; agentId?: string }): Promise<SessionHistoryResult>
-  resumeSession(options: { sessionKey: string; agentId?: string; messagesJson?: string; provider?: string; model?: string }): Promise<{ wasInterrupted: boolean }>
+  listSessions(options: { agentId: string }): Promise<{ sessionsJson: string }>
+  loadSession(options: { sessionKey: string; agentId: string }): Promise<SessionHistoryResult>
+  resumeSession(options: { sessionKey: string; agentId: string; messagesJson?: string; provider?: string; model?: string }): Promise<void>
   clearSession(): Promise<void>
 
   // ── Cron / heartbeat ──
@@ -332,8 +265,7 @@ export interface NativeAgentPlugin {
   listCronJobs(): Promise<{ jobsJson: string }>
   runCronJob(options: { jobId: string }): Promise<void>
   listCronRuns(options: { jobId?: string; limit?: number }): Promise<{ runsJson: string }>
-  loadSurfacedMessages(options: { limit?: number }): Promise<{ messagesJson: string }>
-  handleWake(options?: { source?: string }): Promise<void>
+  handleWake(options: { source: string }): Promise<void>
 
   getSchedulerConfig(): Promise<{ schedulerJson: string; heartbeatJson: string }>
   setSchedulerConfig(options: { configJson: string }): Promise<void>
@@ -345,16 +277,16 @@ export interface NativeAgentPlugin {
 
   addSkill(options: { inputJson: string }): Promise<{ recordJson: string }>
   updateSkill(options: { id: string; patchJson: string }): Promise<void>
-  removeSkill(options: { skillId: string }): Promise<void>
+  removeSkill(options: { id: string }): Promise<void>
   listSkills(): Promise<{ skillsJson: string }>
 
-  startSkill(options: { skillId: string; configJson?: string; provider?: string }): Promise<{ sessionKey: string }>
+  startSkill(options: { skillId: string; configJson: string; provider?: string }): Promise<{ sessionKey: string }>
   endSkill(options: { skillId: string }): Promise<void>
 
   // ── Tool Permissions ──
 
   seedToolPermissions(options: { defaultsJson: string }): Promise<{ seeded: number }>
-  setToolPermission(options: { toolName: string; permission: string; enabled?: boolean }): Promise<void>
+  setToolPermission(options: { toolName: string; permission: string; enabled: boolean }): Promise<void>
   listToolPermissions(): Promise<{ permissionsJson: string }>
   resetToolPermissions(): Promise<void>
 
