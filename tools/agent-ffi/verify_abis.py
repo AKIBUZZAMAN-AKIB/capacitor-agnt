@@ -194,18 +194,16 @@ def main() -> int:
     print()
 
     if partial:
-        builder = ("tools/agent-ffi/build-phonebuddy-all-abis.sh"
-                   if any("phone_buddy" in r for r in required)
-                   else "tools/agent-ffi/build-android-all-abis.sh")
+        # One engine, one builder: the native-agent slices come from the
+        # vendored crate, so the fix is always the same command.
         print("  Fix: build the missing slices with")
-        print(f"       {builder} --abis \"" + " ".join(partial) + "\"")
-        if "libnative_agent_ffi.so" in required:
-            crate = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-                os.path.abspath(__file__)))), "plugins", "native-agent", "rust", "native-agent-ffi", "Cargo.toml")
-            if os.path.isfile(crate):
-                print("       (crate source is already vendored — just run the build)")
-            else:
-                print("       (needs the Rust crate — see tools/agent-ffi/README.bn.md)")
+        print('       tools/agent-ffi/build-android-all-abis.sh --abis "' + " ".join(partial) + '"')
+        crate = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))), "plugins", "native-agent", "rust", "native-agent-ffi", "Cargo.toml")
+        if os.path.isfile(crate):
+            print("       (crate source is already vendored — just run the build)")
+        else:
+            print("       (needs the Rust crate — see tools/agent-ffi/README.bn.md)")
         print()
     else:
         print("  Every ABI in this artefact carries all required native libraries. ✅")

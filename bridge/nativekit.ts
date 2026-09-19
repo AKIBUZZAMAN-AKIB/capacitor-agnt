@@ -16,9 +16,6 @@ import { NearbyConnections } from '@capacitor-trancee/nearby-connections';
 import { NativeKitCustom } from '@nativekit/custom-native';
 import { Widget } from '@nativekit/widget';
 import { NativeAgent } from 'capacitor-native-agent';
-// Registered natively as `PhoneBuddyAgent`; aliased here so the plugin reference
-// is unmistakable next to the `NativeAgent` (0.5.2) one.
-import { PhoneBuddy as PhoneBuddyAgent } from '@nativekit/phonebuddy-agent';
 import { InAppBrowser } from '@capgo/capacitor-inappbrowser';
 import { createAppBrowser } from './app-browser';
 
@@ -50,15 +47,6 @@ interface NativeKitBuildConfig {
     isolated: { enabled: boolean; fallbackToIframe: boolean; stageChunkBytes: number; androidMinApi: number; hangTerminationDelayMs: number };
   };
   backgroundRunner: { label: string; event: string; defaultSyncUrl: string };
-  phonebuddy: {
-    enabled: boolean;
-    wakeIntervalMinutes: number;
-    surfacedLimit: number;
-    markSurfacedRead: boolean;
-    notifyOnWake: boolean;
-    maxTurns: number;
-    minIntervalMinutes: number;
-  };
   widget: {
     enabled: boolean;
     homeScreen: {
@@ -104,57 +92,6 @@ function feature(name: string): void {
 
 function requireNative(): void {
   if (!isNative) throw new Error('This operation requires a native Android/iOS build');
-}
-
-// ── PhoneBuddy engine (public Apache-2.0 SDK, pinned v0.2.0) ────────────────
-// The pinned agent plugin (0.5.2) has no OS wake scheduler and no surfaced-
-// message store, so those two capabilities come from the PhoneBuddy plugin that
-// this app builds from the public SDK source (every Android ABI, incl.
-// armeabi-v7a — docs/PHONEBUDDY-ENGINE.bn.md). The engine also owns its own
-// scheduler tool; a wake rebuilds it headlessly, runs the tasks it left in
-// scheduler.json and appends the answers to surfaced.json.
-const PHONEBUDDY_GENERATION = 'phonebuddy-0.2.0';
-
-/** Wake interval from app.config.json, clamped to what the OS will grant. */
-function phoneBuddyInterval(requested?: number): number {
-  const floor = Math.max(config.phonebuddy.minIntervalMinutes, 15);
-  const ceiling = Math.min(config.phonebuddy.wakeIntervalMinutes, 1440);
-  const value = requested ?? config.phonebuddy.wakeIntervalMinutes;
-  return Math.min(Math.max(Math.round(value), floor), Math.max(ceiling, 1440));
-}
-
-/**
- * Calls the PhoneBuddy plugin and normalises the answer to
- * `{ supported, engineGeneration, ...native }`. Never rejects: an unavailable
- * engine (web build, missing .so, disabled feature) returns the caller's
- * `fallback` envelope instead, so UI code always gets a truthful object.
- */
-async function phoneBuddyCall(
-  method: 'checkAvailability' | 'initialize' | 'sendMessage' | 'abort' | 'listSessions' | 'getSession'
-    | 'deleteSession' | 'setHostTools' | 'hostToolResult' | 'scheduleBackgroundWakes' | 'cancelBackgroundWakes'
-    | 'getWakeStatus' | 'handleWake' | 'loadSurfacedMessages' | 'clearSurfacedMessages',
-  args: Record<string, unknown>,
-  fallback: JsonObject,
-): Promise<JsonObject> {
-  if (!config.phonebuddy.enabled || !config.features.agent || !isNative) return { ...fallback };
-  try {
-    const native = await (PhoneBuddyAgent[method] as (options: any) => Promise<any>)(args);
-    const result: JsonObject = {
-      supported: true,
-      engineGeneration: PHONEBUDDY_GENERATION,
-      ...(native ?? {}),
-    };
-    // A native answer that says it could not do the job (e.g. the OS refused the
-    // job) is reported as-is — `supported` describes the ENGINE being present,
-    // `jobScheduled`/`available` describe whether it worked.
-    return result;
-  } catch (error) {
-    return {
-      ...fallback,
-      engineGeneration: PHONEBUDDY_GENERATION,
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
 }
 
 function randomId(prefix = 'nk'): string {
@@ -734,11 +671,19 @@ const NativeKit: any = {
   //
   // The plugin is pinned to the PUBLIC upstream generation "0.5.2" (see
   // docs/AGENT-ENGINE-0.5.2-BACKPORT.bn.md), whose Rust crate source is public
-  // and therefore buildable for every Android ABI. Five methods that only exist
-  // in the newer (private-source) generation are provided here as compatibility
-  // shims instead of raw pass-throughs: checkAvailability (native probe added),
-  // scheduleBackgroundWakes, cancelBackgroundWakes, loadSurfacedMessages and
-  // setMcpTools.
+  // and therefore buildable for every Android ABI. This is the ONLY agent engine
+  // in the app: every capability below is answered by this plugin.
+  //
+  // Two groups of methods are shims rather than raw pass-throughs, so no caller
+  // ever sees a missing-method error:
+  //   * real shims — checkAvailability (native probe added) and setMcpTools
+  //     (restartMcp with the new tool list, which has the same effect here);
+  //   * honest refusals — scheduleBackgroundWakes, cancelBackgroundWakes,
+  //     getWakeStatus, loadSurfacedMessages, clearSurfacedMessages: this
+  //     generation has no OS wake scheduler and no surfaced-message store (an
+  //     earlier engine generation that provided them was removed), so they
+  //     resolve `supported: false` with the reason and the supported alternative
+  //     instead of silently doing nothing.
   agent: {
     supported: (): boolean => config.features.agent && isNative,
 
@@ -753,55 +698,53 @@ const NativeKit: any = {
     initWorkspace: async (options: Record<string, unknown>) => { feature('agent'); requireNative(); return NativeAgent.initWorkspace(options as any); },
     initialize: async (options: Record<string, unknown>) => { feature('agent'); requireNative(); return NativeAgent.initialize(options as any); },
 
-    // ── Background wakes (real OS scheduling, via the PhoneBuddy engine) ──
-    // The pinned agent plugin (0.5.2) has no wake scheduler, so these calls go to
-    // the PhoneBuddy plugin: Android arms a periodic JobScheduler job, iOS
-    // submits a BGProcessingTask. Each wake rebuilds the engine headlessly, runs
-    // the tasks its `scheduler` tool left in scheduler.json, appends the answers
-    // to surfaced.json and posts a notification. They never reject: if the engine
-    // is missing (web build, unsupported ABI, feature off) the answer degrades to
-    // an explicit supported:false envelope naming why.
+    // ── Background wakes ────────────────────────────────────────────────────
+    // HONEST STATE: the pinned native-agent generation (0.5.2) has no OS wake
+    // scheduler. It cannot ask Android (JobScheduler) or iOS (BGTaskScheduler)
+    // to run the agent while the app is closed, so these calls cannot be
+    // implemented without an engine that schedules OS work.
+    //
+    // They stay in the surface — the lab, the typings and host apps call them —
+    // but they answer with an explicit `supported: false` envelope that names the
+    // reason and the supported alternative (cron job + handleWake from a wake
+    // source the host app owns, e.g. @capacitor/background-runner). They never
+    // reject and never pretend to have scheduled anything.
     scheduleBackgroundWakes: async (intervalMinutes?: number) => {
       feature('agent'); requireNative();
-      return phoneBuddyCall(
-        'scheduleBackgroundWakes',
-        { intervalMinutes: phoneBuddyInterval(intervalMinutes) },
-        {
-          supported: false,
-          engineGeneration: '0.5.2-public',
-          intervalMinutes: intervalMinutes ?? null,
-          reason: 'scheduleBackgroundWakes() needs the PhoneBuddy engine (phonebuddy-0.2.0), which is not available on this device/build.',
-          alternative: 'Use addCronJob() plus handleWake() from your own JobService/BackgroundRunner task.',
-        },
-      );
+      return {
+        supported: false,
+        engineGeneration: '0.5.2-public',
+        jobScheduled: false,
+        intervalMinutes: intervalMinutes ?? null,
+        reason: 'native-agent (0.5.2-public) has no OS wake scheduler: nothing was scheduled.',
+        alternative: 'addCronJob({...}) + handleWake() driven by a wake source your app owns (@capacitor/background-runner on Android/iOS, or a JobService of your own).',
+      } as unknown as { supported: boolean };
     },
     cancelBackgroundWakes: async () => {
       feature('agent'); requireNative();
-      return phoneBuddyCall(
-        'cancelBackgroundWakes',
-        {},
-        {
-          supported: false,
-          engineGeneration: '0.5.2-public',
-          jobScheduled: false,
-          reason: 'cancelBackgroundWakes() needs the PhoneBuddy engine (phonebuddy-0.2.0), which is not available on this device/build; nothing was scheduled by the agent plugin.',
-        },
-      );
+      return {
+        supported: false,
+        engineGeneration: '0.5.2-public',
+        jobScheduled: false,
+        reason: 'native-agent (0.5.2-public) never scheduled an OS wake, so there is nothing to cancel.',
+        alternative: 'To stop scheduled work, use removeCronJob() (or updateCronJob({enabled:false})) — cron jobs are the only scheduled work this generation owns.',
+      } as unknown as { supported: boolean };
     },
-    // Wake telemetry: was the OS job armed, when did it last run, what did it do
-    // and how many engine-scheduled tasks are still waiting.
+    // Wake telemetry: with no OS scheduler there is no job to report on. The
+    // stale-vs-live question still has an answer — listCronJobs() +
+    // listCronRuns() show what the engine thinks is scheduled and when it last
+    // ran — so the envelope points there instead of inventing numbers.
     getWakeStatus: async () => {
       feature('agent'); requireNative();
-      return phoneBuddyCall(
-        'getWakeStatus',
-        {},
-        {
-          supported: false,
-          engineGeneration: '0.5.2-public',
-          jobScheduled: false,
-          reason: 'getWakeStatus() needs the PhoneBuddy engine (phonebuddy-0.2.0), which is not available on this device/build.',
-        },
-      );
+      return {
+        supported: false,
+        engineGeneration: '0.5.2-public',
+        jobScheduled: false,
+        lastRunAt: null,
+        pendingTasks: null,
+        reason: 'native-agent (0.5.2-public) has no OS wake scheduler to report on.',
+        alternative: 'listCronJobs() + listCronRuns() for schedule/run history, handleWake() to run due work in the foreground.',
+      } as unknown as { supported: boolean };
     },
 
     // ── Agent turns ──
@@ -853,135 +796,34 @@ const NativeKit: any = {
     listCronJobs: async () => { feature('agent'); requireNative(); return NativeAgent.listCronJobs(); },
     runCronJob: async (jobId: string) => { feature('agent'); requireNative(); return NativeAgent.runCronJob({ jobId }); },
     listCronRuns: async (jobId?: string, limit?: number) => { feature('agent'); requireNative(); return NativeAgent.listCronRuns({ jobId, limit }); },
-    // Messages a background wake produced while the UI was closed — the thing
-    // that makes background agent work visible instead of silently lost.
+    // Messages a background run produced while the UI was closed. There is no
+    // background run in this generation (see above), so there is nothing to
+    // surface — the same honest envelope, pointing at the real store.
     loadSurfacedMessages: async (limit?: number) => {
       feature('agent'); requireNative();
-      const cap = Math.min(Math.max(Math.round(limit ?? config.phonebuddy.surfacedLimit), 1), 500);
-      return phoneBuddyCall(
-        'loadSurfacedMessages',
-        { limit: cap, markRead: config.phonebuddy.markSurfacedRead },
-        {
-          supported: false,
-          engineGeneration: '0.5.2-public',
-          limit: cap,
-          messagesJson: '[]',
-          count: 0,
-          unread: 0,
-          reason: 'loadSurfacedMessages() needs the PhoneBuddy engine (phonebuddy-0.2.0), which is not available on this device/build.',
-          alternative: 'listSessions() + loadSession() give the stored conversation.',
-        },
-      );
+      const cap = Math.min(Math.max(Math.round(limit ?? 50), 1), 500);
+      return {
+        supported: false,
+        engineGeneration: '0.5.2-public',
+        limit: cap,
+        messagesJson: '[]',
+        count: 0,
+        unread: 0,
+        reason: 'native-agent (0.5.2-public) runs only while the app is awake, so it produces no surfaced messages.',
+        alternative: 'listSessions() + loadSession() read the persisted conversation (SQLite) the agent already writes.',
+      } as unknown as { supported: boolean };
     },
     clearSurfacedMessages: async () => {
       feature('agent'); requireNative();
-      return phoneBuddyCall(
-        'clearSurfacedMessages',
-        {},
-        {
-          supported: false,
-          engineGeneration: '0.5.2-public',
-          cleared: 0,
-          reason: 'clearSurfacedMessages() needs the PhoneBuddy engine (phonebuddy-0.2.0), which is not available on this device/build.',
-        },
-      );
+      return {
+        supported: false,
+        engineGeneration: '0.5.2-public',
+        cleared: 0,
+        reason: 'there is no surfaced-message store in this generation — nothing to clear.',
+        alternative: 'clearSession() drops the stored conversation if that is what you meant.',
+      } as unknown as { supported: boolean };
     },
 
-    /**
-     * Direct control of the PhoneBuddy engine. The wake APIs above only need the
-     * engine to be *configured*; these calls configure it and can also run a turn
-     * in the foreground. Host tools and the `scheduler` tool are registered here,
-     * which is what makes a scheduled task survive into a background wake.
-     */
-    phonebuddy: {
-      /** Engine generation behind the wake + surfaced-message APIs. */
-      generation: PHONEBUDDY_GENERATION,
-
-      /** Never rejects: unsupported devices resolve `{ available: false, reason }`. */
-      checkAvailability: async () => {
-        feature('agent'); requireNative();
-        return phoneBuddyCall('checkAvailability', {}, {
-          supported: false,
-          available: false,
-          engineGeneration: PHONEBUDDY_GENERATION,
-          reason: 'the PhoneBuddy engine is not available on this device/build',
-        });
-      },
-
-      /**
-       * Persists the engine config as well as creating the engine, because a
-       * background wake has to rebuild it from disk with the app closed.
-       */
-      initialize: async (options: {
-        configJson?: string;
-        apiKey?: string;
-        baseUrl?: string;
-        model?: string;
-        agentName?: string;
-        systemPromptExtra?: string;
-        maxTurns?: number;
-        toolsJson?: string;
-        extra?: Record<string, unknown>;
-      }) => {
-        feature('agent'); requireNative();
-        return phoneBuddyCall('initialize', { maxTurns: config.phonebuddy.maxTurns, ...options }, {
-          supported: false,
-          initialized: false,
-          engineGeneration: PHONEBUDDY_GENERATION,
-          reason: 'initialize() needs the PhoneBuddy engine (phonebuddy-0.2.0), which is not available on this device/build.',
-        });
-      },
-
-      sendMessage: async (options: {
-        sessionId?: string;
-        text?: string;
-        turnJson?: string;
-      }) => {
-        feature('agent'); requireNative();
-        return phoneBuddyCall('sendMessage', options, {
-          supported: false,
-          engineGeneration: PHONEBUDDY_GENERATION,
-          reason: 'sendMessage() needs the PhoneBuddy engine, which is not available on this device/build.',
-        });
-      },
-
-      abort: async (sessionId?: string) => {
-        feature('agent'); requireNative();
-        return phoneBuddyCall('abort', { sessionId }, {
-          supported: false,
-          engineGeneration: PHONEBUDDY_GENERATION,
-          reason: 'abort() needs the PhoneBuddy engine, which is not available on this device/build.',
-        });
-      },
-
-      listSessions: async () => {
-        feature('agent'); requireNative();
-        return phoneBuddyCall('listSessions', {}, {
-          supported: false,
-          engineGeneration: PHONEBUDDY_GENERATION,
-          sessionsJson: '[]',
-          reason: 'listSessions() needs the PhoneBuddy engine, which is not available on this device/build.',
-        });
-      },
-
-      /** Foreground catch-up run of everything the engine has scheduled. */
-      handleWake: async (source = 'manual') => {
-        feature('agent'); requireNative();
-        return phoneBuddyCall('handleWake', { source }, {
-          supported: false,
-          engineGeneration: PHONEBUDDY_GENERATION,
-          ran: 0,
-          reason: 'handleWake() needs the PhoneBuddy engine, which is not available on this device/build.',
-        });
-      },
-
-      /** Streams PhoneBuddyEvent (TextDelta / ToolCallStart / Completed / …) to the UI. */
-      onEvent: (handler: (event: { eventType: string; payloadJson: string; sessionId?: string }) => void) => {
-        feature('agent'); requireNative();
-        const listener = PhoneBuddyAgent.addListener('phoneBuddyEvent', handler);
-        return { remove: () => listener.then((handle) => handle.remove()) };
-      },
-    },
     handleWake: async (source?: string) => { feature('agent'); requireNative(); return NativeAgent.handleWake({ source: source ?? 'manual' }); },
     getSchedulerConfig: async () => { feature('agent'); requireNative(); return NativeAgent.getSchedulerConfig(); },
     setSchedulerConfig: async (configJson: string) => { feature('agent'); requireNative(); return NativeAgent.setSchedulerConfig({ configJson }); },

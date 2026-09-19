@@ -35,12 +35,12 @@ UniFFI contract version: 26 (দুই দিকেই match ✅)
 | 3 | `plugins/native-agent/.gitmodules` **মুছে ফেলা** | private repo নির্ভরতা শেষ |
 | 4 | **C1 ফিক্স (crucial):** `catch (e: Exception)` → `catch (t: Throwable)` + `OutOfMemoryError` rethrow (৩টি জায়গায়) | `UnsatisfiedLinkError` এক্সেপশন নয়, **Error** — না ধরলে অ্যাপ ক্র্যাশ করত, promise আটকে থাকত |
 | 5 | **`checkAvailability()` যোগ** (Kotlin + Swift + TS + dist) | 0.5.2-তে ছিল না; JS-স্তরে ছদ্ম-প্রোব না দিয়ে সঠিকভাবে ABI/লাইব্রেরি যাচাই: `Native.load("native_agent_ffi", …)` — হুবহু যে নাম uniffi ব্যবহার করে |
-| 6 | **C2 ফিক্স:** `LanceDBBridge.kt` ও `MemoryProviderImpl.kt` → `android/src/main/java-memory/`, Gradle-এ `findProject(':capacitor-lancedb')` গেট, প্লাগইনে reflective wiring | না করলে শেলের Gradle configure-ই ফেল করত (`Project with path ':capacitor-lancedb' could not be found`) — 0.5.2-তে এই বাগ ছিল |
-| 7 | **C3 ফিক্স:** `Package.swift` থেকে হার্ড `.package(path: ../capacitor-lancedb)` ও `CapacitorLancedb` product বাদ | না করলে SwiftPM resolve-ই ফেল করত |
+| 6 | **C2 → প্রতিস্থাপিত:** ঐচ্ছিক LanceDB মেমোরি পুরোপুরি বাদ; `MemoryProviderImpl.kt` এখন `src/main/java`-তে বিল্ট-ইন (ফাইল-ভিত্তিক স্টোর + লেক্সিক্যাল সার্চ), সরাসরি wiring | আগের গেট (`findProject(':capacitor-lancedb')`) মানে ছিল — যে অ্যাপে ওই প্লাগিন নেই, সেখানে `memory_*` টুল সবসময় `"Memory provider not configured"` দিত। এখন সব অ্যাপে কাজ করে |
+| 7 | **C3 → অপ্রযোজ্য:** `Package.swift`-এ কোনো অপশনাল নেটিভ ডিপেন্ডেন্সি নেই — Swift মেমোরি প্রোভাইডারও বিল্ট-ইন (`MemoryProviderImpl.swift`) | macOS-এ SwiftPM resolve-এ কোনো বাহ্যিক প্লাগিন লাগে না |
 | 8 | `android/consumer-rules.pro` + `consumerProguardFiles` (defaultConfig-এ) | JNA/UniFFI-reflection সহ minify-করা রিলিজ বিল্ড |
 | 9 | ব্রিজে **কম্প্যাট শিম** (৫টি newer-engine API) | `checkAvailability` এখন নেটিভ; বাকি ৪টি `supported:false` নিয়ে resolve করে — কখনো reject করে না |
 | 10 | `scripts/configure-native.mjs`: iOS BGTask id শুধু тогда যোগ হয় যখন `NativeAgentBackgroundTask.swift` সত্যিই আছে | কাল্পনিক টাস্ক iOS-কে promise করা বন্ধ |
-| 11 | `tests/agent-api.test.ts` নতুন প্রজন্মের জন্য পুনর্লিখন (১৬টি invariant) | contract 26, ব্যাকপোর্ট, lancedb গেট, ABI টুলিং, শিম—সব মেশিন-যাচাই |
+| 11 | `tests/agent-api.test.ts` নতুন প্রজন্মের জন্য পুনর্লিখন | contract 26, ব্যাকপোর্ট, বিল্ট-ইন মেমোরি (কোনো ভেক্টর নেই), ABI টুলিং, শিম, একটাই ইঞ্জিন — সব মেশিন-যাচাই |
 
 ### কম্প্যাট শিমগুলো (ব্রিজের ভেতরে)
 
@@ -67,10 +67,10 @@ UniFFI contract version: 26 (দুই দিকেই match ✅)
 **হারাবেন (0.9.x-এর চেয়ে পুরোনো প্রজন্ম)**
 - background wakes (OS-শিডিউলড wake) — cron + `handleWake()` আছে, কিন্তু OS wake scheduler নেই;
 - `loadSurfacedMessages`, `setMcpTools` (শিম দিয়ে আংশিক);
-- lancedb মেমরি: কেবল যদি হোস্টে `capacitor-lancedb` যোগ করেন (গেট করা আছে);
+- long-term memory: **বিল্ট-ইন** — অ্যাপের প্রাইভেট ডিরে একটি JSON স্টোর (`native-agent-memory/memory.json`), লেক্সিক্যাল সার্চ সহ; কোনো ভেক্টর DB/বাহ্যিক প্লাগিন/নেটওয়ার্ক লাগে না;
 - 0.6–0.9-এর ইঞ্জিন উন্নতি/বাগফিক্স (ইঞ্জিন কোডে)।
 
-> দীর্ঘমেয়াদে আধুনিক ইঞ্জিন চাইলে: `docs/research/PHONEBUDDY-ENGINE-MIGRATION.bn.md` (Apache-2.0, পাবলিক, ৪ ABI)।
+> দীর্ঘমেয়াদে আধুনিক ইঞ্জিন (OS wake scheduler / surfaced store) চাইলে নতুন প্রজন্মের সোর্স দরকার; PhoneBuddy নামের বিকল্পটা পরীক্ষা করে **বাদ দেওয়া হয়েছে** — কারণ ও সিদ্ধান্ত: `docs/research/FFI-SOURCE-AVAILABILITY.bn.md` (PLAN B)।
 
 ---
 
@@ -108,7 +108,6 @@ cp -a .nativekit-backups/native-agent-v0.5.2-20260919-030835 plugins/native-agen
 | **iOS agent FFI — rebuild the xcframework** | ✅ | ডিভাইস (arm64) + সিমুলেটর (arm64) — **upstream-এর স্টেল প্রিবিল্ট বাদ**, সোর্স থেকে নতুন `libnative_agent_ffi.a`, বাইন্ডিং ও হেডার কমিট |
 | **Android APK and AAB** | ✅ | `:capacitor-native-agent:compileDebugKotlin` সহ পুরো অ্যাপ বিল্ড (APK artifact: ~৮৬ MB) |
 | **iOS validation and IPA** | ✅ | SwiftPM-এ প্লাগইন + শিম টার্গেট সহ সিমুলেটর অ্যাপ কম্পাইল (সাইনড IPA-র জন্য iOS secrets দরকার) |
-| **PhoneBuddy FFI** | ✅ | বিকল্প ইঞ্জিনের ৪ ABI স্লাইস (16 KB page alignment সহ) — ভবিষ্যতের অপশন প্রস্তুত |
 
 APK নামানোর পথ: GitHub → **Actions** → “Android APK and AAB” → সর্বশেষ সবুজ রান → **Artifacts** → `android-apk-aab-<sha>`।
 

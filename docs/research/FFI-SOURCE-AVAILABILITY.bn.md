@@ -121,15 +121,28 @@ const avail = async () => {
 // setMcpTools → পুরোনো startMcp/restartMcp ব্যবহার করুন
 ```
 
-### PLAN B — PhoneBuddy SDK (আধুনিক, ৪ ABI, সম্পূর্ণ পাবলিক, Apache-2.0)
+### PLAN B — PhoneBuddy SDK (পরীক্ষা করা হয়েছে, **বাদ দেওয়া হয়েছে**)
 
-মাইগ্রেশন লাগবে (≈১ সপ্তাহ) কিন্তু নতুন প্রজন্মের ইঞ্জিন: in-memory busybox, embedded JS engine, SSRF-সহ web fetch, doom-loop detection, provider fallback; `--all` = চার ABI। সব কিছু এই রিপোতেই তৈরি: `npm run ffi:build:phonebuddy` + `.github/workflows/phonebuddy-ffi.yml`, প্লান: `docs/research/PHONEBUDDY-ENGINE-MIGRATION.bn.md`।
+`APUS-AI-Lab/PhoneBuddySDK` (Apache-2.0, সম্পূর্ণ পাবলিক, ৪ ABI বিল্ড হয়) একসময়
+বিকল্প ইঞ্জিন হিসেবে এই রিপোতে বসানো হয়েছিল — OS wake scheduler আর surfaced
+messages-এর জন্য। পরে **সম্পূর্ণ সরিয়ে ফেলা হয়েছে**, কারণ:
 
----
+* **খরচ বনাম লাভ:** Android-এ ৪ ABI মিলিয়ে ৪০ MB `.so` + iOS-এ ৫৯ MB xcframework,
+  অথচ যেই দুটো ক্ষমতার জন্য আনা হয়েছিল সেগুলো (`scheduleBackgroundWakes`,
+  `loadSurfacedMessages`) এই অ্যাপের UI-তে ব্যবহারযোগ্য ছিল না;
+* **দুটো ইঞ্জিন = দুটো সত্যের সেট:** native-agent-এর SQLite/cron/skill/MCP/approval
+  আর PhoneBuddy-র সেশন/টাস্ক আলাদা স্টোরে থাকত — কোন ইতিহাস কে রাখছে তা নিয়ে
+  বিভ্রান্তি;
+* **সিদ্ধান্ত:** অ্যাপ এখন **একটাই ইঞ্জিন** (native-agent 0.5.2-public) চালায়, আর
+  যে ক্ষমতা এই প্রজন্মে নেই (OS-scheduled wake, surfaced store) সেটা ব্রিজ
+  লুকিয়ে না রেখে `supported:false` + কারণ + বিকল্প জানায়।
+
+বিকল্প হিসেবে বাকি থাকে: শুধু cron + `handleWake()` (অ্যাপ/নিজের JobService থেকে
+ডাকা), অথবা ভবিষ্যতে নতুন প্রজন্মের সোর্স পাবলিক হলে ইঞ্জিন আপগ্রেড।
 
 ## 4. কোনটা বেছে নেবেন — সিদ্ধান্ত টেবিল
 
-| | PLAN 0 (exact 0.9.x) | PLAN A (public v0.5.2) | PLAN B (PhoneBuddy) |
+| | PLAN 0 (exact 0.9.x) | PLAN A (public v0.5.2) — **গৃহীত** | ~~PLAN B (PhoneBuddy)~~ — বাদ |
 |---|---|---|---|
 | সোর্স | কারও কাছ থেকে source drop লাগবে | **পাবলিক, আজই** | **পাবলিক, আজই** |
 | ৩২-bit ফোনে চলবে? | ✅ (৪ ABI বিল্ড) | ✅ (৪ ABI বিল্ড) | ✅ (৪ ABI বিল্ড) |
@@ -184,4 +197,3 @@ tools/agent-ffi/resolve-ffi-source.sh --mode public-upstream --ref v0.5.2 --dry-
 - `tools/agent-ffi/build-android-all-abis.sh` — ৪ ABI বিল্ড, ELF verify, contract gate (`--require-binding-match`)
 - `tools/agent-ffi/switch-agent-generation.sh` — PLAN A-র জন্য পাবলিক প্রজন্মে নামার সহায়ক
 - `.github/workflows/native-agent-ffi.yml` — Actions-only পাইপলাইন
-- `.github/workflows/phonebuddy-ffi.yml` — PLAN B পাইপলাইন

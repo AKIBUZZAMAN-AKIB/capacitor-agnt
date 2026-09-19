@@ -17,7 +17,6 @@ GitHub → **Actions → “Native agent FFI — source, build, verify (Actions 
 | `public-upstream` | পাবলিক `rogelioRuiz/capacitor-native-agent` @ `source_ref` (যেমন `v0.5.2`) | সম্পূর্ণ পাবলিক সোর্স চাইলে (তখন প্লাগইনও ওই প্রজন্মে হতে হবে — `switch-agent-generation.sh`) |
 | `git` | যেকোনো git URL (+ ঐচ্ছিক `FFI_SOURCE_TOKEN`) | private GitLab-এ আপনার অ্যাক্সেস থাকলে |
 
-আর **PhoneBuddy ইঞ্জিন** (Apache-2.0, পাবলিক) বেছে নিলে: **Actions → “PhoneBuddy FFI — build every Android ABI” → Run workflow** — সেটাও সম্পূর্ণ Actions-ভিত্তিক, কোনো secret লাগে না।
 
 > গভীর গবেষণার পূর্ণ বিবরণ (কোথায় কী খুঁজেছি, কী পেলাম, তিনটি প্লান): [`docs/research/FFI-SOURCE-AVAILABILITY.bn.md`](../../docs/research/FFI-SOURCE-AVAILABILITY.bn.md)
 
@@ -117,7 +116,6 @@ async function gateAgentUI() {
 | `resolve-ffi-source.sh` | **Actions-এর প্রথম ধাপ**: `repo` / `public-upstream` / `release-asset` / `git` — চার উপায়ে ক্রেট সোর্স এনে ভেন্ডর করে |
 | `switch-agent-generation.sh` | পুরো প্লাগইনকে পাবলিক প্রজন্মে (যেমন `v0.5.2`) নামায় — API diff, UniFFI contract তুলনা, শিম কোড, ব্যাকআপ সহ (ডিফল্টে dry-run) |
 | `.github/workflows/native-agent-ffi.yml` | CI: **Actions-only** — source resolve → ৪ ABI বিল্ড → verify → slices commit → ঐচ্ছিক APK assertion (contract gate সহ) |
-| `build-phonebuddy-all-abis.sh` + `.github/workflows/phonebuddy-ffi.yml` | **বিকল্প ইঞ্জিন রাস্তা**: PhoneBuddy SDK (public, Apache-2.0) থেকে ৪ ABI `.so` বিল্ড — কোনো secret লাগে না। বিস্তারিত: [`docs/research/PHONEBUDDY-ENGINE-MIGRATION.bn.md`](../../docs/research/PHONEBUDDY-ENGINE-MIGRATION.bn.md) |
 
 `package.json`-এ যোগ হওয়া স্ক্রিপ্ট:
 
@@ -265,7 +263,7 @@ Thanks!
 
 **Option B — ক্রেটের বদলে শুধু `.so` চাওয়া।** উপরের ২ নম্বর রাস্তা। এতে rebuild-এর freedom থাকবে না, কিন্তু আজকের সমস্যা মিটে যাবে (এবং `abi-manifest.json` দিয়ে integrity রাখা যাবে)।
 
-**Option C — সম্পূর্ণ ভিন্ন open-source ইঞ্জিন (এই রিপোতে এখন যন্ত্রপাতি আছে)।** `APUS-AI-Lab/PhoneBuddySDK` (Apache-2.0, public, `--all` ABI বিল্ড) — Actions → “PhoneBuddy FFI — build every Android ABI” চালালেই ৪ ABI `.so`।
+**Option C — সম্পূর্ণ ভিন্ন open-source ইঞ্জিন** আগে পরীক্ষা করা হয়েছিল (PhoneBuddy), কিন্তু সেটা সরিয়ে ফেলা হয়েছে — একটাই ইঞ্জিন (native-agent) এখন সব API-র মালিক।
 
 **Option C2 — পুরো প্লাগইন পাবলিক `v0.5.2` প্রজন্মে পিন করা — ✅ ইতিমধ্যেই প্রয়োগ করা হয়েছে** (ব্যাকআপ: `.nativekit-backups/native-agent-v0.5.2-*`)। ওই tag-এ প্লাগইন কোড + পূর্ণ Rust ক্রেট দুটোই পাবলিক (MIT), UniFFI contract দুই দিকেই 26 → mismatch নেই। API diff মাত্র ৫টি মেথড (`checkAvailability`, `scheduleBackgroundWakes`, `cancelBackgroundWakes`, `loadSurfacedMessages`, `setMcpTools`) — JS শিম দিয়ে সারানো যায়:
 

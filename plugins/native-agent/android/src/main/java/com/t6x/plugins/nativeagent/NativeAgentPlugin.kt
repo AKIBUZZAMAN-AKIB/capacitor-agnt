@@ -2,7 +2,6 @@ package com.t6x.plugins.nativeagent
 
 import android.content.Context
 import android.os.Build
-import android.util.Log
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
@@ -27,7 +26,6 @@ class NativeAgentPlugin : Plugin() {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     companion object {
-        private const val TAG = "NativeAgentPlugin"
         private const val STORAGE_FILE = "CapacitorStorage"
         private const val CONFIG_PATH_KEY = "mobilecron:native-agent-config-path"
 
@@ -146,17 +144,14 @@ private fun withHandle(call: PluginCall, block: (NativeAgentHandle) -> Unit) {
                     }
                 })
                 h.setNotifier(NativeNotifierImpl(context.applicationContext))
-                // Memory (LanceDB) is optional and its Kotlin class only exists when
-                // the host app also integrates capacitor-lancedb, so it is wired
-                // reflectively — no compile-time reference (0.9.x "C2" fix).
-                runCatching {
-                    val clazz = Class.forName("com.t6x.plugins.nativeagent.MemoryProviderImpl")
-                    val instance = clazz.getConstructor(Context::class.java).newInstance(context.applicationContext)
-                    val available = clazz.getMethod("isAvailable").invoke(instance) as? Boolean ?: false
-                    if (available) {
-                        h.setMemoryProvider(instance as uniffi.native_agent_ffi.MemoryProvider)
-                    }
-                }.onFailure { Log.w(TAG, "memory provider unavailable: ${it.message}") }
+                // Long-term memory is part of the plugin: a file-backed store with
+                // lexical search. It used to be reflective because the LanceDB
+                // implementation was only compiled when the host app integrated the
+                // capacitor-lancedb plugin — which this app never did, so the agent's
+                // memory tools always answered "Memory provider not configured".
+                // The built-in provider always exists, so it is wired directly: a
+                // missing class can no longer silently disable the feature.
+                h.setMemoryProvider(MemoryProviderImpl(context.applicationContext))
                 h.persistConfig()
                 handle = h
                 context

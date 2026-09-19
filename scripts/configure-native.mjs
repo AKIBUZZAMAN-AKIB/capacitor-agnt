@@ -21,19 +21,6 @@ const agentWakeTaskFile = path.join(
 );
 const agentWakeSupported = existsSync(agentWakeTaskFile);
 
-// PhoneBuddy engine (public Apache-2.0 SDK, pinned v0.2.0): since the agent
-// plugin pinned to 0.5.2 has no iOS wake task, the wake capability comes from
-// plugins/phonebuddy-agent — a BGProcessingTask registered by
-// PhoneBuddyBackgroundTask.swift. Same rule as above: whitelist the identifier
-// only when the implementation is actually in the tree, and only when the host
-// app turned the phonebuddy block on in app.config.json.
-const PHONEBUDDY_WAKE_TASK_ID = 'io.t6x.phonebuddy.wake';
-const phoneBuddyWakeTaskFile = path.join(
-  root,
-  'plugins/phonebuddy-agent/ios/Sources/PhoneBuddyAgentPlugin/PhoneBuddyBackgroundTask.swift',
-);
-const phoneBuddyWakeSupported = existsSync(phoneBuddyWakeTaskFile) && config.phonebuddy?.enabled !== false;
-
 const xml = (value) => String(value)
   .replaceAll('&', '&amp;')
   .replaceAll('<', '&lt;')
@@ -312,7 +299,6 @@ function infoPlist() {
   // Without this identifier scheduleBackgroundWakes() resolves jobScheduled:false
   // and every scheduled agent job silently never runs on iOS.
   if (config.features.agent && agentWakeSupported) bgTaskIds.push(AGENT_WAKE_TASK_ID);
-  if (config.features.agent && phoneBuddyWakeSupported) bgTaskIds.push(PHONEBUDDY_WAKE_TASK_ID);
   if (bgTaskIds.length) {
     entries.set('BGTaskSchedulerPermittedIdentifiers', [...new Set(bgTaskIds)]);
   }
@@ -328,7 +314,7 @@ function infoPlist() {
   if (config.ios.backgroundFetch) modes.push('fetch');
   // The agent's wake task is a BGProcessingTask, which requires the 'processing'
   // background mode even if the host app did not opt into backgroundProcessing.
-  if (config.ios.backgroundProcessing || agentWakeSupported || phoneBuddyWakeSupported) modes.push('processing');
+  if (config.ios.backgroundProcessing || agentWakeSupported) modes.push('processing');
   if (config.features.backgroundLocation && config.ios.backgroundLocation) modes.push('location');
   if (config.ios.pushCapabilityConfigured) modes.push('remote-notification');
   if (modes.length) entries.set('UIBackgroundModes', modes);

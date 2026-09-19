@@ -1,4 +1,0 @@
-module phone_buddy_ffi {
-    header "phone_buddy.h"
-    export *
-}

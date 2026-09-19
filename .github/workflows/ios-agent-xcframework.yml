@@ -120,8 +120,8 @@ jobs:
             exit 0
           fi
           git commit -m "build(native-agent): rebuild the iOS xcframework from the vendored crate"
-          # Several workflows commit to main (FFI slices, PhoneBuddy slices, the
-          # iOS xcframework), so a plain `git push` races and dies with
+          # Several workflows commit to main (FFI slices, the iOS xcframework),
+          # so a plain `git push` races and dies with
           # "! [rejected] HEAD -> main (fetch first)". Rebase on the newest
           # remote commit and retry before giving up.
           pushed=0

@@ -1,10 +1,9 @@
 // swift-tools-version: 5.9
 //
-// NOTE: this manifest deliberately declares NO dependency on capacitor-lancedb.
-// The LanceDB-backed memory provider is optional and its Swift sources are
-// guarded with `#if canImport(CapacitorLanceDB)`; a hard local-path dependency
-// here would break SwiftPM resolution for every host app that does not vendor
-// the lancedb plugin (backported fix — docs/AGENT-ENGINE-0.5.2-BACKPORT.bn.md).
+// NOTE: this manifest declares NO dependency on capacitor-lancedb (or any vector
+// database). The agent's long-term memory is implemented in-repo by
+// MemoryProviderImpl.swift — a file-backed store with lexical search — so the
+// plugin has no optional native dependency to resolve.
 import PackageDescription
 
 let package = Package(

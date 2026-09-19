@@ -33,9 +33,7 @@
     "ffi:build:android": "bash tools/agent-ffi/build-android-all-abis.sh",
     "ffi:verify": "bash tools/agent-ffi/verify-abis.sh",
     "ffi:resolve": "bash tools/agent-ffi/resolve-ffi-source.sh",
-    "agent:switch-generation": "bash tools/agent-ffi/switch-agent-generation.sh",
-    "ffi:build:phonebuddy": "bash tools/agent-ffi/build-phonebuddy-all-abis.sh",
-    "ffi:verify:phonebuddy": "bash tools/agent-ffi/verify-abis.sh --require-lib libphone_buddy_ffi.so --jni plugins/phonebuddy-agent/android/src/main/jniLibs"
+    "agent:switch-generation": "bash tools/agent-ffi/switch-agent-generation.sh"
   },
   "dependencies": {
     "@capacitor-community/sqlite": "8.1.1",
@@ -59,7 +57,6 @@
     "@capgo/capacitor-inappbrowser": "8.15.2",
     "@nativekit/custom-native": "file:plugins/custom-native",
     "@nativekit/isolated-browser": "file:plugins/isolated-browser",
-    "@nativekit/phonebuddy-agent": "file:plugins/phonebuddy-agent",
     "@nativekit/widget": "file:plugins/widget",
     "capacitor-native-agent": "file:plugins/native-agent",
     "fflate": "0.8.3",

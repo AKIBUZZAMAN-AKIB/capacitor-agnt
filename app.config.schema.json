@@ -796,51 +796,6 @@
           "maxLength": 2000
         }
       }
-    },
-    "phonebuddy": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "PhoneBuddy engine (public Apache-2.0 SDK, pinned v0.2.0): OS background wakes + surfaced messages.",
-      "required": [
-        "enabled",
-        "wakeIntervalMinutes",
-        "surfacedLimit",
-        "markSurfacedRead",
-        "notifyOnWake",
-        "maxTurns",
-        "minIntervalMinutes"
-      ],
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "wakeIntervalMinutes": {
-          "type": "integer",
-          "minimum": 15,
-          "maximum": 1440
-        },
-        "surfacedLimit": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 500
-        },
-        "markSurfacedRead": {
-          "type": "boolean"
-        },
-        "notifyOnWake": {
-          "type": "boolean"
-        },
-        "maxTurns": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 50
-        },
-        "minIntervalMinutes": {
-          "type": "integer",
-          "minimum": 15,
-          "maximum": 1440
-        }
-      }
     }
   },
   "$defs": {

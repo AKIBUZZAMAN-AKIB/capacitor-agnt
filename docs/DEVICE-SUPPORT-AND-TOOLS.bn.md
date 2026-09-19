@@ -75,9 +75,8 @@
 | iOS agent FFI | সোর্স থেকে iOS xcframework + বাইন্ডিং রিবিল্ড |
 | Android APK and AAB | পুরো অ্যাপ (APK + AAB) |
 | iOS validation and IPA | iOS সিমুলেটর কম্পাইল (সাইনড IPA-র জন্য secrets) |
-| PhoneBuddy FFI | বিকল্প এজেন্ট ইঞ্জিনের ৪ ABI স্লাইস |
 
-লোকাল কমান্ড (ঐচ্ছিক): `npm run check` (147 টেস্ট), `npm run check:abis`, `npm run ffi:build:android`, `npm run ffi:verify -- --strict --apk app-debug.apk`
+লোকাল কমান্ড (ঐচ্ছিক): `npm run check` (149 টেস্ট), `npm run check:abis`, `npm run ffi:build:android`, `npm run ffi:verify -- --strict --apk app-debug.apk`
 
 ---
 
@@ -98,8 +97,8 @@
 | বিষয় | অবস্থা |
 |---|---|
 | iOS-এর OS-scheduled background wake (BGTaskScheduler) | ❌ নেই — ব্রিজ `supported:false` দেয়; বিকল্প: **cron + `handleWake`** |
-| `loadSurfacedMessages`, `setMcpTools` | ⚠️ আংশিক (0.5.2 প্রজন্মে API নেই; ব্রিজ শিম দেয়) |
-| LanceDB ভেক্টর-মেমরি | ⚠️ ঐচ্ছিক — হোস্টে `capacitor-lancedb` যোগ করলে চালু (Gradle/SPM গেট করা আছে) |
+| `loadSurfacedMessages`, `clearSurfacedMessages`, `scheduleBackgroundWakes`, `cancelBackgroundWakes`, `getWakeStatus` | ⚠️ এই প্রজন্মে নেই — ব্রিজ **সৎভাবে** `supported:false` + কারণ + বিকল্প দেয় (নিচে ৫ নম্বর দেখুন) |
+| Long-term memory (`memory_*` টুল) | ✅ **বিল্ট-ইন** — ফাইল-ভিত্তিক স্টোর + লেক্সিক্যাল সার্চ, কোনো ভেক্টর DB/প্লাগিন লাগে না |
 | Push notification | ⚠️ কোড আছে, কিন্তু APNs/Firebase key বসানো নেই → register সফল হবে না |
 | Play Store-এ প্রকাশ | ⚠️ আসল app id + নিজের keystore + privacy policy দরকার |
 | এজেন্ট নিজে নিজে (screen দেখা/ট্যাপ করা) | ❌ এটি সেফটি-স্কোপে রাখা হয়নি — অ্যাপে/ফাইলে কাজ করে, UI অটোমেশন করে না |

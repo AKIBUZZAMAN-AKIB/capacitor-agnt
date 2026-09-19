@@ -156,18 +156,13 @@ console.log(`  agent engine available on : ${full.join(', ') || 'NO ABI'}`)
 console.log(`  agent engine MISSING on   : ${partial.join(', ') || '(none)'}\n`)
 
 if (partial.length) {
-  const builder = required.some((r) => r.includes('phone_buddy'))
-    ? 'tools/agent-ffi/build-phonebuddy-all-abis.sh'
-    : 'tools/agent-ffi/build-android-all-abis.sh'
-  console.log('  Fix: ' + builder + ' --abis "' + partial.join(' ') + '"')
-  if (required.includes('libnative_agent_ffi.so')) {
-    const crate = join(REPO_ROOT, 'plugins/native-agent/rust/native-agent-ffi/Cargo.toml')
-    console.log(statSync(crate, { throwIfNoEntry: false })?.isFile()
-      ? '       (crate source is already vendored — just run the build)'
-      : '       (the Rust crate must be vendored first — tools/agent-ffi/README.bn.md)')
-  } else {
-    console.log('       (public Apache-2.0 source — no secrets required)')
-  }
+  // One engine, one builder: the native-agent slices come from the vendored
+  // crate, so the fix is always the same command.
+  console.log('  Fix: tools/agent-ffi/build-android-all-abis.sh --abis "' + partial.join(' ') + '"')
+  const crate = join(REPO_ROOT, 'plugins/native-agent/rust/native-agent-ffi/Cargo.toml')
+  console.log(statSync(crate, { throwIfNoEntry: false })?.isFile()
+    ? '       (crate source is already vendored — just run the build)'
+    : '       (the Rust crate must be vendored first — tools/agent-ffi/README.bn.md)')
   console.log()
 }
 

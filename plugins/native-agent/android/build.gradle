@@ -1,21 +1,10 @@
 apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
 
-// The LanceDB-backed memory provider is an OPTIONAL feature. Its Kotlin sources
-// live in src/main/java-memory and are only compiled — together with the
-// compileOnly dependency — when the host app also integrates the
-// capacitor-lancedb plugin (project ':capacitor-lancedb'). Without this gate the
-// plugin module cannot even be configured for an app that does not include
-// capacitor-lancedb (Gradle: "Project with path ':capacitor-lancedb' could not be
-// found"), which is the default for this shell.
+// Long-term memory (MemoryProviderImpl) is part of src/main/java now, so there is
+// no optional source set and no conditional dependency left here: the plugin
+// compiles and works on its own, in every host app.
 //
-// Backported from the newer 0.9.x plugin generation — see
-// docs/AGENT-ENGINE-0.5.2-BACKPORT.bn.md.
-def hasLanceDb = project.findProject(':capacitor-lancedb') != null
-if (hasLanceDb) {
-    android.sourceSets.main.java.srcDir('src/main/java-memory')
-}
-
 android {
     namespace 'com.t6x.plugins.nativeagent'
     compileSdk 36
@@ -39,9 +28,6 @@ kotlin {
 
 dependencies {
     implementation project(':capacitor-android')
-    if (hasLanceDb) {
-        compileOnly project(':capacitor-lancedb')
-    }
     implementation 'net.java.dev.jna:jna:5.14.0@aar'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
 }

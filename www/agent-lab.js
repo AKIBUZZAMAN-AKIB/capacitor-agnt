@@ -244,7 +244,6 @@ const agentActions = {
     const id = state.lastCronJobId; state.lastCronJobId = null;
     return { removed: id };
   },
-  agentsurfaced: async () => { requireInit(); return window.NativeKit.agent.loadSurfacedMessages(20); },
   agentwake: async () => { requireInit(); await window.NativeKit.agent.handleWake('manual_demo'); return { woken: true }; },
   agentgetsched: async () => { requireInit(); return window.NativeKit.agent.getSchedulerConfig(); },
   agentsetsched: async () => { requireInit(); await window.NativeKit.agent.setSchedulerConfig(JSON.stringify({ enabled: true, tickSeconds: 60 })); return { schedulerUpdated: true }; },
@@ -262,10 +261,33 @@ const agentActions = {
   agentbgcancel: async () => { requireInit(); return window.NativeKit.agent.cancelBackgroundWakes(); },
   agentwakes: async () => { requireInit(); return window.NativeKit.agent.getWakeStatus(); },
 
-  // 9b ── PhoneBuddy engine (wakes + surfaced messages actually run here) ─────
-  agentpbavail: async () => { requireInit(); return window.NativeKit.agent.phonebuddy.checkAvailability(); },
-  agentpbwake: async () => { requireInit(); return window.NativeKit.agent.phonebuddy.handleWake('lab_manual'); },
+  // 9a ── Surfaced messages: deliberately still wired, so the lab SHOWS the
+  // honest answer ("this generation has no surfaced-message store") instead of
+  // hiding the gap. Nothing is faked: it returns supported:false + reason +
+  // the store to read instead.
+  agentsurfaced: async () => { requireInit(); return window.NativeKit.agent.loadSurfacedMessages(20); },
   agentclearsurfaced: async () => { requireInit(); return window.NativeKit.agent.clearSurfacedMessages(); },
+
+  // 9b ── Long-term memory (built into the plugin, see MemoryProviderImpl) ────
+  // These call the agent's own memory tools directly, which is exactly what the
+  // model sees: memory_store / memory_recall / memory_list / memory_forget.
+  agentmemstore: async () => {
+    requireInit();
+    return window.NativeKit.agent.invokeTool('memory_store', JSON.stringify({
+      key: 'demo-language',
+      text: 'The user prefers answers in Bangla and works on a Capacitor shell called NativeKit.',
+      category: 'user-preference',
+    }));
+  },
+  agentmemrecall: async () => {
+    requireInit();
+    return window.NativeKit.agent.invokeTool('memory_recall', JSON.stringify({ query: 'Bangla preference', limit: 3 }));
+  },
+  agentmemlist: async () => { requireInit(); return window.NativeKit.agent.invokeTool('memory_list', JSON.stringify({ prefix: '' })); },
+  agentmemforget: async () => {
+    requireInit();
+    return window.NativeKit.agent.invokeTool('memory_forget', JSON.stringify({ query: 'Bangla preference' }));
+  },
 
   // 10 ── Skills ─────────────────────────────────────────────────────────────
   agentaddskill: async () => {

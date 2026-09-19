@@ -178,8 +178,8 @@ jobs:
             echo "Nothing to commit (source already up to date)."
           else
             git commit -m "chore(native-agent): vendor FFI source ($MODE ${SOURCE_REF})"
-          # Several workflows commit to main (FFI slices, PhoneBuddy slices, the
-          # iOS xcframework), so a plain `git push` races and dies with
+          # Several workflows commit to main (FFI slices, the iOS xcframework),
+          # so a plain `git push` races and dies with
           # "! [rejected] HEAD -> main (fetch first)". Rebase on the newest
           # remote commit and retry before giving up.
           pushed=0
@@ -303,8 +303,8 @@ jobs:
             exit 0
           fi
           git commit -m "build(native-agent): FFI slices for [${ABIS}]"
-          # Several workflows commit to main (FFI slices, PhoneBuddy slices, the
-          # iOS xcframework), so a plain `git push` races and dies with
+          # Several workflows commit to main (FFI slices, the iOS xcframework),
+          # so a plain `git push` races and dies with
           # "! [rejected] HEAD -> main (fetch first)". Rebase on the newest
           # remote commit and retry before giving up.
           pushed=0

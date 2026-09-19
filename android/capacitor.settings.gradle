@@ -56,9 +56,6 @@ project(':nativekit-custom-native').projectDir = new File('../plugins/custom-nat
 include ':nativekit-isolated-browser'
 project(':nativekit-isolated-browser').projectDir = new File('../plugins/isolated-browser/android')
 
-include ':nativekit-phonebuddy-agent'
-project(':nativekit-phonebuddy-agent').projectDir = new File('../plugins/phonebuddy-agent/android')
-
 include ':nativekit-widget'
 project(':nativekit-widget').projectDir = new File('../plugins/widget/android')
 

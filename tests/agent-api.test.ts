@@ -14,12 +14,16 @@ import { describe, expect, it } from 'vitest';
 // included) reproducible for anyone. That pinning has consequences this file
 // now enforces:
 //   1. the UniFFI contract version on both sides must be the 0.5.2 one (26),
-//   2. the crash-safety / optional-dependency fixes backported from 0.9.x must
-//      stay in place (catch Throwable, lancedb gating on both platforms),
+//   2. the crash-safety fixes backported from 0.9.x must stay in place (catch
+//      Throwable / never throw across the FFI boundary),
 //   3. the five newer-engine APIs are compat shims in the bridge and must never
-//      be called on the native plugin — the wake/surfaced ones are answered by
-//      the PhoneBuddy engine instead (tests/phonebuddy-api.test.ts),
-//   4. the private-repo submodule must never come back.
+//      be called on the native plugin; this generation cannot schedule OS wakes
+//      or surface background messages, so those five answer `supported: false`
+//      with a reason and the supported alternative,
+//   4. the private-repo submodule must never come back,
+//   5. this is the ONLY agent engine in the app: the long-term memory it needs is
+//      implemented in-repo (file-backed, lexical) instead of behind an optional
+//      vector-database plugin.
 
 const root = process.cwd();
 const read = (relative: string) => readFileSync(path.join(root, relative), 'utf8');
@@ -193,22 +197,64 @@ describe('agent plugin — pinned generation (0.5.2) integrity', () => {
     expect(read(`${CRATE}/VENDOR-MANIFEST.json`)).toContain('"fileCount"');
   });
 
-  it('gates the optional lancedb dependency (Gradle) and keeps its sources out of the main set', () => {
-    const gradle = read(PLUGIN_GRADLE);
-    expect(gradle).toMatch(/def hasLanceDb = project\.findProject\(':capacitor-lancedb'\) != null/);
-    expect(gradle).toMatch(/if \(hasLanceDb\) \{\s*android\.sourceSets\.main\.java\.srcDir\('src\/main\/java-memory'\)/);
-    expect(gradle).toMatch(/if \(hasLanceDb\) \{\s*compileOnly project\(':capacitor-lancedb'\)/);
+  it('ships its own memory provider: file-backed, lexical, no vector database', () => {
+    // The engine's memory_* tools call a host MemoryProvider (UniFFI callback
+    // interface). That provider used to be optional and LanceDB-backed, so with
+    // no capacitor-lancedb in package.json the engine kept memory_provider=None
+    // and every memory tool answered "Memory provider not configured". It is now
+    // part of the plugin on both platforms — no optional dependency, no vector
+    // index, no second native runtime.
+    const kotlinFile = 'plugins/native-agent/android/src/main/java/com/t6x/plugins/nativeagent/MemoryProviderImpl.kt';
+    const swiftFile = 'plugins/native-agent/ios/Sources/NativeAgentPlugin/MemoryProviderImpl.swift';
+    expect(existsSync(path.join(root, kotlinFile)), 'Kotlin memory provider missing').toBe(true);
+    expect(existsSync(path.join(root, swiftFile)), 'Swift memory provider missing').toBe(true);
 
-    // Compile-time references to lancedb would break every app that does not
-    // include it, so those files must live in the gated source set.
-    const mainDir = 'plugins/native-agent/android/src/main/java/com/t6x/plugins/nativeagent';
-    const gatedDir = 'plugins/native-agent/android/src/main/java-memory/com/t6x/plugins/nativeagent';
-    for (const f of ['LanceDBBridge.kt', 'MemoryProviderImpl.kt']) {
-      expect(existsSync(path.join(root, mainDir, f)), `${f} must not be in the main source set`).toBe(false);
-      expect(existsSync(path.join(root, gatedDir, f)), `${f} must exist in the gated source set`).toBe(true);
+    const kotlin = read(kotlinFile);
+    expect(kotlin).toMatch(/class MemoryProviderImpl\(context: Context\) : MemoryProvider/);
+    for (const method of ['store', 'recall', 'forget', 'search', 'list']) {
+      expect(kotlin, `Kotlin provider must implement ${method}`).toContain(`override fun ${method}(`);
     }
-    // …and the plugin wires it reflectively.
-    expect(read(KOTLIN)).toContain('Class.forName("com.t6x.plugins.nativeagent.MemoryProviderImpl")');
+    // Never throw across the FFI boundary: failures come back as JSON data.
+    expect(kotlin).toContain('{"error"');
+    // Storage is a private JSON document, not a vector store.
+    expect(kotlin).toContain('native-agent-memory');
+    expect(kotlin).toMatch(/MAX_ENTRIES/);
+
+    const swift = read(swiftFile);
+    expect(swift).toContain('public final class MemoryProviderImpl: MemoryProvider');
+    for (const method of ['store', 'recall', 'forget', 'search', 'list']) {
+      expect(swift, `Swift provider must implement ${method}`).toContain(`public func ${method}(`);
+    }
+    expect(swift).toContain('makeIfAvailable');
+
+    // No vector machinery may creep back in on either platform. Comments are
+    // stripped first: they explain the history (why LanceDB left) and are worth
+    // keeping, so only real code may be inspected.
+    const code = (source: string) =>
+      source
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .split('\n')
+        .filter((line) => {
+          const t = line.trim();
+          return !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*');
+        })
+        .join('\n');
+    for (const [name, source] of [['Kotlin', kotlin], ['Swift', swift]] as const) {
+      expect(code(source), `${name} provider must not embed/vectorise`).not.toMatch(/embedding|vector|cosine|lancedb/i);
+    }
+    expect(swift, 'the old LanceDB bridge must be gone')
+      .toMatch(/MemoryProviderImpl/);
+    expect(existsSync(path.join(root, 'plugins/native-agent/ios/Sources/NativeAgentPlugin/LanceDBBridge.swift'))).toBe(false);
+    expect(existsSync(path.join(root, 'plugins/native-agent/android/src/main/java-memory'))).toBe(false);
+
+    // Both plugins must WIRE it, or the tools stay dead in the app.
+    expect(read(KOTLIN)).toContain('h.setMemoryProvider(MemoryProviderImpl(context.applicationContext))');
+    expect(read(KOTLIN)).not.toContain('Class.forName');
+    expect(read(SWIFT)).toMatch(/MemoryProviderImpl\.makeIfAvailable\(\)[\s\S]*?setMemoryProvider/);
+
+    // …and the gradle module must not gate an optional vector plugin any more.
+    expect(read(PLUGIN_GRADLE)).not.toContain('hasLanceDb');
+    expect(read(PLUGIN_GRADLE)).not.toContain('capacitor-lancedb');
   });
 
   it('exposes the UniFFI C header as a SwiftPM target the bindings can import', () => {
@@ -286,9 +332,27 @@ describe('agent plugin — pinned generation (0.5.2) integrity', () => {
     const pkg = read(PACKAGE_SWIFT);
     expect(pkg).not.toMatch(/\.package\(path:/);
     expect(pkg).not.toMatch(/product\(name: "CapacitorLancedb"/);
-    // The Swift memory provider must stay behind canImport guards.
-    expect(read('plugins/native-agent/ios/Sources/NativeAgentPlugin/LanceDBBridge.swift'))
-      .toContain('#if canImport(');
+    // There is nothing optional left to guard: the memory provider is compiled
+    // unconditionally, so the class must NOT sit behind #if canImport(…).
+    const provider = read('plugins/native-agent/ios/Sources/NativeAgentPlugin/MemoryProviderImpl.swift');
+    // A real conditional-compilation line must be gone (the doc comment quotes
+    // the old one on purpose, so check line starts, not the whole file).
+    const preprocessor = provider.split('\n').map((line) => line.trimStart()).filter((line) => line.startsWith('#if'));
+    expect(preprocessor, preprocessor.join(' | ')).toEqual([]);
+    expect(provider).toContain('public static func makeIfAvailable() -> MemoryProvider?');
+  });
+
+  it('keeps the committed iOS xcframework and the generated bindings in step', () => {
+    // A stale xcframework is invisible until an iOS build fails, so compare it
+    // here: both slices must carry the same Swift API, and that API must be the
+    // one uniffi-bindgen produced from the vendored crate.
+    const generated = read('plugins/native-agent/ios/Sources/NativeAgentPlugin/Generated/native_agent_ffi.swift');
+    for (const slice of ['ios-arm64', 'ios-arm64-simulator']) {
+      const header = read(`plugins/native-agent/ios/Frameworks/NativeAgentFFI.xcframework/${slice}/Headers/native_agent_ffi/native_agent_ffi.swift`);
+      expect(header, `${slice} carries a different API than the generated bindings`).toBe(generated);
+    }
+    expect(generated).toContain('func setMemoryProvider(provider: MemoryProvider)');
+    expect(generated).toContain('public protocol MemoryProvider: AnyObject');
   });
 
   it('keeps the ABI tooling and CI wiring that makes armeabi-v7a builds possible', () => {
@@ -333,42 +397,58 @@ describe('agent — bridge and demo wiring', () => {
     }
   });
 
-  it('routes the wake/surfaced APIs to the PhoneBuddy engine, with an honest fallback', () => {
+  it('answers the wake/surfaced APIs honestly instead of pretending', () => {
+    // This generation cannot schedule OS wakes (no JobScheduler / BGTaskScheduler
+    // path) and has no surfaced-message store. The five APIs stay in the surface
+    // so host apps compile, but each one must return data — never reject, never
+    // claim a job was scheduled.
     const block = bridgeAgentBlock();
-    const routed = [
+    const refused = [
       'scheduleBackgroundWakes',
       'cancelBackgroundWakes',
       'getWakeStatus',
       'loadSurfacedMessages',
       'clearSurfacedMessages',
     ];
-    for (const name of routed) {
+    for (const name of refused) {
       const m = block.match(new RegExp(`^    ${name}: async \\([\\s\\S]*?\\n    \\},`, 'm'));
       expect(m, `${name} shim not found`).not.toBeNull();
-      // The capability really exists now (PhoneBuddy engine), so the shim must
-      // call it rather than short-circuiting to an "unsupported" envelope.
-      expect(m![0], `${name} must be answered by the PhoneBuddy engine`).toContain(`'${name}'`);
-      expect(m![0], `${name} must call PhoneBuddyAgent`).toMatch(/phoneBuddyCall\(/);
-      // …but a device/build without that engine still gets a truthful envelope
-      // instead of a rejection or a fake success.
-      expect(m![0], `${name} needs a supported:false fallback`).toContain('supported: false');
-      expect(m![0], `${name} must explain the fallback`).toContain('reason:');
+      const body = m![0];
+      expect(body, `${name} must say it is unsupported`).toContain('supported: false');
+      expect(body, `${name} must explain why`).toContain('reason:');
+      expect(body, `${name} must offer the supported alternative`).toContain('alternative:');
+      // No phantom engine call, no rejection, no fake success.
+      expect(body, `${name} must not call a native method`).not.toMatch(/NativeAgent\./);
+      expect(body, `${name} must not throw`).not.toContain('throw');
+      expect(body, `${name} must not claim it scheduled anything`).not.toContain('jobScheduled: true');
     }
     // setMcpTools is mapped onto the closest native capability.
     expect(block).toMatch(/setMcpTools→restartMcp/);
   });
 
-  it('degrades to the fallback instead of rejecting when the engine is missing', () => {
-    const block = bridgeAgentBlock();
-    // phoneBuddyCall() is the single place that talks to the PhoneBuddy plugin,
-    // and it may never reject: web builds, unsupported ABIs and disabled
-    // features all have to come back as data.
-    const helper = read(BRIDGE).match(/async function phoneBuddyCall\([\s\S]*?\n\}/)![0];
-    expect(helper).toContain('catch (error)');
-    expect(helper).toContain('return { ...fallback }');
-    expect(helper).not.toContain('throw');
-    expect(block).toMatch(/^    phonebuddy: \{/m);
-    expect(block).toContain('generation: PHONEBUDDY_GENERATION');
+  it('has no second engine: PhoneBuddy is gone from the app', () => {
+    // A reminder of why this test exists: the PhoneBuddy engine was carried for
+    // OS wakes + surfaced messages. It cost 40 MB of Android .so and 59 MB of iOS
+    // framework to cover two APIs the app cannot use from this generation anyway,
+    // so it was removed. Nothing may reintroduce it silently.
+    const pkg = JSON.parse(read('package.json'));
+    expect(Object.keys(pkg.dependencies)).not.toContain('@nativekit/phonebuddy-agent');
+    expect(existsSync(path.join(root, 'plugins/phonebuddy-agent'))).toBe(false);
+    expect(existsSync(path.join(root, '.github/workflows/phonebuddy-ffi.yml'))).toBe(false);
+    expect(existsSync(path.join(root, '.github/workflows/phonebuddy-ios.yml'))).toBe(false);
+    expect(existsSync(path.join(root, 'tools/agent-ffi/build-phonebuddy-all-abis.sh'))).toBe(false);
+    expect(existsSync(path.join(root, 'tools/agent-ffi/build-phonebuddy-ios-xcframework.sh'))).toBe(false);
+
+    const config = JSON.parse(read('app.config.json'));
+    expect(config.phonebuddy).toBeUndefined();
+    expect(read('app.config.schema.json')).not.toContain('phonebuddy');
+
+    for (const file of [BRIDGE, 'www/agent-lab.js', 'www/index.html', 'scripts/configure-native.mjs']) {
+      expect(read(file).toLowerCase(), `${file} still mentions phonebuddy`).not.toContain('phonebuddy');
+    }
+    // The lab's long-term-memory buttons replace the removed engine's panel.
+    expect(read('www/agent-lab.js')).toContain("invokeTool('memory_store'");
+    expect(read('www/index.html')).toContain('data-agent-action="agentmemrecall"');
   });
 
   it('gates every agent call behind the feature flag and a native check', () => {
