@@ -14,7 +14,7 @@ type NativeKitFeatureName =
   | 'camera' | 'location' | 'backgroundLocation' | 'haptics' | 'localNotifications'
   | 'pushNotificationsReady' | 'advancedAlarms' | 'backgroundRunner' | 'sqlite'
   | 'secureStorage' | 'filesystem' | 'fileTransfer' | 'sharing' | 'networkStatus'
-  | 'nativeSSE' | 'appBrowser' | 'inAppBrowser' | 'widget';
+  | 'nativeSSE' | 'appBrowser' | 'inAppBrowser' | 'widget' | 'agent';
 
 type NativeKitAppBrowserCapability =
   | 'permissions' | 'http' | 'camera' | 'location' | 'backgroundLocation' | 'haptics'
@@ -42,6 +42,87 @@ interface NativeKitConfig {
   appBrowser: NativeKitAppBrowserConfig;
   backgroundRunner: { label: string; event: string; defaultSyncUrl: string };
   widget: NativeKitWidgetConfig;
+  agent: NativeKitAgentConfig;
+}
+
+/**
+ * Defaults for the agent's OS-scheduled background wakes and its surfaced-message
+ * inbox. The platform floor always wins over `minWakeIntervalMinutes`
+ * (Android's WorkManager refuses periodic work below 15 minutes), and the
+ * interval the OS actually granted is what scheduleBackgroundWakes() returns —
+ * never a re-echo of the request.
+ */
+interface NativeKitAgentConfig {
+  wakeIntervalMinutes: number;
+  minWakeIntervalMinutes: number;
+  surfacedLimit: number;
+  markSurfacedRead: boolean;
+}
+
+/** One message the agent produced while the user was not looking. */
+interface NativeKitAgentSurfacedMessage {
+  id: string;
+  at: string;
+  source: 'background' | 'notification' | string;
+  read: boolean;
+  title?: string;
+  body?: string;
+  text?: string;
+  jobId?: string;
+  taskId?: string;
+  runId?: number;
+  status?: string;
+  delivered?: boolean;
+}
+
+interface NativeKitAgentSurfacedMessages {
+  supported: boolean;
+  messagesJson: string;
+  count: number;
+  unread: number;
+  limit?: number;
+  markRead?: boolean;
+  reason?: string;
+  alternative?: string;
+  lastWakeAt?: string | null;
+  lastWakeSource?: string | null;
+  lastWakeSummary?: string | null;
+}
+
+interface NativeKitAgentWakeResult {
+  supported: boolean;
+  jobScheduled: boolean;
+  jobCancelled?: boolean;
+  /** Granted interval (may be larger than the requested one on every platform). */
+  intervalMinutes: number;
+  requestedIntervalMinutes?: number;
+  minIntervalMinutes?: number;
+  requiresCharging?: boolean;
+  nextRunApproxMs?: number | null;
+  mechanism?: string;
+  workName?: string;
+  taskIdentifier?: string;
+  workState?: string | null;
+  opportunistic?: boolean;
+  engineGeneration?: string;
+  platform?: string;
+  reason?: string;
+  alternative?: string;
+}
+
+interface NativeKitAgentWakeStatus extends NativeKitAgentWakeResult {
+  runAttemptCount?: number;
+  lastWakeAt?: string | null;
+  lastWakeSource?: string | null;
+  lastWakeSummary?: string | null;
+  lastWakeRan?: number;
+  lastWakeOk?: boolean;
+  unreadSurfaced?: number;
+  engineInitialized?: boolean;
+  enabledCronJobs?: number | null;
+  dueCronJobs?: number | null;
+  pendingTasks?: number | null;
+  permitted?: boolean;
 }
 
 interface NativeKitWidgetKind {
@@ -500,6 +581,24 @@ interface NativeKitAPI {
   readonly platform: string;
   readonly isNative: boolean;
   ready(): Promise<NativeKitAPI>;
+  /**
+   * On-device Rust agent (gated by `features.agent`). This declares the
+   * background-wake half of the surface — scheduling, telemetry and the surfaced
+   * inbox. The scheduling itself is owned by the plugin (WorkManager on Android,
+   * BGTaskScheduler on iOS), because the engine can run a wake but cannot ask the
+   * OS for background runtime. Every call resolves; a build where the native side
+   * is unreachable answers `supported: false` with a reason and an alternative.
+   */
+  agent: {
+    readonly engineGeneration: string;
+    supported(): boolean;
+    scheduleBackgroundWakes(intervalMinutes?: number): Promise<NativeKitAgentWakeResult>;
+    cancelBackgroundWakes(): Promise<NativeKitAgentWakeResult>;
+    getWakeStatus(): Promise<NativeKitAgentWakeStatus>;
+    loadSurfacedMessages(limit?: number): Promise<NativeKitAgentSurfacedMessages>;
+    clearSurfacedMessages(): Promise<{ supported: boolean; cleared: number; unread?: number; engineGeneration?: string; platform?: string }>;
+    handleWake(source?: string): Promise<{ ran: number; failed: number; surfaced: number; summary: string }>;
+  };
   permissions: {
     check(): Promise<{
       camera: Record<string, NativeKitPermissionState>;
@@ -909,4 +1008,9 @@ export {
   NativeKitWidgetSpec,
   NativeKitFloatingWidgetOptions,
   NativeKitWidgetKind,
+  NativeKitAgentConfig,
+  NativeKitAgentSurfacedMessage,
+  NativeKitAgentSurfacedMessages,
+  NativeKitAgentWakeResult,
+  NativeKitAgentWakeStatus,
 };

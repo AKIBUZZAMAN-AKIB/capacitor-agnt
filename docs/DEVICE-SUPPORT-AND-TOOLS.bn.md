@@ -83,7 +83,7 @@
 ## ৪. কী কী করতে পারবেন (আসল কাজের উদাহরণ)
 
 1. **নিজের ফোনে অফলাইন এজেন্ট** — API key (OpenAI/Anthropic/Gemini ইত্যাদি) দিয়ে চ্যাট, টুল চালানো, workspace-এ ফাইল লেখা/পড়া।
-2. **সময়-নির্ভর কাজ** — cron job যোগ করে (`addCronJob`) নির্দিষ্ট সময়ে কাজ চালানো; অ্যাপ-লঞ্চ/ম্যানুয়াল wake (`handleWake`), heartbeat কনফিগ।
+2. **সময়-নির্ভর কাজ** — cron job যোগ করে (`addCronJob`) নির্দিষ্ট সময়ে কাজ চালানো; **OS-শিডিউলড background wake** (`scheduleBackgroundWakes`) — অ্যাপ বন্ধ থাকলেও Android-এ WorkManager worker ও iOS-এ BGProcessingTask ইঞ্জিনকে persisted config থেকে rebuild করে due job চালায়, ফলাফল নোটিফিকেশন + `surfaced.json` ইনবক্সে জমা হয় (`loadSurfacedMessages`)। ফোরগ্রাউন্ড catch-up দরকার হলে `handleWake()`। বিস্তারিত: `docs/BACKGROUND-WAKES.bn.md`।
 3. **Skill** — নিজের প্রম্পট/টাস্কসংখ্যা skill হিসেবে বানিয়ে রাখা, দরকারে চালু/বন্ধ করা।
 4. **নিরাপত্তা** — কোন টুল এজেন্ট ব্যবহার করতে পারবে তার অনুমতি সেট করা, ঝুঁকিপূর্ণ কাজে approval চাওয়া।
 5. **MCP** — বাইরের MCP সার্ভার/টুল যুক্ত করা।
@@ -96,8 +96,11 @@
 
 | বিষয় | অবস্থা |
 |---|---|
-| iOS-এর OS-scheduled background wake (BGTaskScheduler) | ❌ নেই — ব্রিজ `supported:false` দেয়; বিকল্প: **cron + `handleWake`** |
-| `loadSurfacedMessages`, `clearSurfacedMessages`, `scheduleBackgroundWakes`, `cancelBackgroundWakes`, `getWakeStatus` | ⚠️ এই প্রজন্মে নেই — ব্রিজ **সৎভাবে** `supported:false` + কারণ + বিকল্প দেয় (নিচে ৫ নম্বর দেখুন) |
+| OS-scheduled background wake | ✅ আছে — Android: WorkManager `PeriodicWorkRequest` (floor **১৫ মিনিট**), iOS: `BGProcessingTask` (`io.t6x.nativeagent.wake`, লঞ্চেই register) |
+| wake-এর **সময়** | ⚠️ OS-এর হাতে। Android-এ interval একটি **সর্বনিম্ন** মান (Doze/App Standby দেরি করাতে পারে), iOS-এ `earliestBeginDate` শুধু floor — কখন চলবে সেটা iOS ঠিক করে, তাই `opportunistic: true` |
+| ইউজার অ্যাপ **force-quit** করলে | ⚠️ iOS আর কোনো BGTask চালায় না (অ্যাপ কোনো callback পায় না, cancel করে দিতে হয়) — Android-এ WorkManager পরের চক্রে আবার চলে |
+| `loadSurfacedMessages`, `clearSurfacedMessages` | ✅ আছে — ইনবক্স ইঞ্জিনের নিজের `cron_runs` row + wake-এর সময়কার নোটিফিকেশন থেকে ভরে (`surfaced.json`, সর্বশেষ ৫০০, unread flag) |
+| ডিভাইসে আসল wake যাচাই | ⚠️ এখনো করা হয়নি — কম্পাইল+ইউনিট টেস্ট পাস, কিন্তু iOS Simulator-এ `BGTaskScheduler` `.unavailable`, তাই আসল wake device-only (নিচে ৬ নম্বর) |
 | Long-term memory (`memory_*` টুল) | ✅ **বিল্ট-ইন** — ফাইল-ভিত্তিক স্টোর + লেক্সিক্যাল সার্চ, কোনো ভেক্টর DB/প্লাগিন লাগে না |
 | Push notification | ⚠️ কোড আছে, কিন্তু APNs/Firebase key বসানো নেই → register সফল হবে না |
 | Play Store-এ প্রকাশ | ⚠️ আসল app id + নিজের keystore + privacy policy দরকার |

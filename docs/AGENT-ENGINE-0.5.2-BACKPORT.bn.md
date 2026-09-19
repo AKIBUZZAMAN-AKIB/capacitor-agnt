@@ -38,18 +38,19 @@ UniFFI contract version: 26 (দুই দিকেই match ✅)
 | 6 | **C2 → প্রতিস্থাপিত:** ঐচ্ছিক LanceDB মেমোরি পুরোপুরি বাদ; `MemoryProviderImpl.kt` এখন `src/main/java`-তে বিল্ট-ইন (ফাইল-ভিত্তিক স্টোর + লেক্সিক্যাল সার্চ), সরাসরি wiring | আগের গেট (`findProject(':capacitor-lancedb')`) মানে ছিল — যে অ্যাপে ওই প্লাগিন নেই, সেখানে `memory_*` টুল সবসময় `"Memory provider not configured"` দিত। এখন সব অ্যাপে কাজ করে |
 | 7 | **C3 → অপ্রযোজ্য:** `Package.swift`-এ কোনো অপশনাল নেটিভ ডিপেন্ডেন্সি নেই — Swift মেমোরি প্রোভাইডারও বিল্ট-ইন (`MemoryProviderImpl.swift`) | macOS-এ SwiftPM resolve-এ কোনো বাহ্যিক প্লাগিন লাগে না |
 | 8 | `android/consumer-rules.pro` + `consumerProguardFiles` (defaultConfig-এ) | JNA/UniFFI-reflection সহ minify-করা রিলিজ বিল্ড |
-| 9 | ব্রিজে **কম্প্যাট শিম** (৫টি newer-engine API) | `checkAvailability` এখন নেটিভ; বাকি ৪টি `supported:false` নিয়ে resolve করে — কখনো reject করে না |
+| 9 | ~~ব্রিজে কম্প্যাট শিম~~ → **প্লাগইনে আসল ইমপ্লিমেন্টেশন** (`scheduleBackgroundWakes`, `cancelBackgroundWakes`, `getWakeStatus`, `loadSurfacedMessages`, `clearSurfacedMessages`) | ইঞ্জিন wake *চালাতে* পারে কিন্তু OS-এর কাছে background runtime *চাইতে* পারে না — সেই অর্ধেকটা এখন প্লাগিনে (Android: WorkManager periodic worker; iOS: `BGProcessingTask`)। বিস্তারিত: `docs/BACKGROUND-WAKES.bn.md`। শুধু `setMcpTools` শিমই রয়ে গেছে |
 | 10 | `scripts/configure-native.mjs`: iOS BGTask id শুধু тогда যোগ হয় যখন `NativeAgentBackgroundTask.swift` সত্যিই আছে | কাল্পনিক টাস্ক iOS-কে promise করা বন্ধ |
 | 11 | `tests/agent-api.test.ts` নতুন প্রজন্মের জন্য পুনর্লিখন | contract 26, ব্যাকপোর্ট, বিল্ট-ইন মেমোরি (কোনো ভেক্টর নেই), ABI টুলিং, শিম, একটাই ইঞ্জিন — সব মেশিন-যাচাই |
 
 ### কম্প্যাট শিমগুলো (ব্রিজের ভেতরে)
 
-| ব্রিজ API | 0.5.2-তে | শিম কী করে |
+| ব্রিজ API | 0.5.2-তে | কীভাবে দেওয়া হয় |
 |---|---|---|
 | `checkAvailability()` | ✅ (আমরা যোগ করেছি) | নেটিভ প্রোব, কখনো reject করে না |
-| `scheduleBackgroundWakes(min)` | ❌ (≥0.6 API) | `{supported:false, reason, alternative:'addCronJob + handleWake'}` |
-| `cancelBackgroundWakes()` | ❌ | `{supported:false, reason}` |
-| `loadSurfacedMessages(limit)` | ❌ | `{supported:false, sessions:[…]}` — `listSessions()` ব্যবহার করে কিছু দরকারি ডেটা দেয় |
+| `scheduleBackgroundWakes(min)` | নেটিভ মেথড নেই | **প্লাগিন নিজে OS-শিডিউলিং করে** — Android `PeriodicWorkRequest` (১৫ মিনিটে clamp করে granted মান রিপোর্ট), iOS `BGProcessingTask`। নেটিভ না পৌঁছালে `{supported:false, reason, alternative}` |
+| `cancelBackgroundWakes()` | নেটিভ মেথড নেই | `cancelUniqueWork` / `BGTaskScheduler.cancel` — সত্যিই বাতিল হয়, `jobCancelled` রিপোর্ট সহ |
+| `getWakeStatus()` | নেটিভ মেথড নেই | OS-এর নিজের state (`WorkInfo` / `getPendingTaskRequests`) + শেষ wake-এর telemetry + enabled/due cron গণনা |
+| `loadSurfacedMessages(limit)` | নেটিভ মেথড নেই | ইঞ্জিনের `cron_runs` row + wake-কালীন নোটিফিকেশন থেকে ভরা `surfaced.json` ইনবক্স (নতুন→পুরনো, unread সহ) |
 | `setMcpTools(json)` | ❌ | `restartMcp({toolsJson})`-এ ম্যাপ করা হয় + `viaCompat` চিহ্ন |
 
 নেটিভ সিগনেচারের যে জায়গাগুলো আলাদা, সেগুলোও ব্রিজে অনুবাদ করা হয়: `removeSkill({id: skillId})`, `loadSession({agentId: 'main'})`, `setAuthKey` থেকে `refresh/expiresAt` বাদ, `startSkill.configJson` ডিফল্ট `'{}'`, `handleWake({source:'manual'})`, `setToolPermission.enabled ?? true`।
@@ -65,12 +66,12 @@ UniFFI contract version: 26 (দুই দিকেই match ✅)
 - crash-safety ব্যাকপোর্ট (missing-ABI ডিভাইসে ক্র্যাশ নয়)।
 
 **হারাবেন (0.9.x-এর চেয়ে পুরোনো প্রজন্ম)**
-- background wakes (OS-শিডিউলড wake) — cron + `handleWake()` আছে, কিন্তু OS wake scheduler নেই;
-- `loadSurfacedMessages`, `setMcpTools` (শিম দিয়ে আংশিক);
+- ইঞ্জিনের **নিজের** wake scheduler: 0.5.2-তে OS আমলে নেওয়ার কোনো পথ নেই, তাই scheduling এখন প্লাগিনের দায়িত্ব (WorkManager/BGTaskScheduler) — wake **হয়**, শুধু সিদ্ধান্তটা OS-এর (Android floor ১৫ মিনিট, iOS opportunistic);
+- `setMcpTools` (শিম দিয়ে আংশিক — `restartMcp`-এ ম্যাপ করা);
 - long-term memory: **বিল্ট-ইন** — অ্যাপের প্রাইভেট ডিরে একটি JSON স্টোর (`native-agent-memory/memory.json`), লেক্সিক্যাল সার্চ সহ; কোনো ভেক্টর DB/বাহ্যিক প্লাগিন/নেটওয়ার্ক লাগে না;
 - 0.6–0.9-এর ইঞ্জিন উন্নতি/বাগফিক্স (ইঞ্জিন কোডে)।
 
-> দীর্ঘমেয়াদে আধুনিক ইঞ্জিন (OS wake scheduler / surfaced store) চাইলে নতুন প্রজন্মের সোর্স দরকার; PhoneBuddy নামের বিকল্পটা পরীক্ষা করে **বাদ দেওয়া হয়েছে** — কারণ ও সিদ্ধান্ত: `docs/research/FFI-SOURCE-AVAILABILITY.bn.md` (PLAN B)।
+> দীর্ঘমেয়াদে ইঞ্জিন আপগ্রেড করলে (`handle_wake`, `cron_runs.wake_source`, `event_callback` সবই 0.5.2-তেই আছে) প্লাগিনের wake layer অপরিবর্তিত থাকবে — শুধু `NativeWakeRunner`/`NativeWakeCapture`-এর FFI কলগুলো নতুন হ্যান্ডেলে বসবে। PhoneBuddy নামের বিকল্প engine টা পরীক্ষা করে **বাদ দেওয়া হয়েছে** — কারণ ও সিদ্ধান্ত: `docs/research/FFI-SOURCE-AVAILABILITY.bn.md` (PLAN B)।
 
 ---
 

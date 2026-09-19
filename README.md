@@ -20,6 +20,7 @@
 - camera, foreground GPS, haptics, lifecycle, local notifications
 - advanced Android alarms; iOS 26 AlarmKit এবং Local Notifications fallback
 - OS-scheduled background runner এবং policy-gated background GPS
+- **Agent background wakes**: `scheduleBackgroundWakes()`/`cancelBackgroundWakes()`/`getWakeStatus()` — Android-এ WorkManager periodic worker (floor ১৫ মিনিট), iOS-এ `BGProcessingTask` (`io.t6x.nativeagent.wake`); অ্যাপ বন্ধ থাকলেও persisted config থেকে ইঞ্জিন rebuild হয়ে due cron job চলে, আর ফলাফল নোটিফিকেশন + `loadSurfacedMessages()` ইনবক্সে জমা হয় (scheduling পার্টটা প্লাগিনের, ইঞ্জিনে কোনো জাদু নেই — [docs/BACKGROUND-WAKES.bn.md](./docs/BACKGROUND-WAKES.bn.md))
 - Preferences, native SQLite, Keychain/Android Keystore-backed secure storage
 - filesystem, progress-সহ upload/download, share, network state
 - **Nearby Connections P2P** (v1.4.x): সম্পূর্ণ অফলাইন device-to-device — advertise/discovery, auto-accept pairing, গ্রুপ চ্যাট ও chunked ফাইল ট্রান্সফার (Bluetooth/BLE/Wi-Fi Direct); পারমিশন টেমপ্লেট-গেটেড — `features.nearby`

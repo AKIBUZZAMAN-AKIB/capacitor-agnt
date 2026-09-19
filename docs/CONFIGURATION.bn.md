@@ -65,6 +65,7 @@ Hostname entry exact (`api.example.com`) অথবা one-level/descendant suffi
 | `pushNotificationsReady` | push JS/native plugin surface; credentials নয় |
 | `advancedAlarms` | Android exact/inexact/full-screen adapter, iOS AlarmKit/fallback |
 | `backgroundRunner` | OS-scheduled background task |
+| `agent` | on-device Rust agent (chat/cron/skills/MCP) + OS-শিডিউলড background wake ও surfaced-message ইনবক্স |
 | `appBrowser` | uploaded third-party static app-এর sandboxed runtime ও broker |
 | `sqlite` | native SQLite |
 | `secureStorage` | Android AES-GCM/Keystore ও iOS Keychain |
@@ -164,6 +165,26 @@ Policy semantics-এ durable state `ask`, `allow`, `block`। App disable ও ca
 | `defaultSyncUrl` | optional direct sync endpoint; খালি থাকলে runner no-op/metadata update |
 
 `runners/background-runner.js` bounded কাজ করে এবং isolated synchronous `CapacitorKV` ব্যবহার করে। Interval exact নয়; OS power/network/user behavior অনুযায়ী defer/skip করতে পারে। Owned backend বাধ্যতামূলক নয়—URL খালি রাখা বৈধ।
+
+## `agent`
+
+`features.agent` চালু থাকলে এজেন্টের OS-শিডিউলড wake ও surfaced-message ইনবক্সের ডিফল্ট।
+প্ল্যাটফর্মের floor কখনো লঙ্ঘন করা হয় না — Android-এ WorkManager periodic work ১৫ মিনিটের নিচে
+নেয় না, আর `minWakeIntervalMinutes`-এর schema সর্বনিম্ন ১৫; OS যদি চাওয়ার চেয়ে বেশি দেয়, সেটাই
+`scheduleBackgroundWakes()`-এর উত্তরে `intervalMinutes` হিসেবে ফেরে (চাওয়া মান থাকে
+`requestedIntervalMinutes`-এ)।
+
+| Field | অর্থ |
+|---|---|
+| `wakeIntervalMinutes` | interval না দেওয়া হলে এই মান অনুরোধ করা হয় (15–1440, ডিফল্ট 30) |
+| `minWakeIntervalMinutes` | floor, schema-তে 15–1440 (ডিফল্ট 15) |
+| `surfacedLimit` | `loadSurfacedMessages()`-এর ডিফল্ট page size (1–500, ডিফল্ট 50) |
+| `markSurfacedRead` | পড়ার সময় `read` flag বসাবে কি না (ডিফল্ট false) |
+
+`requiresCharging` এখানে নেই — সেটা ইঞ্জিনের নিজের `scheduler_config.runOnCharging` থেকেই আসে
+(Android-এ `setRequiresCharging`, iOS-এ `requiresExternalPower`), কারণ একটি wake মানে পূর্ণ
+agent turn + LLM কল = নেটওয়ার্ক ও ব্যাটারি খরচ। প্ল্যাটফর্ম-বাস্তবতাসহ বিস্তারিত:
+[`BACKGROUND-WAKES.bn.md`](./BACKGROUND-WAKES.bn.md)।
 
 ## `security`
 
