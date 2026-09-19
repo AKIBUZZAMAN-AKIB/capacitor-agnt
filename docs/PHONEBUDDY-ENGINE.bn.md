@@ -158,16 +158,33 @@ bash tools/agent-ffi/build-phonebuddy-ios-xcframework.sh
 `native/include/phone_buddy.h`-এর সাথে **byte-identical** না হলে build ফেল করায়
 (নইলে repo আর binary ভিন্ন ABI বর্ণনা করত), তারপর
 `plugins/phonebuddy-agent/ios/Frameworks/PhoneBuddyFFI.xcframework` বানায় ও
-প্রতিটি slice-এ `_pb_engine_new`-জাতীয় symbol আছে কি না `nm` দিয়ে যাচাই করে।
+`tools/agent-ffi/machocheck.py` দিয়ে যাচাই করে: committed header-এ ঘোষিত **সব**
+`pb_*` function প্রতিটি slice-এ *defined* আছে কি না (শুধু-উল্লেখ `U` entry কখনো
+export হিসেবে গোনা হয় না), slice-এর header একই ABI বর্ণনা করে কি না,
+`module.modulemap` আছে কি না, আর `MinimumOSVersion` (থাকলে) 15.0 কি না।
+যাচাইয়ে কোনো পাইপ নেই (`nm | grep -q` + `set -o pipefail` মিলে সত্যিকারের
+library-কেও "symbol নেই" বলে ভুল করত) এবং `nm` কীভাবে রেজলভ হয় সেটাও স্পষ্ট।
+
+> **টুলচেইন শর্ত:** rustc যে LLVM দিয়ে object বানায় তার চেয়ে পুরনো `nm` হলে
+> সেটি archive-টাই পড়তে পারে না — Xcode 15.4 (LLVM 15) Rust 1.94 (LLVM 21)
+> অবজেক্টে `Unknown attribute kind (86)` দেয়। তাই CI runner `macos-26`
+> (Clang/LLVM 21), যা অ্যাপ link করা Xcode 26-এর সাথে মেলে। দরকার হলে
+> machocheck.py নিজেই Rust toolchain-এর `llvm-nm`-এ fallback করে
+> (`rustup component add llvm-tools-preview`)।
+
 CI-তে: **Actions → PhoneBuddy FFI — iOS xcframework → Run workflow** — শেষে
-xcframework নিজেই `main`-এ commit হয়।
+xcframework নিজেই `main`-এ commit হয় (এখন কমিট করা অবস্থায় আছে: arm64 device +
+arm64 simulator slice, প্রতিটিতে 21/21 C-ABI symbol যাচাই করা)।
+মনে রাখুন: `GITHUB_TOKEN` দিয়ে করা ওই commit নতুন workflow run ট্রিগার করে না —
+xcframework বসার পর iOS build যাচাই করতে হলে **Actions → iOS validation and IPA →
+Run workflow** (`create_ipa` = false) চালান।
 
 ---
 
 ## ৭. যাচাই (এখন কী প্রমাণিত)
 
 ```bash
-npm run check          # 179 test (এর 32টি নতুন: tests/phonebuddy-api.test.ts)
+npm run check          # 181 test (এর 32টি নতুন: tests/phonebuddy-api.test.ts)
 npm run check:abis     # ৪টি ABI-তেই সব প্রয়োজনীয় native lib
 ```
 
