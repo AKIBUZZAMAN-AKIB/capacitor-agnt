@@ -192,11 +192,19 @@ for abi in $ABIS; do
     upstream) : ;;   # keep upstream's own profile (panic = "abort")
   esac
 
-  if ( cd "$SRC_DIR" && \
-       CARGO_TARGET_${up}_LINKER="$cc" \
-       CC_$(printf '%s' "$triple" | tr '-' '_')="$cc" \
-       AR_$(printf '%s' "$triple" | tr '-' '_')="$NDK_BIN/llvm-ar" \
-       cargo "${cargo_args[@]}" ); then
+  # NOTE: the toolchain variables must be exported with a QUOTED name.
+  # `CARGO_TARGET_${up}_LINKER="$cc" cargo ...` does NOT work: bash decides
+  # whether a word is an assignment at parse time, so a name containing an
+  # expansion is not recognised as one and the whole word is executed as a
+  # command ("CARGO_TARGET_..._LINKER=/path/clang: No such file or directory",
+  # exit 126/127 in CI). Quoted `export "NAME=$value"` is not affected.
+  if (
+    cd "$SRC_DIR"
+    export "CARGO_TARGET_${up}_LINKER=$cc"
+    export "CC_$(printf '%s' "$triple" | tr '-' '_')=$cc"
+    export "AR_$(printf '%s' "$triple" | tr '-' '_')=$NDK_BIN/llvm-ar"
+    cargo "${cargo_args[@]}"
+  ); then
     out="${SRC_DIR}/target/${triple}/release/${SO_NAME}"
     [[ -f "$out" ]] || die "[$abi] expected artefact missing: $out"
     mkdir -p "${DEST}/${abi}"

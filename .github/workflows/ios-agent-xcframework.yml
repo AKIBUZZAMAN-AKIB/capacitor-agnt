@@ -1,0 +1,118 @@
+name: iOS agent FFI — rebuild the xcframework from source
+
+# The xcframework that upstream ships with the public v0.5.2 release is stale:
+# its Rust archive / C header / Swift bindings come from an older crate revision
+# than the crate source committed at that tag, so the iOS app neither compiles
+# (missing NativeAgentHandle members) nor would run (UniFFI checksum mismatch).
+#
+# This workflow rebuilds the whole iOS side from the crate that is vendored in
+# this repository — no prebuilt blob, no private access, repeatable any time:
+#   vendored crate → device + simulator Rust archives → uniffi-bindgen bindings
+#   → NativeAgentFFI.xcframework + Generated/*.swift|.h committed back to main.
+#
+# Details: tools/agent-ffi/build-ios-xcframework.sh --help
+
+on:
+  workflow_dispatch:
+    inputs:
+      sim_archs:
+        description: 'Simulator architectures to build'
+        required: false
+        default: 'arm64'
+        type: choice
+        options: [arm64, 'arm64 x86_64']
+      commit_result:
+        description: 'Commit the rebuilt xcframework + bindings back to this branch'
+        required: false
+        default: true
+        type: boolean
+  push:
+    branches: [main]
+    paths:
+      - 'plugins/native-agent/rust/**'
+      - 'tools/agent-ffi/build-ios-xcframework.sh'
+      - '.github/workflows/ios-agent-xcframework.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    name: Rebuild xcframework from the vendored crate
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Report toolchain
+        run: |
+          xcodebuild -version
+          rustc --version || true
+          pod --version || true
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            plugins/native-agent/rust/native-agent-ffi/target
+          key: cargo-ios-${{ hashFiles('plugins/native-agent/rust/native-agent-ffi/Cargo.lock') }}
+          restore-keys: cargo-ios-
+
+      - name: Rebuild the xcframework from the vendored crate
+        env:
+          SIM_ARCHS: ${{ inputs.sim_archs || 'arm64' }}
+        run: |
+          set -euo pipefail
+          args=(--sim-archs "$SIM_ARCHS")
+          echo "bash tools/agent-ffi/build-ios-xcframework.sh ${args[*]}"
+          bash tools/agent-ffi/build-ios-xcframework.sh "${args[@]}"
+
+      - name: Verify the fresh artefacts
+        run: |
+          set -euo pipefail
+          PLUGIN=plugins/native-agent
+          echo "--- xcframework slices"
+          ls -1 "$PLUGIN/ios/Frameworks/NativeAgentFFI.xcframework"
+          python3 - "$PLUGIN" <<'PY'
+          import plistlib, sys, pathlib
+          p = pathlib.Path(sys.argv[1]) / 'ios/Frameworks/NativeAgentFFI.xcframework/Info.plist'
+          ids = sorted(e['LibraryIdentifier'] for e in plistlib.loads(p.read_bytes())['AvailableLibraries'])
+          print('slices:', ids)
+          assert ids == ['ios-arm64', 'ios-arm64-simulator'], ids
+          PY
+          echo "--- bindings declare what the plugin calls"
+          grep -q 'seedToolPermissions' "$PLUGIN/ios/Sources/NativeAgentPlugin/Generated/native_agent_ffi.swift"
+          echo "--- shim header identical to the slice header"
+          diff -q "$PLUGIN/ios/Sources/native_agent_ffiFFI/include/native_agent_ffiFFI.h" \
+                  "$PLUGIN/ios/Frameworks/NativeAgentFFI.xcframework/ios-arm64/Headers/native_agent_ffi/native_agent_ffiFFI.h"
+          echo "--- bindings/plugin method parity"
+          node -e '
+            const fs=require("fs");
+            const s=fs.readFileSync("plugins/native-agent/ios/Sources/NativeAgentPlugin/Generated/native_agent_ffi.swift","utf8");
+            const p=fs.readFileSync("plugins/native-agent/ios/Sources/NativeAgentPlugin/NativeAgentPlugin.swift","utf8");
+            const declared=new Set([...s.matchAll(/public func (?:async throws -> )?([a-zA-Z0-9_]+)\(/g)].map(m=>m[1]));
+            const called=[...new Set([...p.matchAll(/handle\.([a-zA-Z0-9_]+)\(/g)].map(m=>m[1]))];
+            const missing=called.filter(c=>!declared.has(c));
+            console.log("called on the handle:",called.length,"| missing from bindings:",missing);
+            if(missing.length){console.error("MISSING:",missing);process.exit(1);}
+          '
+
+      - name: Commit the rebuilt xcframework and bindings
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_result || github.event_name == 'push' }}
+        run: |
+          set -euo pipefail
+          git config user.name  "nativekit-ci"
+          git config user.email "nativekit-ci@users.noreply.github.com"
+          git add plugins/native-agent/ios/Frameworks/NativeAgentFFI.xcframework \
+                  plugins/native-agent/ios/Sources/NativeAgentPlugin/Generated \
+                  plugins/native-agent/ios/Sources/native_agent_ffiFFI
+          if git diff --cached --quiet; then
+            echo "nothing to commit — the committed xcframework already matches the crate"
+            exit 0
+          fi
+          git commit -m "build(native-agent): rebuild the iOS xcframework from the vendored crate"
+          git push origin HEAD:"${GITHUB_REF_NAME}"
