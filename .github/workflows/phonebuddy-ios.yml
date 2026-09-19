@@ -38,6 +38,11 @@ on:
     branches: [main]
     paths:
       - 'tools/agent-ffi/build-phonebuddy-ios-xcframework.sh'
+      # machocheck.py *is* the ABI verification this workflow runs, so a change
+      # to it has to re-run the build — otherwise the verifier can be edited
+      # without ever being exercised (commit ec8f494 did exactly that and no run
+      # was triggered).
+      - 'tools/agent-ffi/machocheck.py'
       - 'plugins/phonebuddy-agent/native/include/phone_buddy.h'
       - '.github/workflows/phonebuddy-ios.yml'
 

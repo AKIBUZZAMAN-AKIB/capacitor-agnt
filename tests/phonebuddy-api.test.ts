@@ -359,6 +359,10 @@ describe('phonebuddy engine — committed binaries and build inputs', () => {
     expect(wf).toContain('build-phonebuddy-ios-xcframework.sh');
     expect(wf).toContain('plugins/phonebuddy-agent/ios/Frameworks/PhoneBuddyFFI.xcframework');
     expect(wf).toContain('pb_engine_set_host_callbacks');
+    // The verifier is part of this workflow, so editing it must re-run the build:
+    // commit ec8f494 changed only machocheck.py and triggered nothing at all.
+    expect(wf).toContain('tools/agent-ffi/machocheck.py');
+    expect(wf).toMatch(/paths:[\s\S]*?tools\/agent-ffi\/machocheck\.py/);
     // Every workflow that commits to main must rebase-retry, or it races the others.
     expect(wf).toContain('git fetch --quiet origin');
     expect(wf).toContain('git rebase --quiet');
