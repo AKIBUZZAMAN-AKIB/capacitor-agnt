@@ -37,7 +37,15 @@ class NativeAgentPlugin : Plugin() {
 
     // ── Helper: wrap common pattern ────────────────────────────────────
 
-    private fun withHandle(call: PluginCall, block: (NativeAgentHandle) -> Unit) {
+        /**
+     * PluginCall.reject() only accepts Exception, but the crash-safety paths catch
+     * Throwable (UnsatisfiedLinkError and friends are Errors). Wrap whatever is not
+     * already an Exception so the JS side still gets the message and the cause.
+     */
+    private fun asException(t: Throwable): Exception =
+        t as? Exception ?: RuntimeException("${t::class.java.simpleName}: ${t.message}", t)
+
+private fun withHandle(call: PluginCall, block: (NativeAgentHandle) -> Unit) {
         val h = handle ?: return call.reject("NativeAgent not initialized — call initialize() first")
         scope.launch {
             try {
@@ -47,7 +55,7 @@ class NativeAgentPlugin : Plugin() {
                 // Exception: without catching Throwable it escapes the coroutine and
                 // kills the app. Backported crash-safety fix (0.9.x "C1").
                 if (t is OutOfMemoryError) throw t
-                call.reject("${call.methodName} failed: ${t.message ?: t::class.java.simpleName}", t)
+                call.reject("${call.methodName} failed: ${t.message ?: t::class.java.simpleName}", asException(t))
             }
         }
     }
@@ -106,7 +114,7 @@ class NativeAgentPlugin : Plugin() {
                 call.resolve()
             } catch (t: Throwable) {
                 if (t is OutOfMemoryError) throw t
-                call.reject("initWorkspace failed: ${t.message ?: t::class.java.simpleName}", t)
+                call.reject("initWorkspace failed: ${t.message ?: t::class.java.simpleName}", asException(t))
             }
         }
     }
@@ -159,7 +167,7 @@ class NativeAgentPlugin : Plugin() {
                 call.resolve()
             } catch (t: Throwable) {
                 if (t is OutOfMemoryError) throw t
-                call.reject("Failed to initialize NativeAgent: ${t.message ?: t::class.java.simpleName}", t)
+                call.reject("Failed to initialize NativeAgent: ${t.message ?: t::class.java.simpleName}", asException(t))
             }
         }
     }

@@ -24,12 +24,26 @@ let package = Package(
             name: "NativeAgentFFI",
             path: "ios/Frameworks/NativeAgentFFI.xcframework"
         ),
+        // Exposes the UniFFI C header as a Swift-importable module. The generated
+        // native_agent_ffi.swift does `#if canImport(native_agent_ffiFFI)` and its
+        // low-level types (RustBuffer, RustCallStatus, ...) plus the checksum
+        // functions come from there. A binaryTarget's headers are NOT importable
+        // from Swift under SwiftPM, so without this target the iOS build fails with
+        // "cannot find 'uniffi_native_agent_ffi_checksum_...' in scope".
+        // The header here is a byte-for-byte copy of the one inside the
+        // xcframework, so it always matches the Rust binary that is linked.
+        .target(
+            name: "native_agent_ffiFFI",
+            dependencies: ["NativeAgentFFI"],
+            path: "ios/Sources/native_agent_ffiFFI"
+        ),
         .target(
             name: "NativeAgentPlugin",
             dependencies: [
                 .product(name: "Capacitor", package: "capacitor-swift-pm"),
                 .product(name: "Cordova", package: "capacitor-swift-pm"),
-                "NativeAgentFFI"
+                "NativeAgentFFI",
+                "native_agent_ffiFFI"
             ],
             path: "ios/Sources/NativeAgentPlugin",
             exclude: [

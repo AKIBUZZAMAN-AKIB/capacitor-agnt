@@ -210,6 +210,26 @@ describe('agent plugin — pinned generation (0.5.2) integrity', () => {
     expect(read(KOTLIN)).toContain('Class.forName("com.t6x.plugins.nativeagent.MemoryProviderImpl")');
   });
 
+  it('exposes the UniFFI C header as a SwiftPM target the bindings can import', () => {
+    // A binaryTarget's headers are not importable from Swift under SwiftPM: the
+    // generated bindings' `#if canImport(native_agent_ffiFFI)` is false without a
+    // real C target, and the build then fails with
+    // "cannot find 'uniffi_native_agent_ffi_checksum_...' in scope".
+    const pkg = read(PACKAGE_SWIFT);
+    expect(pkg).toContain('name: "native_agent_ffiFFI"');
+    expect(pkg).toMatch(/"native_agent_ffiFFI"\s*\n\s*\]/);
+    expect(read('plugins/native-agent/ios/Sources/NativeAgentPlugin/Generated/native_agent_ffi.swift'))
+      .toContain('canImport(native_agent_ffiFFI)');
+
+    // The shim header must be a byte-for-byte copy of the header inside the
+    // xcframework, or Swift compiles against a different ABI than it links.
+    const shim = read('plugins/native-agent/ios/Sources/native_agent_ffiFFI/include/native_agent_ffiFFI.h');
+    const shipped = read('plugins/native-agent/ios/Frameworks/NativeAgentFFI.xcframework/ios-arm64/Headers/native_agent_ffi/native_agent_ffiFFI.h');
+    expect(shim).toBe(shipped);
+    expect(shim).toContain('checksum_method_nativeagenthandle_send_message');
+    expect(existsSync(path.join(root, 'plugins/native-agent/ios/Sources/native_agent_ffiFFI/include/module.modulemap'))).toBe(true);
+  });
+
   it('does not hard-depend on capacitor-lancedb in Package.swift (C3 fix)', () => {
     const pkg = read(PACKAGE_SWIFT);
     expect(pkg).not.toMatch(/\.package\(path:/);
