@@ -50,7 +50,7 @@ jobs:
     runs-on: macos-14
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -61,7 +61,7 @@ jobs:
           rustc --version || true
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -83,22 +83,49 @@ jobs:
         run: |
           set -euo pipefail
           PLUGIN=plugins/phonebuddy-agent
+          XCF="$PLUGIN/ios/Frameworks/PhoneBuddyFFI.xcframework"
+
+          # Slices, per-slice headers, the module map, MinimumOSVersion and the
+          # complete exported C ABI — through the same verifier the build script
+          # runs, so what is checked here is exactly what was checked there.
+          #
+          # This replaces a hand-rolled check that was wrong twice and turned a
+          # *correct* library into a red build in run 35428594086:
+          #
+          #   * `nm -g "$lib" | grep -q " _pb_version$"`: `grep -q` exits at the
+          #     first match while nm is still writing, nm dies of SIGPIPE, and
+          #     `set -o pipefail` reports the successful match as a failed
+          #     pipeline. machocheck.py never pipes nm's output.
+          #   * a bare `nm` picked up from PATH may be GNU binutils nm, which
+          #     cannot read a Mach-O archive (stderr was discarded, so every
+          #     symbol looked missing). machocheck.py resolves `xcrun -f nm`.
+          #
+          # Its MinimumOSVersion rule is the same as the build script's: the key
+          # may legitimately be absent (a Rust staticlib mixes the prebuilt std
+          # objects with our IPHONEOS_DEPLOYMENT_TARGET=15.0 objects, so
+          # xcodebuild cannot pin one value), but a *declared* value must be 15.0.
+          python3 tools/agent-ffi/machocheck.py \
+            --xcframework "$XCF" \
+            --header "$PLUGIN/native/include/phone_buddy.h" \
+            --symbol-prefix pb_ \
+            --module-name phone_buddy_ffi \
+            --lib-name libphone_buddy_ffi.a \
+            --expect-slices ios-arm64 ios-arm64-simulator \
+            --deployment-target 15.0
+
+          echo "--- the header inside the slices declares the v2 streaming surface"
           python3 - "$PLUGIN" <<'PY'
-          import plistlib, pathlib, sys
+          import pathlib, sys
           xcf = pathlib.Path(sys.argv[1]) / 'ios/Frameworks/PhoneBuddyFFI.xcframework'
-          info = plistlib.loads((xcf / 'Info.plist').read_bytes())
-          ids = sorted(e['LibraryIdentifier'] for e in info['AvailableLibraries'])
-          print('slices:', ids)
-          assert 'ios-arm64' in ids and 'ios-arm64-simulator' in ids, ids
-          for entry in info['AvailableLibraries']:
-              assert entry.get('MinimumOSVersion') == '15.0', entry
-          lib = xcf / 'ios-arm64' / 'libphone_buddy_ffi.a'
-          assert lib.is_file(), lib
           head = (xcf / 'ios-arm64' / 'Headers' / 'phone_buddy_ffi' / 'phone_buddy.h').read_text()
-          assert 'pb_engine_chat_v2' in head and 'pb_engine_set_host_callbacks' in head
+          for symbol in ('pb_engine_chat_v2', 'pb_engine_set_host_callbacks'):
+              assert symbol in head, f'{symbol} is not declared by the committed header'
+          print('  pb_engine_chat_v2, pb_engine_set_host_callbacks: declared')
           PY
+
           echo "--- the header the Swift plugin compiles against"
           diff -q "$PLUGIN/native/include/phone_buddy.h" "$PLUGIN/ios/Sources/phone_buddy_ffi/include/phone_buddy.h"
+
           echo "--- the plugin's Swift must call only symbols the header declares"
           python3 - "$PLUGIN" <<'PY'
           import pathlib, re, sys

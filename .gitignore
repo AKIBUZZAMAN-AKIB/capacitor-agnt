@@ -20,3 +20,8 @@ ios/App/build/
 *.keystore
 
 .nativekit-backups/
+
+# FFI tooling: the SDK checkout + cargo target dir those scripts create,
+# and the bytecode the python checkers leave behind
+.ffi-cache/
+__pycache__/

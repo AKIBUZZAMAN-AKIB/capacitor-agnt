@@ -222,43 +222,40 @@ for slice in "$DEST_XCF"/ios-*; do
 done
 ok "xcframework → ${DEST_XCF#"$REPO_ROOT"/}"
 
-# ── self-checks: slices, symbols, header ────────────────────────────────────
-python3 - "$DEST_XCF" "$MIN_IOS" <<'PY'
-import plistlib, pathlib, sys
-xcf, min_ios = pathlib.Path(sys.argv[1]), sys.argv[2]
-info = plistlib.loads((xcf / 'Info.plist').read_bytes())
-ids = sorted(e['LibraryIdentifier'] for e in info['AvailableLibraries'])
-print('  slices:', ids)
-expected = {'ios-arm64', 'ios-arm64-simulator'}
-assert expected.issubset(set(ids)), f'expected {expected}, found {ids}'
-# xcodebuild records MinimumOSVersion only for the device slice; the simulator
-# entry legitimately has none, so the check is "whatever is declared must match
-# the deployment target we compiled for".
-for entry in info['AvailableLibraries']:
-    declared = entry.get('MinimumOSVersion')
-    print(f"  {entry['LibraryIdentifier']}: MinimumOSVersion={declared}")
-    if declared is not None:
-        assert declared == min_ios, f"slice {entry['LibraryIdentifier']} targets iOS {declared}, expected {min_ios}"
-PY
-
+# ── self-checks: slices, headers, and the exported C ABI ────────────────────
 for slice in "$DEST_XCF"/ios-*; do
   [[ -d "$slice" ]] || continue
-  lib="$slice/$SO_NAME"
-  [[ -f "$lib" ]] || die "slice $(basename "$slice") has no $SO_NAME"
-  lipo -info "$lib" 2>/dev/null | sed 's/^/  /' || true
-  # The C ABI is what the Swift plugin calls: prove the exported symbols are in
-  # the archive rather than trusting that the build succeeded.
-  for symbol in _pb_version _pb_engine_new _pb_engine_chat _pb_engine_set_host_callbacks _pb_engine_host_tool_result _pb_engine_free _pb_string_free; do
-    if ! nm -g "$lib" 2>/dev/null | grep -q " $symbol\$"; then
-      die "slice $(basename "$slice") is missing the exported symbol $symbol"
-    fi
-  done
-  ok "$(basename "$slice"): C ABI symbols present"
-  test -f "$slice/Headers/phone_buddy_ffi/phone_buddy.h" || die "slice $(basename "$slice") lost phone_buddy.h"
-  test -f "$slice/Headers/phone_buddy_ffi/module.modulemap" || die "slice $(basename "$slice") lost module.modulemap"
-  grep -q 'pb_engine_chat_v2' "$slice/Headers/phone_buddy_ffi/phone_buddy.h" \
-    || die "slice $(basename "$slice") header does not declare pb_engine_chat_v2"
+  lipo -info "$slice/$SO_NAME" 2>/dev/null | sed 's/^/  /' || true
 done
+
+# The ABI check lives in machocheck.py, and that is not gold-plating — the
+# one-liner it replaces was wrong in two ways that made CI red on a *correct*
+# library (run 35428594086, "slice ios-arm64 is missing the exported symbol
+# _pb_version" for a crate whose every pb_* function is `#[no_mangle] pub
+# extern "C"`):
+#
+#   * `nm -g "$lib" | grep -q " $symbol$"` — `grep -q` exits at the first match
+#     while nm is still writing a ~29 MB archive's symbol table; nm then dies of
+#     SIGPIPE and `set -o pipefail` turns the successful match into a failed
+#     pipeline. Nothing is piped any more: nm's stdout is captured directly.
+#   * a bare `nm` is whatever PATH resolves first, and Homebrew's GNU nm cannot
+#     read a Mach-O archive at all — it prints the reason on stderr, which
+#     `2>/dev/null` threw away, and *every* symbol looks missing. machocheck.py
+#     resolves nm through `xcrun -f nm` first and reports an nm that fails
+#     instead of hiding it.
+#
+# It also checks more than the old list of seven: every `pb_*` function the
+# committed header declares must be *defined* in every slice, so the header the
+# Swift plugin compiles against and the library it links can never disagree.
+python3 "$SCRIPT_DIR/machocheck.py" \
+  --xcframework "$DEST_XCF" \
+  --header "$VENDORED_HEADER" \
+  --symbol-prefix pb_ \
+  --module-name phone_buddy_ffi \
+  --lib-name "$SO_NAME" \
+  --expect-slices ios-arm64 ios-arm64-simulator \
+  --deployment-target "$MIN_IOS" \
+  || die "the built xcframework does not match the ABI in $VENDORED_HEADER (see the report above)"
 
 log "Done. Commit the xcframework so the repo stays buildable without a rebuild."
 log "SDK commit that produced it: $SDK_COMMIT ($REF)"

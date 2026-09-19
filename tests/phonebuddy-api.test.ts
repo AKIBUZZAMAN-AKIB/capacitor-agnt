@@ -323,11 +323,34 @@ describe('phonebuddy engine — committed binaries and build inputs', () => {
     // A header that does not match the built crate means the repo and the binary
     // describe different ABIs — the build must fail instead of shipping that.
     expect(script).toMatch(/diff -q "\$VENDORED_HEADER" "\$GEN_HEADER"[\s\S]*?die "/);
-    expect(script).toContain('nm -g');
-    for (const symbol of ['_pb_engine_new', '_pb_engine_set_host_callbacks', '_pb_string_free']) {
-      expect(script).toContain(symbol);
-    }
+    // The exported-ABI check lives in machocheck.py, and it is *not* allowed to
+    // go back to the shape that failed CI run 35428594086:
+    //   `nm -g "$lib" | grep -q " _pb_version$"`
+    // reported a present symbol as missing, because `grep -q` exits at the first
+    // match, nm then dies of SIGPIPE and `set -o pipefail` turns that into a
+    // failed pipeline; and a bare `nm` from PATH may be GNU binutils nm, which
+    // cannot read a Mach-O archive at all (stderr was discarded with 2>/dev/null).
+    // (the old shape is quoted in the script's own comments, so comments are
+    // stripped before asking whether any *code* still pipes nm into grep)
+    const code = script
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('#'))
+      .join('\n');
+    expect(code).not.toMatch(/\bnm\b[^|]*\|/);
+    expect(script).toContain('machocheck.py');
     expect(script).toContain('IPHONEOS_DEPLOYMENT_TARGET');
+
+    const checker = read('tools/agent-ffi/machocheck.py');
+    expect(checker).toContain('xcrun');           // Apple's nm, not whatever PATH has
+    expect(checker).toContain('capture_output');  // no pipes, so no SIGPIPE
+    expect(checker).toContain('UNDEFINED_TYPES'); // a U reference is not an export
+    expect(checker).not.toMatch(/shell\s*=\s*True/);
+
+    // …and the header stays the ABI contract every slice is measured against.
+    const header = read('plugins/phonebuddy-agent/native/include/phone_buddy.h');
+    for (const symbol of ['pb_engine_new', 'pb_engine_set_host_callbacks', 'pb_string_free']) {
+      expect(header).toContain(symbol);
+    }
   });
 
   it('the iOS xcframework workflow builds, verifies and commits the result', () => {
