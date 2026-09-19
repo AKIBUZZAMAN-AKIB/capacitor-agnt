@@ -168,10 +168,13 @@ class Report:
         self.ok = True
 
     def say(self, message: str) -> None:
-        print(f"  {message}")
+        # flush: with stdout piped it is block-buffered while stderr is not, and
+        # a failure that arrives before its own report is unreadable in CI logs.
+        print(f"  {message}", flush=True)
 
     def fail(self, message: str) -> None:
         self.ok = False
+        sys.stdout.flush()
         print(f"error: {message}", file=sys.stderr)
 
 
@@ -180,9 +183,48 @@ def require(condition: bool, message: str) -> None:
         raise CheckError(message)
 
 
+def slice_library_candidates(xcf: Path, slice_dir: Path, entry: dict, lib_name: str) -> list[Path]:
+    """Where the static archive may live, most specific first.
+
+    xcodebuild writes `LibraryPath` relative to the slice and usually sets it to
+    just the file name (`libphone_buddy_ffi.a`); it has also been seen relative to
+    the xcframework root and as plain `.`. All of those are accepted here, and the
+    bare slice-relative name is the last resort — getting this wrong is what made
+    the first version of this file look for
+
+        .../ios-arm64-simulator/libphone_buddy_ffi.a/libphone_buddy_ffi.a
+
+    and report a perfectly good slice as missing its library (CI run 35446801538).
+    """
+    candidates: list[Path] = []
+    declared = entry.get("LibraryPath")
+    if declared:
+        path = Path(str(declared))
+        if path.is_absolute():
+            candidates.append(path)
+        else:
+            candidates.append(slice_dir / path)  # spec: relative to the slice
+            candidates.append(xcf / path)        # seen: relative to the framework
+    candidates.append(slice_dir / lib_name)
+    unique: list[Path] = []
+    for candidate in candidates:
+        if candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+def resolve_headers_root(xcf: Path, slice_dir: Path, entry: dict) -> Path:
+    """The slice's Headers directory, wherever this xcframework keeps it."""
+    declared = str(entry.get("HeadersPath") or "Headers")
+    for candidate in (slice_dir / declared, xcf / declared, slice_dir / "Headers"):
+        if candidate.is_dir():
+            return candidate
+    return slice_dir / declared
+
+
 def check_library(
     label: str,
-    lib: Path,
+    lib_candidates: list[Path],
     required: list[str],
     nm: str,
     report: Report,
@@ -192,7 +234,12 @@ def check_library(
     module_map: Path | None = None,
     module_name: str | None = None,
 ) -> None:
-    require(lib.is_file(), f"{label}: missing {lib.name} ({lib})")
+    lib = next((candidate for candidate in lib_candidates if candidate.is_file()), None)
+    if lib is None:
+        raise CheckError(
+            f"{label}: no static library found — looked for\n"
+            + "\n".join(f"    {candidate}" for candidate in lib_candidates)
+        )
 
     if module_map is not None:
         require(module_map.is_file(), f"{label}: missing {module_map.name} ({module_map})")
@@ -274,12 +321,10 @@ def check_xcframework(xcf: Path, args, nm: str, required: list[str], header_syms
     for entry in entries:
         ident = str(entry.get("LibraryIdentifier", "?"))
         slice_dir = xcf / ident
-        lib_dir = slice_dir / str(entry.get("LibraryPath") or ".")
-        headers_dir = slice_dir / str(entry.get("HeadersPath") or "Headers")
-        module_dir = headers_dir / args.module_name
+        module_dir = resolve_headers_root(xcf, slice_dir, entry) / args.module_name
         check_library(
             label=ident,
-            lib=lib_dir / args.lib_name,
+            lib_candidates=slice_library_candidates(xcf, slice_dir, entry, args.lib_name),
             required=required,
             nm=nm,
             report=report,
@@ -338,7 +383,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         check_library(
             label=Path(args.lib).name,
-            lib=Path(args.lib),
+            lib_candidates=[Path(args.lib)],
             required=required,
             nm=nm,
             report=report,
