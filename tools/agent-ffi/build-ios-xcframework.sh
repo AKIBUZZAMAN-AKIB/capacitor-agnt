@@ -154,8 +154,7 @@ STAGE="$(mktemp -d)"
 create_args=()
 for target in "$DEVICE_TARGET" $SIM_TARGETS; do
   case "$target" in
-    *ios-sim|*ios) hdr="${STAGE}/hdrs-${target}/native_agent_ffi" ;;
-    *)             hdr="${STAGE}/hdrs-${target}/native_agent_ffi" ;;
+    *) hdr="${STAGE}/hdrs-${target}" ;;   # flat staging; normalised after creation
   esac
   mkdir -p "$hdr"
   cp "$GEN_DIR/${LIB_BASENAME}.swift"    "$hdr/"
@@ -166,7 +165,22 @@ done
 rm -rf "$DEST_XCF"
 log "Assembling xcframework …"
 xcodebuild -create-xcframework "${create_args[@]}" -output "$DEST_XCF" >/dev/null
-ok "xcframework → ${DEST_XCF#"$REPO_ROOT/"}"
+
+# `-create-xcframework` copies the header directory *flat* into <slice>/Headers.
+# The published layout (and the CocoaPods module-map flags) expect
+# <slice>/Headers/native_agent_ffi/…, so normalise it instead of letting the
+# xcframework layout drift every time it is regenerated.
+for slice in "$DEST_XCF"/ios-*; do
+  [[ -d "$slice/Headers" ]] || continue
+  if [[ ! -d "$slice/Headers/native_agent_ffi" ]]; then
+    tmp="$(mktemp -d)"
+    mv "$slice/Headers"/* "$tmp"/ 2>/dev/null || true
+    mkdir -p "$slice/Headers/native_agent_ffi"
+    mv "$tmp"/* "$slice/Headers/native_agent_ffi"/ 2>/dev/null || true
+    rmdir "$tmp" 2>/dev/null || true
+  fi
+done
+ok "xcframework → ${DEST_XCF#"$REPO_ROOT/"} (headers under Headers/native_agent_ffi/)"
 
 # ── install the regenerated bindings next to the Swift plugin ───────────────
 mkdir -p "$GENERATED_DIR" "$SHIM_DIR"

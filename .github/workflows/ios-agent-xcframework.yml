@@ -84,11 +84,15 @@ jobs:
           print('slices:', ids)
           assert ids == ['ios-arm64', 'ios-arm64-simulator'], ids
           PY
+          map=$(find "$PLUGIN/ios/Frameworks/NativeAgentFFI.xcframework/ios-arm64" -name 'module.modulemap' | head -1)
+          grep -q 'module native_agent_ffiFFI' "$map" || { echo "::error::module map lost"; exit 1; }
           echo "--- bindings declare what the plugin calls"
           grep -q 'seedToolPermissions' "$PLUGIN/ios/Sources/NativeAgentPlugin/Generated/native_agent_ffi.swift"
           echo "--- shim header identical to the slice header"
-          diff -q "$PLUGIN/ios/Sources/native_agent_ffiFFI/include/native_agent_ffiFFI.h" \
-                  "$PLUGIN/ios/Frameworks/NativeAgentFFI.xcframework/ios-arm64/Headers/native_agent_ffi/native_agent_ffiFFI.h"
+          shipped=$(find "$PLUGIN/ios/Frameworks/NativeAgentFFI.xcframework/ios-arm64" -name native_agent_ffiFFI.h | head -1)
+          test -n "$shipped" || { echo "::error::no header inside the device slice"; exit 1; }
+          echo "shipped header: $shipped"
+          diff -q "$PLUGIN/ios/Sources/native_agent_ffiFFI/include/native_agent_ffiFFI.h" "$shipped"
           echo "--- bindings/plugin method parity"
           node -e '
             const fs=require("fs");

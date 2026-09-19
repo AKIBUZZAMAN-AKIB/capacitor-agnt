@@ -25,7 +25,7 @@ Pod::Spec.new do |s|
 
   # Expose the xcframework's C headers so the Swift compiler can `canImport(native_agent_ffiFFI)`
   s.pod_target_xcconfig = {
-    'OTHER_SWIFT_FLAGS[sdk=iphoneos*]' => '$(inherited) -Xcc -fmodule-map-file=${PODS_TARGET_SRCROOT}/ios/Frameworks/NativeAgentFFI.xcframework/ios-arm64/Headers/native_agent_ffiFFI.modulemap',
-    'OTHER_SWIFT_FLAGS[sdk=iphonesimulator*]' => '$(inherited) -Xcc -fmodule-map-file=${PODS_TARGET_SRCROOT}/ios/Frameworks/NativeAgentFFI.xcframework/ios-arm64-simulator/Headers/native_agent_ffiFFI.modulemap',
+    'OTHER_SWIFT_FLAGS[sdk=iphoneos*]' => '$(inherited) -Xcc -fmodule-map-file=${PODS_TARGET_SRCROOT}/ios/Frameworks/NativeAgentFFI.xcframework/ios-arm64/Headers/native_agent_ffi/module.modulemap',
+    'OTHER_SWIFT_FLAGS[sdk=iphonesimulator*]' => '$(inherited) -Xcc -fmodule-map-file=${PODS_TARGET_SRCROOT}/ios/Frameworks/NativeAgentFFI.xcframework/ios-arm64-simulator/Headers/native_agent_ffi/module.modulemap',
   }
 end
