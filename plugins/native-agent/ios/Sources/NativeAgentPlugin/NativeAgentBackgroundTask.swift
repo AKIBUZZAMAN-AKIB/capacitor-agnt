@@ -107,6 +107,10 @@ public final class NativeAgentBackgroundTask: NSObject {
     }
 
     /// Cancels the pending wake by identifier (there is no request object to keep).
+    ///
+    /// Cancelling an identifier that has no pending request is a no-op, not an
+    /// error, so the reported `jobCancelled: true` is a post-condition: *after this
+    /// call the scheduler holds no agent wake*. It never claims a task was there.
     public static func cancel() {
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: taskIdentifier)
     }

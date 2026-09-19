@@ -101,7 +101,13 @@ internal object NativeWakeScheduler {
         }
     }
 
-    /** Cancels the pending wake. Returns the status after cancellation. */
+    /**
+     * Cancels the pending wake. Returns the status after cancellation.
+     *
+     * Cancelling a work name that has nothing enqueued is a no-op, so the reported
+     * outcome is a post-condition — *after this call no agent wake is queued* — and
+     * not a claim that a job was actually there to remove.
+     */
     fun cancel(context: Context): Status {
         val appContext = context.applicationContext
         val store = NativeWakeStore(appContext)

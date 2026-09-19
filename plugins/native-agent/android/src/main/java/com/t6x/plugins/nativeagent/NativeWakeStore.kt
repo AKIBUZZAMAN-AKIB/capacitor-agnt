@@ -207,6 +207,12 @@ internal class NativeWakeStore(private val context: Context) {
         get() = prefs().getBoolean(KEY_REQUIRES_CHARGING, false)
         set(value) = prefs().edit().putBoolean(KEY_REQUIRES_CHARGING, value).apply()
 
+    /**
+     * `ok` answers one question: *did the wake run* (engine restored, `handle_wake`
+     * returned). It is not "did every cron job succeed" — a job that failed is in
+     * [summary] and in the surfaced records, so a wake that ran and reported a
+     * failure stays `ok = true` and the failure is still visible.
+     */
     fun recordWake(source: String, summary: String, ran: Int, ok: Boolean) {
         prefs().edit()
             .putString(KEY_LAST_AT, iso(System.currentTimeMillis()))

@@ -132,6 +132,7 @@ OS (WorkManager / BGTaskScheduler)
 - সব মেথড **কখনো reject করে না**; নেটিভ স্তরে পৌঁছানো না গেলে
   `{supported:false, reason, alternative}` resolve করে।
 - success-এ রিটার্নটা OS-এর নিজের উত্তর: `intervalMinutes` মানে *granted*, চাওয়া মান নয়।
+- দুটি ফিল্ডের অর্থ নির্দিষ্ট: `lastWakeOk` মানে **wake টা চলেছে কি না** (কোনো job ব্যর্থ হলেও `true`, কারণ ব্যর্থতা `lastWakeSummary` ও ইনবক্সে থাকে), আর `jobCancelled: true` মানে **এই কলের পর scheduler-এ কোনো wake নেই** — আগে সত্যিই একটা pending ছিল কি না, সেটা দাবি নয়।
 
 ```js
 // ল্যাব যা করে:

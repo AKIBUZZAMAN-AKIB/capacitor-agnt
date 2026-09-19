@@ -182,6 +182,10 @@ public final class NativeAgentWakeStore {
         set { UserDefaults.standard.set(newValue, forKey: Self.chargingKey) }
     }
 
+    /// `ok` answers one question: *did the wake run* (engine restored,
+    /// `handle_wake` returned). It is not "did every cron job succeed" — a job that
+    /// failed is in `summary` and in the surfaced records, so a wake that ran and
+    /// reported a failure stays `ok = true` and the failure is still visible.
     public func recordWake(source: String, summary: String, ran: Int, ok: Bool) {
         let defaults = UserDefaults.standard
         defaults.set(ISO8601DateFormatter().string(from: Date()), forKey: Self.lastWakeAtKey)
