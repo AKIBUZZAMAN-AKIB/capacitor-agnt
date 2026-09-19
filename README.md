@@ -88,6 +88,8 @@ npm run ffi:verify -- --strict --apk app-debug.apk     # প্যাকেজ�
 
 **এক বাটনেই (Actions):** “Native agent FFI — source, build, verify (Actions only)” → `source_mode=repo`, `commit_slices=✅`, `build_apk=✅` → বিল্ড → ELF+binding যাচাই → `.so` commit → APK artifact।
 
+iOS-ও একইভাবে রিবিল্ডযোগ্য: “**iOS agent FFI — rebuild the xcframework from source**” → ভেন্ডর করা ক্রেট থেকে arm64 device + arm64 simulator স্লাইস, ফ্রেশ বাইন্ডিং/হেডার — upstream-এর স্টেল প্রিবিল্ট ফ্রেমওয়ার্ক আর দরকার নেই।
+
 সম্পূর্ণ বিবরণ:
 - [এই প্রজন্মে পিন করার রিপোর্ট ও ব্যাকপোর্ট তালিকা](./docs/AGENT-ENGINE-0.5.2-BACKPORT.bn.md)
 - [আবি বিল্ড টুলকিট](./tools/agent-ffi/README.bn.md)

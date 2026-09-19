@@ -1,6 +1,8 @@
 # Agent engine — পাবলিক `0.5.2` প্রজন্মে পিন (PLAN A প্রয়োগ করা হয়েছে)
 
-**তারিখ:** ২০২৬-০৯-১৯ · **অবস্থা:** প্রয়োগ করা, `npm run check` সবুজ (১৪৫টি টেস্ট পাস)
+**তারিখ:** ২০২৬-০৯-১৯ · **অবস্থা:** প্রয়োগ করা ও CI-তে যাচাই করা — পাঁচটি ওয়ার্কফ্লোই সবুজ, `npm run check` ১৪৭টি টেস্টে পাস
+
+> **সংক্ষিপ্ত ফলাফল:** চারটি Android ABI-র `.so` (arm64-v8a, **armeabi-v7a**, x86_64, x86) এখন রিপোতে কমিট করা, অ্যাপ-বিল্ড (APK/AAB) সবুজ, আর iOS-এর xcframework-ও উপরের স্টেল প্রিবিল্ট বাদ দিয়ে **সোর্স থেকে রিবিল্ড** করে বসানো হয়েছে।
 
 ---
 
@@ -97,6 +99,18 @@ cp -a .nativekit-backups/native-agent-v0.5.2-20260919-030835 plugins/native-agen
 ```
 
 ---
+
+## ৪ক. CI যাচাই (সব ওয়ার্কফ্লো সবুজ)
+
+| ওয়ার্কফ্লো | ফল | কী প্রমাণ করে |
+|---|---|---|
+| **Native agent FFI — source, build, verify** | ✅ | ভেন্ডর করা ক্রেট থেকে চারটি ABI-ই বিল্ড, ELF + contract 26 মিলিয়ে যাচাই, `jniLibs/*/libnative_agent_ffi.so` + `abi-manifest.json` কমিট |
+| **iOS agent FFI — rebuild the xcframework** | ✅ | ডিভাইস (arm64) + সিমুলেটর (arm64) — **upstream-এর স্টেল প্রিবিল্ট বাদ**, সোর্স থেকে নতুন `libnative_agent_ffi.a`, বাইন্ডিং ও হেডার কমিট |
+| **Android APK and AAB** | ✅ | `:capacitor-native-agent:compileDebugKotlin` সহ পুরো অ্যাপ বিল্ড (APK artifact: ~৮৬ MB) |
+| **iOS validation and IPA** | ✅ | SwiftPM-এ প্লাগইন + শিম টার্গেট সহ সিমুলেটর অ্যাপ কম্পাইল (সাইনড IPA-র জন্য iOS secrets দরকার) |
+| **PhoneBuddy FFI** | ✅ | বিকল্প ইঞ্জিনের ৪ ABI স্লাইস (16 KB page alignment সহ) — ভবিষ্যতের অপশন প্রস্তুত |
+
+APK নামানোর পথ: GitHub → **Actions** → “Android APK and AAB” → সর্বশেষ সবুজ রান → **Artifacts** → `android-apk-aab-<sha>`।
 
 ## ৫. যাচাইয়ের কমান্ড
 
