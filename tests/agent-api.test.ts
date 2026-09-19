@@ -230,6 +230,53 @@ describe('agent plugin — pinned generation (0.5.2) integrity', () => {
     expect(existsSync(path.join(root, 'plugins/native-agent/ios/Sources/native_agent_ffiFFI/include/module.modulemap'))).toBe(true);
   });
 
+  it('every handle call in the Swift plugin matches the regenerated bindings', () => {
+    // The 0.5.2 tag ships a stale xcframework (see build-ios-xcframework.sh), so
+    // the bindings in this repo are regenerated from the vendored crate. That
+    // makes it possible for the plugin to call a handle member with a parameter
+    // list the bindings no longer declare — which is exactly how the iOS build
+    // broke twice. Check names AND option labels.
+    const plugin = read('plugins/native-agent/ios/Sources/NativeAgentPlugin/NativeAgentPlugin.swift');
+    const bindings = read('plugins/native-agent/ios/Sources/NativeAgentPlugin/Generated/native_agent_ffi.swift');
+
+    const sigs = new Map<string, Set<string>>();
+    for (const m of bindings.matchAll(/(?:open|public) func (\w+)\(([^)]*)\)/g)) {
+      const labels = new Set(
+        m[2]
+          .split(',')
+          .map((a) => a.split(':')[0].trim())
+          .filter((a) => a.length > 0),
+      );
+      const set = sigs.get(m[1]) ?? new Set<string>();
+      for (const l of labels) set.add(l);
+      sigs.set(m[1], set);
+    }
+    expect(sigs.size, 'no handle API found in the generated bindings').toBeGreaterThan(20);
+
+    const problems: string[] = [];
+    for (const m of plugin.matchAll(/\bh\.(\w+)\(/g)) {
+      const name = m[1];
+      if (!sigs.has(name)) {
+        problems.push(`${name} is not declared in the bindings`);
+        continue;
+      }
+      let depth = 1;
+      let i = m.index! + m[0].length;
+      while (i < plugin.length && depth > 0) {
+        if (plugin[i] === '(') depth += 1;
+        else if (plugin[i] === ')') depth -= 1;
+        i += 1;
+      }
+      const call = plugin.slice(m.index! + m[0].length, i - 1);
+      const declared = sigs.get(name)!;
+      for (const label of call.matchAll(/(?:^|,)\s*(\w+):/g)) {
+        // labels of nested struct initialisers are not parameters of the call
+        if (!declared.has(label[1])) problems.push(`${name}(_): unknown parameter '${label[1]}'`);
+      }
+    }
+    expect(problems, problems.join('; ')).toEqual([]);
+  });
+
   it('does not hard-depend on capacitor-lancedb in Package.swift (C3 fix)', () => {
     const pkg = read(PACKAGE_SWIFT);
     expect(pkg).not.toMatch(/\.package\(path:/);
