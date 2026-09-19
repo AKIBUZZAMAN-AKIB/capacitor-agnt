@@ -86,6 +86,7 @@ jobs:
           PY
           map=$(find "$PLUGIN/ios/Frameworks/NativeAgentFFI.xcframework/ios-arm64" -name 'module.modulemap' | head -1)
           grep -q 'module native_agent_ffiFFI' "$map" || { echo "::error::module map lost"; exit 1; }
+          test -f "$PLUGIN/ios/Sources/native_agent_ffiFFI/shim.c" || { echo "::error::shim.c missing (Xcode needs one object file per C target)"; exit 1; }
           echo "--- bindings declare what the plugin calls"
           grep -q 'seedToolPermissions' "$PLUGIN/ios/Sources/NativeAgentPlugin/Generated/native_agent_ffi.swift"
           echo "--- shim header identical to the slice header"

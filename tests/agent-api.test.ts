@@ -228,6 +228,10 @@ describe('agent plugin — pinned generation (0.5.2) integrity', () => {
     expect(shim).toBe(shipped);
     expect(shim).toContain('checksum_method_nativeagenthandle_send_message');
     expect(existsSync(path.join(root, 'plugins/native-agent/ios/Sources/native_agent_ffiFFI/include/module.modulemap'))).toBe(true);
+    // A C target with no translation unit makes Xcode look for a
+    // <target>.o that never gets produced ("Build input file cannot be found:
+    // native_agent_ffiFFI.o"), so the shim needs one (intentionally empty) file.
+    expect(existsSync(path.join(root, 'plugins/native-agent/ios/Sources/native_agent_ffiFFI/shim.c'))).toBe(true);
   });
 
   it('every handle call in the Swift plugin matches the regenerated bindings', () => {

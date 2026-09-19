@@ -192,6 +192,15 @@ cp "$GEN_DIR/${LIB_BASENAME}FFI.modulemap" "$GENERATED_DIR/native_agent_ffiFFI.m
 cp "$GEN_DIR/${LIB_BASENAME}FFI.h"         "$SHIM_DIR/native_agent_ffiFFI.h"
 ok "bindings installed in ${GENERATED_DIR#"$REPO_ROOT/"} and ${SHIM_DIR#"$REPO_ROOT/"}"
 
+# ── the SwiftPM shim target needs its (empty) translation unit ─────────────
+# Without a .c file Xcode looks for a <target>.o that is never produced and the
+# app build fails with "Build input file cannot be found: native_agent_ffiFFI.o".
+SHIM_C="${SHIM_DIR%/include}/shim.c"
+if [[ ! -f "$SHIM_C" ]]; then
+  warn "creating $SHIM_C (SwiftPM shim targets need one translation unit)"
+  printf '// Intentionally empty: this target only exposes the UniFFI C header.\n' > "$SHIM_C"
+fi
+
 # ── self-checks: bindings, header and binaries must agree ──────────────────
 methods_swift="$(grep -cE '^    public func [a-zA-Z]' "$GENERATED_DIR/native_agent_ffi.swift" || true)"
 checksums_header="$(grep -c 'uniffi_native_agent_ffi_checksum_method' "$GENERATED_DIR/native_agent_ffiFFI.h" || true)"
