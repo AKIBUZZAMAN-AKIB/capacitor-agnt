@@ -120,4 +120,22 @@ jobs:
             exit 0
           fi
           git commit -m "build(native-agent): rebuild the iOS xcframework from the vendored crate"
-          git push origin HEAD:"${GITHUB_REF_NAME}"
+          # Several workflows commit to main (FFI slices, PhoneBuddy slices, the
+          # iOS xcframework), so a plain `git push` races and dies with
+          # "! [rejected] HEAD -> main (fetch first)". Rebase on the newest
+          # remote commit and retry before giving up.
+          pushed=0
+          for attempt in 1 2 3 4 5; do
+            git fetch --quiet origin "${GITHUB_REF_NAME}"
+            if ! git rebase --quiet "origin/${GITHUB_REF_NAME}"; then
+              echo "::warning::rebase hit a conflict on attempt ${attempt}"
+              git rebase --abort || true
+              sleep $((attempt * 5))
+              continue
+            fi
+            if git push origin HEAD:"${GITHUB_REF_NAME}"; then pushed=1; break; fi
+            echo "push rejected (attempt ${attempt}) — rebasing on the new tip and retrying"
+            sleep $((attempt * 5))
+          done
+          [[ "$pushed" == "1" ]] || { echo "::error::could not push after 5 attempts"; exit 1; }
+          echo "Committed: $(git rev-parse HEAD)"

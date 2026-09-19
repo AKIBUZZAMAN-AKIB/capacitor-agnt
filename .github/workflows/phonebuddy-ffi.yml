@@ -131,7 +131,23 @@ jobs:
           if [ -d third_party/PhoneBuddySDK ]; then git add -A third_party/PhoneBuddySDK; fi
           git diff --cached --quiet && { echo "Nothing changed."; exit 0; }
           git commit -m "build(phonebuddy): FFI slices for [${ABIS}] @ ${SDK_REF}"
-          git push
+          # Several workflows commit to main, so a plain `git push` races and dies
+          # with "! [rejected] HEAD -> main (fetch first)": rebase + retry.
+          pushed=0
+          for attempt in 1 2 3 4 5; do
+            git fetch --quiet origin "${GITHUB_REF_NAME}"
+            if ! git rebase --quiet "origin/${GITHUB_REF_NAME}"; then
+              echo "::warning::rebase hit a conflict on attempt ${attempt}"
+              git rebase --abort || true
+              sleep $((attempt * 5))
+              continue
+            fi
+            if git push origin HEAD:"${GITHUB_REF_NAME}"; then pushed=1; break; fi
+            echo "push rejected (attempt ${attempt}) — rebasing on the new tip and retrying"
+            sleep $((attempt * 5))
+          done
+          [[ "$pushed" == "1" ]] || { echo "::error::could not push after 5 attempts"; exit 1; }
+          echo "Committed: $(git rev-parse HEAD)"
 
   packaged-apk:
     name: Build APK and assert all ABIs inside
