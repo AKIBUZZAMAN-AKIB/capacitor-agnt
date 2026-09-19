@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-19T03:57:51Z",
+  "generatedAt": "2026-09-19T05:42:59Z",
   "crate": "native-agent-ffi (UniFFI, Kotlin bindings in android/src/main/java/uniffi/)",
   "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
   "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
