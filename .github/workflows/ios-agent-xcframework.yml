@@ -99,10 +99,22 @@ jobs:
             const fs=require("fs");
             const s=fs.readFileSync("plugins/native-agent/ios/Sources/NativeAgentPlugin/Generated/native_agent_ffi.swift","utf8");
             const p=fs.readFileSync("plugins/native-agent/ios/Sources/NativeAgentPlugin/NativeAgentPlugin.swift","utf8");
-            const declared=new Set([...s.matchAll(/public func (?:async throws -> )?([a-zA-Z0-9_]+)\(/g)].map(m=>m[1]));
-            const called=[...new Set([...p.matchAll(/handle\.([a-zA-Z0-9_]+)\(/g)].map(m=>m[1]))];
+            // UniFFI emits the handle methods as `open func` inside a class,
+            // not as top-level `public func`, so matching only "public func"
+            // saw 7 of ~53 declarations.
+            const declared=new Set([...s.matchAll(/(?:open|public)\s+func\s+([a-zA-Z0-9_]+)\s*\(/g)].map(m=>m[1]));
+            // The plugin almost always binds the handle first
+            // (`guard let h = handle else ...`) and then calls `h.method(...)`;
+            // only one call site uses `handle.` directly. Counting just
+            // `handle.` checked a single method and missed the other 45.
+            const called=[...new Set([
+              ...[...p.matchAll(/handle\.([a-zA-Z0-9_]+)\(/g)].map(m=>m[1]),
+              ...[...p.matchAll(/\bh\.([a-zA-Z0-9_]+)\(/g)].map(m=>m[1]),
+            ])];
             const missing=called.filter(c=>!declared.has(c));
-            console.log("called on the handle:",called.length,"| missing from bindings:",missing);
+            console.log("declared in bindings:",declared.size,"| called on the handle:",called.length,"| missing:",missing);
+            if(declared.size<40){console.error("suspiciously few declarations parsed:",declared.size);process.exit(1);}
+            if(called.length<20){console.error("suspiciously few call sites parsed:",called.length);process.exit(1);}
             if(missing.length){console.error("MISSING:",missing);process.exit(1);}
           '
 
