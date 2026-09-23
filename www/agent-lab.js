@@ -55,7 +55,11 @@ async function wireEvents() {
         if (out) out.textContent = state.streamed;
         return; // too chatty for the log
       }
-      case 'tool_approval_request': {
+      // The engine emits `approval_request` (not `tool_approval_request`),
+      // `agent.completed` (not `turn_complete`/`run_complete`) and
+      // `agent.error` (not `error`). The old names never matched a single
+      // event, so the approval and completion UI never fired.
+      case 'approval_request': {
         // Human-in-the-loop: the agent wants to run a tool and is waiting.
         state.lastToolCallId = payload?.toolCallId ?? payload?.tool_call_id ?? null;
         setStatus(`Tool approval চাইছে: ${payload?.toolName ?? payload?.tool_name ?? '?'}`, 'warn');
@@ -65,13 +69,44 @@ async function wireEvents() {
         state.lastCronRequestId = payload?.requestId ?? payload?.request_id ?? null;
         break;
       }
-      case 'turn_complete':
-      case 'run_complete': {
+      case 'agent.completed': {
+        // Terminal: releases the re-entrancy guard in agentsend.
+        state.turnRunning = false;
         setStatus('Turn শেষ।', 'ok');
         break;
       }
-      case 'error': {
-        setStatus(`Error: ${payload?.message ?? 'unknown'}`, 'err');
+      case 'max_turns_reached': {
+        setStatus(`Turn limit ছুঁয়ে গেছে (${payload?.turns ?? '?'})।`, 'warn');
+        break;
+      }
+      case 'agent.background_timeout': {
+        state.turnRunning = false;
+        setStatus('Background turn সময়সীমা পেরিয়েছে।', 'warn');
+        break;
+      }
+      case 'retry': {
+        setStatus(`Retry হচ্ছে (${payload?.attempt ?? '?'})…`, 'warn');
+        break;
+      }
+      case 'cron.job.completed': {
+        setStatus(`Cron job শেষ: ${payload?.jobId ?? '?'}${payload?.deduped ? ' (duplicate — পাঠানো হয়নি)' : ''}`, 'ok');
+        break;
+      }
+      case 'cron.job.error': {
+        setStatus(`Cron job ব্যর্থ: ${payload?.error ?? 'unknown'}`, 'err');
+        break;
+      }
+      case 'heartbeat.completed': {
+        setStatus('Heartbeat চলল।', 'ok');
+        break;
+      }
+      case 'wake.skipped': {
+        setStatus(`Wake বাদ: ${payload?.reason ?? 'unknown'}`, 'warn');
+        break;
+      }
+      case 'agent.error': {
+        state.turnRunning = false;
+        setStatus(`Error: ${payload?.error ?? payload?.message ?? 'unknown'}`, 'err');
         break;
       }
     }
@@ -150,10 +185,19 @@ const agentActions = {
   // 5 ── Agent turns ─────────────────────────────────────────────────────────
   agentsend: async () => {
     requireInit();
+    // The engine now refuses a second concurrent turn (two overlapping turns
+    // both branched from the same history, and the slower one silently
+    // discarded the other's messages). Catch the double-click here so the user
+    // gets a clear message instead of an engine error.
+    if (state.turnRunning) {
+      throw new Error('একটি turn এখনো চলছে — শেষ হওয়া পর্যন্ত অপেক্ষা করুন, বা Abort চাপুন।');
+    }
+    state.turnRunning = true;
     state.streamed = '';
     const out = el('agent-stream');
     if (out) out.textContent = '';
     setStatus('Turn চলছে…', 'busy');
+    try {
     const res = await window.NativeKit.agent.sendMessage({
       prompt: val('agent-prompt') || 'Say hello in Bangla, one short sentence.',
       sessionKey: state.sessionKey,
@@ -163,10 +207,24 @@ const agentActions = {
     });
     state.lastRunId = res?.runId ?? null;
     return res;
+    } catch (err) {
+      // sendMessage only STARTS the turn; agent.completed/agent.error clear the
+      // flag. If the start itself failed, no events are coming — clear it here.
+      state.turnRunning = false;
+      throw err;
+    }
   },
   agentfollowup: async () => { requireInit(); await window.NativeKit.agent.followUp(val('agent-prompt') || 'আরেকটু বিস্তারিত বলো।'); return { sent: true }; },
   agentsteer: async () => { requireInit(); await window.NativeKit.agent.steer(val('agent-prompt') || 'সংক্ষেপে বলো।'); return { steered: true }; },
-  agentabort: async () => { requireInit(); await window.NativeKit.agent.abort(); setStatus('Turn বাতিল।', 'muted'); return { aborted: true }; },
+  agentabort: async () => {
+    requireInit();
+    await window.NativeKit.agent.abort();
+    // The engine unwinds asynchronously, but the user has signalled they are
+    // done with this turn — release the UI guard so Send works again.
+    state.turnRunning = false;
+    setStatus('Turn বাতিল।', 'muted');
+    return { aborted: true };
+  },
 
   // 6 ── Approval gate ───────────────────────────────────────────────────────
   agentapprove: async () => {
@@ -254,8 +312,8 @@ const agentActions = {
     return res ?? { ran: 0 };
   },
   agentgetsched: async () => { requireInit(); return window.NativeKit.agent.getSchedulerConfig(); },
-  agentsetsched: async () => { requireInit(); await window.NativeKit.agent.setSchedulerConfig(JSON.stringify({ enabled: true, tickSeconds: 60 })); return { schedulerUpdated: true }; },
-  agentsetheartbeat: async () => { requireInit(); await window.NativeKit.agent.setHeartbeatConfig(JSON.stringify({ enabled: true, intervalMinutes: 60 })); return { heartbeatUpdated: true }; },
+  agentsetsched: async () => { requireInit(); await window.NativeKit.agent.setSchedulerConfig(JSON.stringify({ enabled: true, schedulingMode: 'adaptive' })); return { schedulerUpdated: true }; },
+  agentsetheartbeat: async () => { requireInit(); await window.NativeKit.agent.setHeartbeatConfig(JSON.stringify({ enabled: true, everyMs: 3600000, prompt: 'Check HEARTBEAT.md and report only what changed.' })); return { heartbeatUpdated: true }; },
 
   // 9 ── Background wakes (real OS scheduling) ──────────────────────────────
   // Android: Android WorkManager starts the worker even when the app process is
@@ -361,13 +419,13 @@ const agentActions = {
   agentseedperms: async () => {
     requireInit();
     return window.NativeKit.agent.seedToolPermissions(JSON.stringify([
-      { toolName: 'read_file', permission: 'allow', enabled: true },
-      { toolName: 'write_file', permission: 'ask', enabled: true },
-      { toolName: 'bash', permission: 'ask', enabled: true },
+      { toolName: 'read_file', permission: 'always_allow', enabled: true },
+      { toolName: 'write_file', permission: 'always_ask', enabled: true },
+      { toolName: 'execute_command', permission: 'always_ask', enabled: true },
     ]));
   },
   agentlistperms: async () => { requireInit(); return window.NativeKit.agent.listToolPermissions(); },
-  agentsetperm: async () => { requireInit(); await window.NativeKit.agent.setToolPermission('write_file', 'ask', true); return { toolName: 'write_file', permission: 'ask' }; },
+  agentsetperm: async () => { requireInit(); await window.NativeKit.agent.setToolPermission('write_file', 'always_ask', true); return { toolName: 'write_file', permission: 'always_ask' }; },
   agentresetperms: async () => { requireInit(); await window.NativeKit.agent.resetToolPermissions(); return { reset: true }; },
 
   // 12 ── MCP ────────────────────────────────────────────────────────────────
@@ -382,7 +440,7 @@ const agentActions = {
 
   // 13 ── Models & tools ─────────────────────────────────────────────────────
   agentmodels: async () => { requireInit(); return window.NativeKit.agent.getModels(val('agent-provider', 'anthropic') || 'anthropic'); },
-  agentinvoketool: async () => { requireInit(); return window.NativeKit.agent.invokeTool('list_directory', JSON.stringify({ path: '.' })); },
+  agentinvoketool: async () => { requireInit(); return window.NativeKit.agent.invokeTool('list_files', JSON.stringify({ path: '.' })); },
 };
 
 // ── Wiring ───────────────────────────────────────────────────────────────────

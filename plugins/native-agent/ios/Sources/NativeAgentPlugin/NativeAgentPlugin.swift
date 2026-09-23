@@ -103,7 +103,29 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
         ])
     }
 
-    private var handle: NativeAgentHandle?
+    /// Backing storage for `handle`, guarded by `handleLock`.
+    ///
+    /// The race this closes: `initialize()` assigns the handle from a
+    /// `DispatchQueue.global(qos: .userInitiated)` block, while every other
+    /// bridge method reads it from the main thread. Swift gives no memory
+    /// ordering guarantee for an unsynchronised property, so a reader could
+    /// observe a stale `nil` (or, worse, a torn reference) after a successful
+    /// initialize. Both sides now go through the same lock.
+    private var _handle: NativeAgentHandle?
+    private let handleLock = NSLock()
+
+    private var handle: NativeAgentHandle? {
+        get {
+            handleLock.lock()
+            defer { handleLock.unlock() }
+            return _handle
+        }
+        set {
+            handleLock.lock()
+            defer { handleLock.unlock() }
+            _handle = newValue
+        }
+    }
 
     // ── Helper ──────────────────────────────────────────────────────────────
 
@@ -198,7 +220,13 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
                 )
                 let h = try NativeAgentHandle(config: config)
                 try h.setEventCallback(callback: NativeAgentEventBridge(plugin: self))
-                try h.setNotifier(notifier: NativeNotifierImpl())
+                let notifier = NativeNotifierImpl()
+                // Ask for notification permission at init, while the app is in
+                // the foreground. Without this the first cron result reached a
+                // notification centre that had never been authorised and was
+                // dropped silently.
+                notifier.requestAuthorizationIfNeeded()
+                try h.setNotifier(notifier: notifier)
                 if let memoryProvider = MemoryProviderImpl.makeIfAvailable() {
                     try h.setMemoryProvider(provider: memoryProvider)
                 }

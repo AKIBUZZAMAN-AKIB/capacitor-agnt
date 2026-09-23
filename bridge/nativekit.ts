@@ -906,7 +906,21 @@ const NativeKit: any = {
     seedToolPermissions: async (defaultsJson: string) => { feature('agent'); requireNative(); return NativeAgent.seedToolPermissions({ defaultsJson }); },
     setToolPermission: async (toolName: string, permission: string, enabled?: boolean) => {
       feature('agent'); requireNative();
-      return NativeAgent.setToolPermission({ toolName, permission, enabled: enabled ?? true });
+      // The engine only recognises these three spellings and treats anything
+      // else as "keep asking". A caller passing 'allow' therefore got the exact
+      // opposite of what it asked for, silently. Fail loudly instead.
+      const POLICIES = ['always_allow', 'always_ask', 'always_ask_biometric'] as const;
+      type Policy = (typeof POLICIES)[number];
+      if (!(POLICIES as readonly string[]).includes(permission)) {
+        throw new Error(
+          `setToolPermission: unknown permission '${permission}'. Use one of: ${POLICIES.join(', ')}.`,
+        );
+      }
+      return NativeAgent.setToolPermission({
+        toolName,
+        permission: permission as Policy,
+        enabled: enabled ?? true,
+      });
     },
     listToolPermissions: async () => { feature('agent'); requireNative(); return NativeAgent.listToolPermissions(); },
     resetToolPermissions: async () => { feature('agent'); requireNative(); return NativeAgent.resetToolPermissions(); },
@@ -916,8 +930,8 @@ const NativeKit: any = {
     restartMcp: async (toolsJson: string) => { feature('agent'); requireNative(); return NativeAgent.restartMcp({ toolsJson }); },
     setMcpTools: async (toolsJson: string) => {
       feature('agent'); requireNative();
-      // No dedicated setter in 0.5.2 — restarting the MCP bridge with the new
-      // tool list has the same effect on this generation.
+      // `restartMcp` is the replace-the-catalogue operation (`startMcp` is
+      // additive and will not clear it), so it is the correct primitive here.
       const result = await NativeAgent.restartMcp({ toolsJson });
       return { ...(result as Record<string, unknown>), engineGeneration: '0.5.2-public', viaCompat: 'setMcpTools→restartMcp' };
     },

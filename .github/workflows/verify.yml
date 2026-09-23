@@ -1,0 +1,134 @@
+name: Verify — Rust tests, TS types, web tests, binding identity
+
+# Runs on every push/PR. This exists because three separate classes of silent
+# rot were found in this repository:
+#
+#   1. `cargo test` had not compiled for a long time (5 pre-existing errors).
+#      Nothing ran the Rust unit tests, so they drifted out of sync with the
+#      code and nobody noticed.
+#   2. `plugins/native-agent/dist/` was committed but stale relative to `src/`,
+#      so consumers got type definitions that did not match the implementation.
+#   3. The generated UniFFI bindings must stay byte-identical to the committed
+#      ones, because the prebuilt `.so`/`.xcframework` slices in this repo were
+#      built against them. A drift means the app throws
+#      "UniFFI contract/API checksum mismatch" at runtime.
+#
+# Each job below guards one of those.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust — check, test, binding identity
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/native-agent/rust/native-agent-ffi
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            plugins/native-agent/rust/native-agent-ffi/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('plugins/native-agent/rust/native-agent-ffi/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Build must be warning-free
+        run: |
+          cargo check --lib 2>&1 | tee /tmp/check.log
+          if grep -qE '^warning' /tmp/check.log; then
+            echo "::error::cargo check emitted warnings"
+            exit 1
+          fi
+
+      # The check that was missing entirely.
+      - name: Unit tests
+        run: cargo test --lib
+
+      # `strip` must stay off: uniffi-bindgen reads symbols from the .so and
+      # silently emits ZERO files when they have been stripped.
+      - name: Build release lib (unstripped, for bindgen)
+        run: CARGO_PROFILE_RELEASE_STRIP=false cargo build --release --lib
+
+      - name: Regenerate bindings
+        run: |
+          cargo run --quiet --bin uniffi-bindgen -- generate \
+            --library target/release/libnative_agent_ffi.so \
+            --language kotlin --out-dir /tmp/gen-kt
+          cargo run --quiet --bin uniffi-bindgen -- generate \
+            --library target/release/libnative_agent_ffi.so \
+            --language swift --out-dir /tmp/gen-swift
+
+      - name: Kotlin bindings must be byte-identical
+        run: |
+          diff /tmp/gen-kt/uniffi/native_agent_ffi/native_agent_ffi.kt \
+               ../../android/src/main/java/uniffi/native_agent_ffi/native_agent_ffi.kt
+
+      - name: C header must be byte-identical
+        run: |
+          diff /tmp/gen-swift/native_agent_ffiFFI.h \
+               ../../ios/Sources/NativeAgentPlugin/Generated/native_agent_ffiFFI.h
+
+      # The committed Swift file is swiftformat-processed, so a raw diff is
+      # noisy. The checksums are the part that actually has to match.
+      - name: Swift FFI checksums must match
+        run: |
+          pat='uniffi_native_agent_ffi_checksum_[a-z_]+\(\) != [0-9]+'
+          grep -oE "$pat" /tmp/gen-swift/native_agent_ffi.swift | sort > /tmp/new.txt
+          grep -oE "$pat" ../../ios/Sources/NativeAgentPlugin/Generated/native_agent_ffi.swift \
+            | sort > /tmp/old.txt
+          diff /tmp/new.txt /tmp/old.txt
+          echo "checksums verified: $(wc -l < /tmp/new.txt)"
+
+  web:
+    name: Web — types, tests, dist freshness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # .npmrc sets engine-strict=true and the plugin requires node>=22; keep
+      # the flag so the job does not depend on that pin staying put.
+      - name: Install
+        run: npm ci --engine-strict=false
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Tests
+        run: npx vitest run
+
+      - name: Config schema
+        run: npm run validate:config
+
+      # Guards the stale-dist bug: dist/ is committed, so it must match src/.
+      - name: dist/ must match src/
+        working-directory: plugins/native-agent
+        run: |
+          npm install --engine-strict=false
+          npm run build
+          if ! git diff --quiet -- dist; then
+            echo "::error::plugins/native-agent/dist is stale — run 'npm run build' there and commit the result."
+            git --no-pager diff --stat -- dist
+            exit 1
+          fi
+          echo "dist is up to date"

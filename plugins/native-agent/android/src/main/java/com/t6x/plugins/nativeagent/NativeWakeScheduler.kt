@@ -2,6 +2,7 @@ package com.t6x.plugins.nativeagent
 
 import android.content.Context
 import android.util.Log
+import androidx.work.Configuration
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
@@ -88,8 +89,12 @@ internal object NativeWakeScheduler {
                 .addTag(UNIQUE_WORK_NAME)
                 .build()
 
-            WorkManager.getInstance(appContext)
-                .enqueueUniquePeriodicWork(UNIQUE_WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
+            val wm = workManager(appContext)
+                ?: return Status(
+                    false, minutes, null, null, 0, requiresCharging,
+                    "WorkManager is unavailable on this device/app configuration",
+                )
+            wm.enqueueUniquePeriodicWork(UNIQUE_WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
 
             store.intervalMinutes = minutes
             store.requiresCharging = requiresCharging
@@ -112,7 +117,12 @@ internal object NativeWakeScheduler {
         val appContext = context.applicationContext
         val store = NativeWakeStore(appContext)
         return try {
-            WorkManager.getInstance(appContext).cancelUniqueWork(UNIQUE_WORK_NAME)
+            val wm = workManager(appContext)
+                ?: return Status(
+                    false, 0, null, null, 0, store.requiresCharging,
+                    "WorkManager is unavailable on this device/app configuration",
+                )
+            wm.cancelUniqueWork(UNIQUE_WORK_NAME)
             Status(false, 0, null, "CANCELLED", 0, store.requiresCharging)
         } catch (t: Throwable) {
             if (t is OutOfMemoryError) throw t
@@ -133,7 +143,12 @@ internal object NativeWakeScheduler {
     ): Status {
         val appContext = context.applicationContext
         return try {
-            val infos = WorkManager.getInstance(appContext)
+            val wm = workManager(appContext)
+                ?: return Status(
+                    false, intervalMinutes, null, null, 0, requiresCharging,
+                    "WorkManager is unavailable on this device/app configuration",
+                )
+            val infos = wm
                 .getWorkInfosForUniqueWork(UNIQUE_WORK_NAME)
                 .get()
             val info = infos.firstOrNull()
@@ -197,6 +212,48 @@ internal object NativeWakeScheduler {
         } catch (t: Throwable) {
             if (t is OutOfMemoryError) throw t
             null
+        }
+    }
+
+    /**
+     * Returns a usable [WorkManager], initialising it on demand.
+     *
+     * `WorkManager.getInstance()` throws `IllegalStateException` when the host
+     * app has stripped `androidx.startup.InitializationProvider` from its
+     * manifest — a common cold-start optimisation, and also what a
+     * `Configuration.Provider` setup does. Previously that exception was merely
+     * logged, so background wakes silently never ran on those apps.
+     *
+     * `isInitialized()` is checked first because calling `initialize()` twice
+     * throws "WorkManager is already initialized"; the whole block is also
+     * synchronized and re-checks inside the lock so two threads racing here
+     * cannot both attempt initialisation.
+     */
+    private fun workManager(appContext: Context): WorkManager? = synchronized(this) {
+        try {
+            if (WorkManager.isInitialized()) {
+                return@synchronized WorkManager.getInstance(appContext)
+            }
+            Log.w(TAG, "WorkManager was not auto-initialised; initialising it now")
+            WorkManager.initialize(
+                appContext,
+                Configuration.Builder()
+                    .setMinimumLoggingLevel(Log.INFO)
+                    .build(),
+            )
+            WorkManager.getInstance(appContext)
+        } catch (t: Throwable) {
+            if (t is OutOfMemoryError) throw t
+            // A racing initialiser (another library, or the host app) may have
+            // won between the check and the call — in that case an instance now
+            // exists and is perfectly usable.
+            try {
+                WorkManager.getInstance(appContext)
+            } catch (inner: Throwable) {
+                if (inner is OutOfMemoryError) throw inner
+                Log.e(TAG, "WorkManager is unavailable: ${inner.message}", inner)
+                null
+            }
         }
     }
 }

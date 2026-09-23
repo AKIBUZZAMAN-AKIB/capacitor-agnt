@@ -37,6 +37,11 @@ dependencies {
     // one sets `workManagerVersion` in its root variables.gradle (the same knob
     // background-runner documents) — read from the root first, then this project,
     // so a `-PworkManagerVersion=` override works too.
+    //
+    // MINIMUM 2.8.0: NativeWakeScheduler calls WorkManager.isInitialized() to
+    // initialise on demand when the host app has stripped the androidx.startup
+    // provider. That API landed in 2.8.0, so an override below it will not
+    // compile.
     def workManagerVersion = rootProject.findProperty('workManagerVersion')
         ?: project.findProperty('workManagerVersion')
         ?: '2.11.0'

@@ -95,6 +95,76 @@ pub fn create_handle_from_persisted_config(
     NativeAgentHandle::from_config(config, false)
 }
 
+/// Normalise an `allowedTools` value into the JSON-array string the engine
+/// expects.
+///
+/// Callers legitimately provide either a JSON array (`["read_file"]`) or an
+/// already-encoded string (`"[\"read_file\"]"`). Only the string form used to
+/// be recognised, so the array form silently disabled the whole restriction.
+/// Returns `None` only when there is genuinely no restriction to apply.
+fn normalize_allowed_tools(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Array(items) => {
+            let names: Vec<&str> = items.iter().filter_map(|item| item.as_str()).collect();
+            if names.is_empty() {
+                // An explicit empty array means "no tools at all"; preserve it
+                // rather than falling through to unrestricted.
+                Some("[]".to_string())
+            } else {
+                serde_json::to_string(&names).ok()
+            }
+        }
+        serde_json::Value::String(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            // Already-encoded JSON array.
+            if trimmed.starts_with('[') {
+                return Some(trimmed.to_string());
+            }
+            // Comma-separated shorthand ("read_file, grep_files").
+            let names: Vec<&str> = trimmed
+                .split(',')
+                .map(|part| part.trim())
+                .filter(|part| !part.is_empty())
+                .collect();
+            if names.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&names).ok()
+            }
+        }
+        serde_json::Value::Null => None,
+        _ => None,
+    }
+}
+
+/// A steer receiver that is deliberately never fed.
+///
+/// Background runs (cron wakes, skills) need *a* receiver to satisfy the
+/// agent-loop context, but must not compete with the foreground turn for the
+/// user's steer messages. The matching sender is dropped immediately, so
+/// `try_recv` simply reports the channel as empty/closed and the loop proceeds
+/// without injecting anything.
+fn detached_steer_rx() -> Arc<Mutex<Option<mpsc::UnboundedReceiver<String>>>> {
+    let (_tx, rx) = mpsc::unbounded_channel();
+    Arc::new(Mutex::new(Some(rx)))
+}
+
+/// Clears the `turn_in_flight` flag on drop.
+///
+/// A plain "set it back to false at the end" would leak the flag whenever the
+/// task returned early or panicked, permanently wedging the agent into
+/// "a turn is already running". Drop runs on every exit path, including unwind.
+struct TurnGuard(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for TurnGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Long-lived handle — one per app lifecycle.
 #[derive(uniffi::Object)]
 pub struct NativeAgentHandle {
@@ -105,13 +175,23 @@ pub struct NativeAgentHandle {
     memory_provider: Arc<Mutex<Option<Arc<dyn MemoryProvider>>>>,
     abort_flag: Arc<Mutex<bool>>,
     current_session: Arc<Mutex<Option<types::SessionState>>>,
-    approval_sender: Arc<Mutex<Option<oneshot::Sender<types::ApprovalResponse>>>>,
+    /// Pending tool approvals keyed by `tool_call_id` (see agent_loop).
+    approval_senders: Arc<Mutex<HashMap<String, oneshot::Sender<types::ApprovalResponse>>>>,
     cron_approval_sender: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
     steer_tx: mpsc::UnboundedSender<String>,
     steer_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<String>>>>,
     mcp_tools: Arc<Mutex<Vec<types::ToolDefinition>>>,
     mcp_pending: Arc<Mutex<HashMap<String, oneshot::Sender<types::McpToolResult>>>>,
     active_skills: Arc<Mutex<types::SkillSessions>>,
+    /// Set while a foreground turn is in flight.
+    ///
+    /// `spawn_main_turn` snapshots `current_session` when it starts and
+    /// overwrites it when it finishes. Two overlapping sendMessage() calls
+    /// therefore both branch from the SAME history and the slower one wins,
+    /// silently discarding the other turn's messages — and both write the same
+    /// session row. A private guard (not part of the FFI surface) makes the
+    /// second call fail loudly instead of corrupting the transcript.
+    turn_in_flight: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[uniffi::export]
@@ -217,6 +297,14 @@ impl NativeAgentHandle {
     }
 
     /// Steer the running agent with additional context.
+    //
+    // Applies to the FOREGROUND turn only. The text is queued and injected as a
+    // user message at the top of the next iteration of the main agent loop.
+    // It deliberately does not reach background work: cron jobs (`handle_wake`)
+    // and skill runs used to share this very receiver, so whichever of them
+    // happened to poll first would consume the user's steer text and the
+    // foreground turn would never see it — a race decided by timing alone.
+    // Background runs now get their own (never-fed) channel.
     pub fn steer(&self, text: String) -> Result<(), NativeAgentError> {
         self.steer_tx
             .send(text)
@@ -233,13 +321,21 @@ impl NativeAgentHandle {
         reason: Option<String>,
     ) -> Result<(), NativeAgentError> {
         self.runtime.block_on(async {
-            let mut sender = self.approval_sender.lock().await;
-            if let Some(tx) = sender.take() {
+            // Honour `tool_call_id` instead of blindly resolving whatever
+            // request happened to be in flight. An unknown id is a no-op rather
+            // than a mis-routed approval.
+            let mut pending = self.approval_senders.lock().await;
+            if let Some(tx) = pending.remove(&tool_call_id) {
                 let _ = tx.send(types::ApprovalResponse {
                     tool_call_id,
                     approved,
                     reason,
                 });
+            } else {
+                tracing::warn!(
+                    tool_call_id = %tool_call_id,
+                    "respond_to_approval: no pending approval with this id (already answered, cancelled, or stale)"
+                );
             }
         });
         Ok(())
@@ -306,13 +402,33 @@ impl NativeAgentHandle {
         body_json: String,
         content_type: Option<String>,
     ) -> Result<String, NativeAgentError> {
-        self.runtime.block_on(async {
-            auth::exchange_oauth_code(
-                &token_url,
-                &body_json,
-                content_type.as_deref(),
-            )
-            .await
+        let auth_path = self.config.auth_profiles_path.clone();
+        self.runtime.block_on(async move {
+            let raw =
+                auth::exchange_oauth_code(&token_url, &body_json, content_type.as_deref()).await?;
+
+            // Store the tokens instead of only handing them to JS: without this
+            // the refresh token was dropped and the profile could never renew.
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if parsed.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    if let Some(data) = parsed.get("data") {
+                        // Infer the provider from the token endpoint.
+                        let provider = if token_url.contains("anthropic") {
+                            "anthropic"
+                        } else if token_url.contains("openai") {
+                            "openai"
+                        } else if token_url.contains("openrouter") {
+                            "openrouter"
+                        } else {
+                            "anthropic"
+                        };
+                        if let Err(e) = auth::persist_oauth_tokens(&auth_path, provider, data) {
+                            tracing::warn!(error = %e, "could not persist exchanged OAuth tokens");
+                        }
+                    }
+                }
+            }
+            Ok(raw)
         })
     }
 
@@ -358,6 +474,16 @@ impl NativeAgentHandle {
             &self.merged_tools_for_prompt(),
         )?;
 
+        // Restore the constraints the session actually ran under. These were
+        // hardcoded to `max_turns: 25` / `allowed_tools_json: None`, so
+        // resuming a tool-restricted session (e.g. one started by a skill
+        // limited to three read-only tools) silently unlocked every tool —
+        // a sandbox escape reachable from the UI's own "resume" button.
+        let (stored_max_turns, stored_allowed_tools) = {
+            let conn = db::open_db(&self.config.db_path)?;
+            db::load_session_constraints(&conn, &session_key)?
+        };
+
         self.runtime.block_on(async {
             let mut current = self.current_session.lock().await;
             *current = Some(types::SessionState {
@@ -366,8 +492,8 @@ impl NativeAgentHandle {
                 provider,
                 model,
                 system_prompt,
-                max_turns: Some(25),
-                allowed_tools_json: None,
+                max_turns: stored_max_turns.or(Some(25)),
+                allowed_tools_json: stored_allowed_tools,
                 messages,
             });
         });
@@ -433,8 +559,10 @@ impl NativeAgentHandle {
         let notifier = self.notifier_clone();
         let memory_provider = self.memory_provider_clone();
         let abort_flag = self.abort_flag.clone();
-        let approval_sender = self.approval_sender.clone();
-        let steer_rx = self.steer_rx.clone();
+        let approval_senders = self.approval_senders.clone();
+        // Background wakes must NOT drain the foreground steer channel — see
+        // the note on `steer()`. Hand them a private receiver that nobody feeds.
+        let steer_rx = detached_steer_rx();
         let mcp_tools = self.mcp_tools.clone();
         let mcp_pending = self.mcp_pending.clone();
 
@@ -446,7 +574,7 @@ impl NativeAgentHandle {
                 notifier,
                 memory_provider,
                 abort_flag,
-                approval_sender,
+                approval_senders,
                 steer_rx,
                 mcp_tools,
                 mcp_pending,
@@ -611,19 +739,21 @@ impl NativeAgentHandle {
                         .and_then(|v| v.as_u64())
                         .map(|v| v as u32)
                 }),
+            // `allowedTools` is naturally a JSON *array* (["read_file", ...]),
+            // but this only ever called `.as_str()`. An array yielded `None`,
+            // which the engine reads as "no restrictions" — so a skill that was
+            // meant to be limited to three read-only tools silently ran with
+            // full access. Accept both shapes and fail closed.
             allowed_tools_json: launch
                 .get("allowedToolsJson")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .or_else(|| {
-                    skill
-                        .get("allowedTools")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                }),
+                .and_then(normalize_allowed_tools)
+                .or_else(|| launch.get("allowedTools").and_then(normalize_allowed_tools))
+                .or_else(|| skill.get("allowedTools").and_then(normalize_allowed_tools)),
             prior_messages_json: None,
         };
 
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let run_id_for_task = run_id.clone();
         let skill_abort_flag = Arc::new(Mutex::new(false));
         self.runtime.block_on(async {
             let mut skills = self.active_skills.lock().await;
@@ -638,8 +768,10 @@ impl NativeAgentHandle {
 
         let config = self.config.clone();
         let callback = self.callback_clone();
-        let approval_sender = self.approval_sender.clone();
-        let steer_rx = self.steer_rx.clone();
+        let approval_senders = self.approval_senders.clone();
+        // A skill runs alongside the main chat; it must not swallow the user's
+        // steer text meant for the foreground turn.
+        let steer_rx = detached_steer_rx();
         let mcp_tools = self.mcp_tools.clone();
         let mcp_pending = self.mcp_pending.clone();
         let memory_provider = self.memory_provider_clone();
@@ -658,7 +790,7 @@ impl NativeAgentHandle {
                 is_background: false,
                 wall_clock_timeout_ms: None,
                 prior_messages: None,
-                approval_sender,
+                approval_senders,
                 steer_rx,
                 mcp_tools,
                 mcp_pending,
@@ -679,6 +811,15 @@ impl NativeAgentHandle {
                             Some(&turn_result.model),
                             start_time,
                             Some(&turn_result.usage),
+                        );
+                        // Skills are the main source of tool-restricted
+                        // sessions; persist the restriction so a resume cannot
+                        // widen it.
+                        let _ = db::save_session_constraints(
+                            &conn,
+                            &params_for_task.session_key,
+                            params_for_task.max_turns,
+                            params_for_task.allowed_tools_json.as_deref(),
                         );
                     }
 
@@ -707,8 +848,11 @@ impl NativeAgentHandle {
                     *current_session.lock().await = Some(next_session);
 
                     if let Some(cb) = &callback {
+                        // Was hardcoded to "" so the UI could not tell which run
+                        // had finished.
                         let payload = serde_json::json!({
-                            "runId": "",
+                            "runId": run_id_for_task,
+                            "skillId": skill_id_for_task,
                             "sessionKey": params_for_task.session_key,
                             "usage": turn_result.usage,
                             "messagesJson": turn_result.messages_json,
@@ -718,20 +862,32 @@ impl NativeAgentHandle {
                     }
                 }
                 Err(e) => {
+                    // Only create the row when there is nothing to lose — see
+                    // the matching note in spawn_main_turn. Writing "[]" over an
+                    // existing session destroyed its history.
                     if let Ok(conn) = db::open_db(&config.db_path) {
-                        let _ = db::save_session(
-                            &conn,
-                            &params_for_task.session_key,
-                            &skill_id_for_task,
-                            "[]",
-                            None,
-                            start_time,
-                            None,
-                        );
+                        let already_has_history =
+                            db::load_session_messages_raw(&conn, &params_for_task.session_key)
+                                .map(|messages| !messages.is_empty())
+                                .unwrap_or(false);
+                        if !already_has_history {
+                            let _ = db::save_session(
+                                &conn,
+                                &params_for_task.session_key,
+                                &skill_id_for_task,
+                                "[]",
+                                None,
+                                start_time,
+                                None,
+                            );
+                        }
                     }
 
                     if let Some(cb) = &callback {
                         let payload = serde_json::json!({
+                            "runId": run_id_for_task,
+                            "skillId": skill_id_for_task,
+                            "sessionKey": params_for_task.session_key,
                             "error": format!("{}", e),
                         });
                         cb.on_event("agent.error".into(), payload.to_string());
@@ -762,11 +918,43 @@ impl NativeAgentHandle {
     // ── MCP ────────────────────────────────────────────────────────────────
 
     /// Start MCP server with given tools.
+    //
+    // Architecture note: MCP servers are hosted by the WebView, not by Rust.
+    // The engine only keeps the tool catalogue and dispatches calls back to JS
+    // through `mcp_pending`, so "start" means "publish the tools you have
+    // connected", not "spawn a process".
+    //
+    // `start` and `restart` used to be byte-identical aliases of
+    // `set_mcp_tools`, which made `startMcp("[]")` silently erase every
+    // registered tool — exactly what the demo lab did on page load. `start` is
+    // now additive and refuses to clear the catalogue; use `restart` (or
+    // `setMcpTools`) to replace it.
     pub fn start_mcp(&self, tools_json: String) -> Result<u32, NativeAgentError> {
-        self.set_mcp_tools(tools_json)
+        let incoming = Self::parse_mcp_tools(&tools_json)?;
+        if incoming.is_empty() {
+            // Nothing to add — report the current count rather than wiping.
+            return Ok(self
+                .runtime
+                .block_on(async { self.mcp_tools.lock().await.len() }) as u32);
+        }
+        self.runtime.block_on(async {
+            let mut tools = self.mcp_tools.lock().await;
+            for tool in incoming {
+                // Replace a same-named entry instead of duplicating it.
+                if let Some(slot) = tools.iter_mut().find(|t| t.name == tool.name) {
+                    *slot = tool;
+                } else {
+                    tools.push(tool);
+                }
+            }
+            Ok(tools.len() as u32)
+        })
     }
 
     /// Restart MCP server with new tools.
+    //
+    // Unlike `start_mcp` this REPLACES the catalogue, dropping anything
+    // previously registered.
     pub fn restart_mcp(&self, tools_json: String) -> Result<u32, NativeAgentError> {
         self.set_mcp_tools(tools_json)
     }
@@ -788,11 +976,17 @@ impl NativeAgentHandle {
     ) -> Result<String, NativeAgentError> {
         let args: serde_json::Value = serde_json::from_str(&args_json)?;
         let workspace = self.config.workspace_path.clone();
+        let db_path = self.config.db_path.clone();
         let memory_provider = self.memory_provider_clone();
         self.runtime.block_on(async {
-            let result =
-                tool_runner::execute_tool(&tool_name, &args, &workspace, memory_provider.as_ref())
-                    .await?;
+            let result = tool_runner::execute_tool(
+                &tool_name,
+                &args,
+                &workspace,
+                &db_path,
+                memory_provider.as_ref(),
+            )
+            .await?;
             Ok(serde_json::to_string(&result)?)
         })
     }
@@ -829,13 +1023,14 @@ impl NativeAgentHandle {
             memory_provider: Arc::new(Mutex::new(None)),
             abort_flag: Arc::new(Mutex::new(false)),
             current_session: Arc::new(Mutex::new(None)),
-            approval_sender: Arc::new(Mutex::new(None)),
+            approval_senders: Arc::new(Mutex::new(HashMap::new())),
             cron_approval_sender: Arc::new(Mutex::new(None)),
             steer_tx,
             steer_rx: Arc::new(Mutex::new(Some(steer_rx))),
             mcp_tools: Arc::new(Mutex::new(vec![])),
             mcp_pending: Arc::new(Mutex::new(HashMap::new())),
             active_skills: Arc::new(Mutex::new(HashMap::new())),
+            turn_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }))
     }
 
@@ -912,11 +1107,31 @@ impl NativeAgentHandle {
         prior_messages: Option<Vec<types::Message>>,
         session_state: types::SessionState,
     ) -> Result<String, NativeAgentError> {
+        // Reject a second concurrent turn rather than letting it race.
+        // `compare_exchange` is the atomic test-and-set: only the first caller
+        // sees `false` and proceeds.
+        if self
+            .turn_in_flight
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            return Err(NativeAgentError::Agent {
+                msg: "A turn is already running — call abort() first, or wait for \
+                      agent.completed before sending another message."
+                    .to_string(),
+            });
+        }
+
         let run_id = uuid::Uuid::new_v4().to_string();
         let config = self.config.clone();
         let callback = self.callback_clone();
         let abort_flag = self.abort_flag.clone();
-        let approval_sender = self.approval_sender.clone();
+        let approval_senders = self.approval_senders.clone();
         let steer_rx = self.steer_rx.clone();
         let mcp_tools = self.mcp_tools.clone();
         let mcp_pending = self.mcp_pending.clone();
@@ -924,8 +1139,11 @@ impl NativeAgentHandle {
         let current_session = self.current_session.clone();
         let params_for_task = params.clone();
         let run_id_for_task = run_id.clone();
+        let turn_in_flight = self.turn_in_flight.clone();
 
         self.runtime.spawn(async move {
+            // Released when this task ends, however it ends.
+            let _turn_guard = TurnGuard(turn_in_flight);
             let start_time = chrono::Utc::now().timestamp_millis();
             let result = agent_loop::run_agent_turn(agent_loop::AgentLoopContext {
                 config: &config,
@@ -935,7 +1153,7 @@ impl NativeAgentHandle {
                 is_background: false,
                 wall_clock_timeout_ms: None,
                 prior_messages,
-                approval_sender,
+                approval_senders,
                 steer_rx,
                 mcp_tools,
                 mcp_pending,
@@ -956,6 +1174,14 @@ impl NativeAgentHandle {
                             Some(&turn_result.model),
                             start_time,
                             Some(&turn_result.usage),
+                        );
+                        // Remember the constraints so resumeSession() restores
+                        // them instead of defaulting to "unrestricted".
+                        let _ = db::save_session_constraints(
+                            &conn,
+                            &params_for_task.session_key,
+                            params_for_task.max_turns,
+                            params_for_task.allowed_tools_json.as_deref(),
                         );
                     }
 
@@ -985,19 +1211,34 @@ impl NativeAgentHandle {
                     }
                 }
                 Err(e) => {
-                    // Persist session row even on error so it appears in listSessions.
-                    // This prevents the "session accumulation" race where prior errored
-                    // turns leave no DB row and the index appears empty.
+                    // Persist the session row even on error so it appears in
+                    // listSessions — but NEVER with an empty message array.
+                    //
+                    // The previous version wrote "[]" here, which `save_session`
+                    // treats as the new full message list: one transient network
+                    // failure wiped the user's entire conversation history with
+                    // no backup and no way to recover it. Instead, only create
+                    // the row when the session does not exist yet; if it does,
+                    // leave the stored messages untouched.
                     if let Ok(conn) = db::open_db(&config.db_path) {
-                        let _ = db::save_session(
+                        let already_has_history = db::load_session_messages_raw(
                             &conn,
                             &params_for_task.session_key,
-                            "main",
-                            "[]",
-                            None,
-                            start_time,
-                            None,
-                        );
+                        )
+                        .map(|messages| !messages.is_empty())
+                        .unwrap_or(false);
+
+                        if !already_has_history {
+                            let _ = db::save_session(
+                                &conn,
+                                &params_for_task.session_key,
+                                "main",
+                                "[]",
+                                None,
+                                start_time,
+                                None,
+                            );
+                        }
                     }
 
                     if let Some(cb) = &callback {
@@ -1014,8 +1255,9 @@ impl NativeAgentHandle {
         Ok(run_id)
     }
 
-    fn set_mcp_tools(&self, tools_json: String) -> Result<u32, NativeAgentError> {
-        let tool_values: Vec<serde_json::Value> = serde_json::from_str(&tools_json)?;
+    /// Shared parser for the MCP tool catalogue JSON.
+    fn parse_mcp_tools(tools_json: &str) -> Result<Vec<types::ToolDefinition>, NativeAgentError> {
+        let tool_values: Vec<serde_json::Value> = serde_json::from_str(tools_json)?;
         let mut parsed = Vec::with_capacity(tool_values.len());
         for tool in tool_values {
             let name = tool.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
@@ -1052,7 +1294,11 @@ impl NativeAgentHandle {
                 approval_policy,
             });
         }
+        Ok(parsed)
+    }
 
+    fn set_mcp_tools(&self, tools_json: String) -> Result<u32, NativeAgentError> {
+        let parsed = Self::parse_mcp_tools(&tools_json)?;
         let count = parsed.len() as u32;
         self.runtime.block_on(async {
             let mut tools = self.mcp_tools.lock().await;
@@ -1063,3 +1309,70 @@ impl NativeAgentHandle {
 }
 
 uniffi::setup_scaffolding!();
+
+#[cfg(test)]
+mod turn_guard_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// The flag must behave as a strict test-and-set: exactly one of N racing
+    /// callers may claim the turn.
+    #[test]
+    fn only_one_caller_can_claim_a_turn() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let claim = |f: &Arc<AtomicBool>| {
+            f.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        };
+        assert!(claim(&flag), "first caller wins");
+        assert!(!claim(&flag), "second caller must be rejected");
+        assert!(!claim(&flag), "and stays rejected while in flight");
+    }
+
+    /// Drop must release the flag on EVERY exit path, or the agent wedges
+    /// permanently into "a turn is already running".
+    #[test]
+    fn the_guard_releases_the_flag_when_dropped() {
+        let flag = Arc::new(AtomicBool::new(true));
+        {
+            let _g = TurnGuard(flag.clone());
+            assert!(flag.load(Ordering::SeqCst));
+        }
+        assert!(!flag.load(Ordering::SeqCst), "drop must clear the flag");
+
+        // A new turn can be claimed afterwards.
+        assert!(flag
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok());
+    }
+
+    /// Even an early return / panic-unwind path releases the flag.
+    #[test]
+    fn a_panicking_task_still_releases_the_flag() {
+        let flag = Arc::new(AtomicBool::new(true));
+        let f = flag.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _g = TurnGuard(f);
+            panic!("simulated task failure");
+        }));
+        assert!(result.is_err(), "the panic must propagate");
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "the flag must be released during unwind"
+        );
+    }
+
+    /// Sequential turns must keep working — the guard must not be sticky.
+    #[test]
+    fn consecutive_turns_are_allowed() {
+        let flag = Arc::new(AtomicBool::new(false));
+        for i in 0..5 {
+            assert!(
+                flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok(),
+                "turn {i} should be claimable"
+            );
+            drop(TurnGuard(flag.clone()));
+        }
+    }
+}

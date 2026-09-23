@@ -428,6 +428,7 @@ mod tests {
                 description: "Read a file from the workspace".to_string(),
                 input_schema: serde_json::json!({"type": "object"}),
                 webview_only: false,
+                approval_policy: None,
             },
             // An MCP/account tool
             ToolDefinition {
@@ -435,6 +436,7 @@ mod tests {
                 description: "Search Gmail messages".to_string(),
                 input_schema: serde_json::json!({"type": "object"}),
                 webview_only: true,
+                approval_policy: None,
             },
         ];
 

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Manifest for the native-agent library module.
+
+  The module previously shipped none at all and relied entirely on WorkManager's
+  androidx.startup auto-initialisation to register its worker. That is fragile:
+  many apps deliberately strip `androidx.startup.InitializationProvider` (it is a
+  common cold-start optimisation, and `Configuration.Provider` setups remove it
+  too). When that happens WorkManager never initialises, `NativeAgentWakeWorker`
+  is never registered, and every background wake stops firing — silently, with
+  no error anywhere.
+
+  Declaring the permissions the worker needs here means the host app inherits
+  them through manifest merging instead of having to know about them.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Post the notification a finished cron job produces (Android 13+). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- WorkManager needs these to survive reboot and to run while dozing. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+</manifest>

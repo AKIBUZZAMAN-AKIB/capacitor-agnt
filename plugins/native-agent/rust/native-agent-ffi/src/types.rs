@@ -386,3 +386,131 @@ impl DisplayMessage {
         result
     }
 }
+
+#[cfg(test)]
+mod round_trip_tests {
+    use super::*;
+
+    /// Messages are persisted as JSON and reloaded on resume. If a block type
+    /// fails to round-trip, `load_session_messages_raw` silently falls back to
+    /// stuffing the raw JSON into a Text block — the transcript is then
+    /// corrupt AND the API rejects it (unmatched tool_use). Every variant must
+    /// survive a save/load cycle intact.
+    #[test]
+    fn every_content_block_survives_a_json_round_trip() {
+        let blocks = vec![
+            ContentBlock::Text { text: "hello আমি 🇧🇩".into() },
+            ContentBlock::ToolUse {
+                id: "toolu_1".into(),
+                name: "read_file".into(),
+                input: serde_json::json!({"path": "a.txt", "n": 3}),
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: "toolu_1".into(),
+                content: "file body".into(),
+                is_error: false,
+            },
+            ContentBlock::Thinking { thinking: "reasoning".into() },
+            ContentBlock::ServerToolUse {
+                id: "srv_1".into(),
+                name: "web_search".into(),
+                input: serde_json::json!({"query": "x"}),
+            },
+            ContentBlock::WebSearchToolResult {
+                tool_use_id: "srv_1".into(),
+                content: serde_json::json!([{"title": "t"}]),
+            },
+        ];
+
+        for block in blocks {
+            let json = serde_json::to_string(&block).unwrap();
+            let back: ContentBlock = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("{json} failed to round-trip: {e}"));
+            assert_eq!(
+                serde_json::to_string(&back).unwrap(),
+                json,
+                "re-serialising must be stable"
+            );
+        }
+    }
+
+    /// `MessageContent` is `#[serde(untagged)]`, which picks the first variant
+    /// that deserialises. A Blocks payload must NOT be mistaken for Text and
+    /// vice versa — that is exactly how a tool call turns into garbage text.
+    #[test]
+    fn message_content_variants_do_not_collide() {
+        let text = MessageContent::Text("plain".into());
+        let json = serde_json::to_string(&text).unwrap();
+        assert!(
+            matches!(
+                serde_json::from_str::<MessageContent>(&json).unwrap(),
+                MessageContent::Text(t) if t == "plain"
+            ),
+            "text must stay text"
+        );
+
+        let blocks = MessageContent::Blocks(vec![ContentBlock::ToolUse {
+            id: "toolu_9".into(),
+            name: "bash".into(),
+            input: serde_json::json!({}),
+        }]);
+        let json = serde_json::to_string(&blocks).unwrap();
+        match serde_json::from_str::<MessageContent>(&json).unwrap() {
+            MessageContent::Blocks(b) => {
+                assert_eq!(b.len(), 1);
+                assert!(matches!(&b[0], ContentBlock::ToolUse { id, .. } if id == "toolu_9"));
+            }
+            MessageContent::Text(t) => {
+                panic!("blocks were misparsed as text — history would be corrupted: {t}")
+            }
+        }
+    }
+
+    /// A full assistant turn (thinking + tool_use) must survive persistence,
+    /// because resume replays it to the provider verbatim.
+    #[test]
+    fn a_full_assistant_turn_round_trips() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Text { text: "I will read it".into() },
+                ContentBlock::ToolUse {
+                    id: "toolu_a".into(),
+                    name: "read_file".into(),
+                    input: serde_json::json!({"path": "x"}),
+                },
+            ]),
+        };
+        let json = serde_json::to_string(&msg.content).unwrap();
+        let back: MessageContent = serde_json::from_str(&json).unwrap();
+        let restored = Message { role: Role::Assistant, content: back };
+
+        // The tool_use id must still be there — this is what the API pairs
+        // against tool_result.
+        let ids: Vec<String> = match &restored.content {
+            MessageContent::Blocks(b) => b
+                .iter()
+                .filter_map(|x| match x {
+                    ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => vec![],
+        };
+        assert_eq!(ids, vec!["toolu_a".to_string()]);
+        assert_eq!(restored.text(), "I will read it");
+    }
+
+    #[test]
+    fn roles_serialise_lowercase_as_the_db_expects() {
+        // load_session_messages_raw matches on "user"/"assistant"/"system";
+        // any other spelling silently DROPS the message.
+        for (role, want) in [
+            (Role::User, "\"user\""),
+            (Role::Assistant, "\"assistant\""),
+            (Role::System, "\"system\""),
+        ] {
+            assert_eq!(serde_json::to_string(&role).unwrap(), want);
+        }
+    }
+}

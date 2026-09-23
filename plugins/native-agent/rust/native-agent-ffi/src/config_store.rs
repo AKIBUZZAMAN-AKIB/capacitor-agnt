@@ -15,7 +15,20 @@ pub fn persist_config(config: &InitConfig, path: &str) -> Result<(), NativeAgent
         fs::create_dir_all(parent)?;
     }
     let json = serde_json::to_vec_pretty(config)?;
-    fs::write(config_path, json)?;
+
+    // Write ATOMICALLY. `fs::write` truncates first, so a crash, a full disk or
+    // the OS killing the app mid-write leaves a half-written file. This config
+    // is what `handle_wake` reads to reconstruct the engine in the background
+    // (lib.rs), so a truncated file means EVERY background cron job fails from
+    // then on — and there is no UI in that path to surface the error or repair
+    // it. temp-file + rename makes the destination either the old content or
+    // the new one, never a mix.
+    let tmp = format!("{}.tmp", path);
+    fs::write(&tmp, &json)?;
+    if let Err(err) = fs::rename(&tmp, config_path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err.into());
+    }
     Ok(())
 }
 

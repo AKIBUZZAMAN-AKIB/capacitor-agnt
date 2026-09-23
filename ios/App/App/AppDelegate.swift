@@ -14,6 +14,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         BackgroundRunnerPlugin.registerBackgroundTask()
         BackgroundRunnerPlugin.handleApplicationDidFinishLaunching(launchOptions: launchOptions)
         NativeAgentBackgroundTask.registerIfNeeded()
+        // Without a UNUserNotificationCenter delegate iOS silently suppresses
+        // the banner for any agent notification that fires while the app is
+        // frontmost. Must be set before launch completes.
+        NativeNotifierImpl.installForegroundPresenter()
         return true
     }
 
