@@ -1,6 +1,19 @@
-[target.aarch64-linux-android]
-linker = "/home/rruiz/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
-
-[env]
-CC_aarch64-linux-android = "/home/rruiz/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
-AR_aarch64-linux-android = "/home/rruiz/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+# Intentionally left without hardcoded toolchain paths.
+#
+# This file used to pin the aarch64-linux-android linker/CC/AR to
+# `/home/rruiz/Android/Sdk/ndk/27.0.12077973/...` — an absolute path from one
+# developer's machine. On every other machine (and in CI) that path does not
+# exist, so an `aarch64-linux-android` build failed with a confusing
+# "linker not found" instead of a useful message, and it silently overrode the
+# correct toolchain that `tools/agent-ffi/build-android-all-abis.sh` exports.
+#
+# The build script already discovers the NDK (ANDROID_NDK_HOME / ANDROID_NDK_ROOT
+# / NDK_HOME / sdkmanager layout) and exports CARGO_TARGET_*_LINKER, CC_* and
+# AR_* for all four ABIs, so no static configuration is needed here.
+#
+# To build the Android libraries:
+#   tools/agent-ffi/build-android-all-abis.sh
+#
+# To point cargo at a local NDK by hand instead, export the variables rather
+# than editing this file:
+#   export ANDROID_NDK_HOME=/path/to/ndk/27.0.12077973

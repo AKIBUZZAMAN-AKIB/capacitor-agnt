@@ -28,6 +28,14 @@ export interface InitConfig {
     /** Path to auth-profiles.json */
     authProfilesPath: string;
 }
+/**
+ * Tool approval policy understood by the engine.
+ *
+ * These exact strings matter: the engine compares against `always_allow`, so a
+ * looser spelling such as `'allow'` silently meant "keep asking". The union
+ * makes a typo a compile error instead of a runtime surprise.
+ */
+export type ToolPermissionPolicy = 'always_allow' | 'always_ask' | 'always_ask_biometric';
 export interface SendMessageParams {
     prompt: string;
     sessionKey: string;
@@ -37,9 +45,14 @@ export interface SendMessageParams {
     maxTurns?: number;
     /** JSON-encoded list of allowed tool names. Empty = all tools. */
     allowedToolsJson?: string;
-    /** JSON-encoded extra tool definitions (account tools, MCP tools) */
-    extraToolsJson?: string;
-    /** JSON-encoded prior conversation messages for multi-turn skill sessions */
+    /**
+     * JSON-encoded prior conversation messages for multi-turn skill sessions.
+     *
+     * NOTE: there is deliberately no `extraToolsJson` here. It used to be
+     * declared but the native `SendMessageParams` (Rust and Kotlin alike) has no
+     * such field, so anything passed was silently dropped. Register extra tools
+     * with `setMcpTools` / `startMcp` instead.
+     */
     priorMessagesJson?: string;
 }
 export interface AuthTokenResult {
@@ -256,7 +269,13 @@ export interface TokenUsage {
     outputTokens: number;
     totalTokens: number;
 }
-export type NativeAgentEventType = 'text_delta' | 'thinking' | 'tool_use' | 'tool_result' | 'mcp_tool_call' | 'user_message' | 'retry' | 'agent.completed' | 'agent.error' | 'approval_request' | 'wake.no_jobs' | 'wake.jobs_found' | 'agent.background_timeout' | 'max_turns_reached' | 'heartbeat.started' | 'heartbeat.completed' | 'heartbeat.skipped' | 'cron.job.started' | 'cron.job.completed' | 'cron.job.error' | 'cron.notification' | 'scheduler.status';
+/**
+ * Every event type the Rust engine emits, verified against the emit sites in
+ * the crate. `heartbeat.skipped` and `scheduler.status` were listed here but
+ * are never emitted; the cron/wake/heartbeat events below were emitted but
+ * missing from the union.
+ */
+export type NativeAgentEventType = 'text_delta' | 'thinking' | 'tool_use' | 'tool_result' | 'mcp_tool_call' | 'user_message' | 'approval_request' | 'retry' | 'web_search_start' | 'web_search_complete' | 'max_turns_reached' | 'agent.background_timeout' | 'agent.completed' | 'agent.error' | 'wake.no_jobs' | 'wake.jobs_found' | 'wake.skipped' | 'cron.job.started' | 'cron.job.completed' | 'cron.job.error' | 'cron.job.skipped' | 'cron.notification' | 'cron.deduped' | 'cron.delivery_skipped' | 'heartbeat.started' | 'heartbeat.completed' | 'heartbeat.error';
 export interface NativeAgentEvent {
     eventType: string;
     payloadJson: string;
@@ -415,7 +434,7 @@ export interface NativeAgentPlugin {
     }>;
     setToolPermission(options: {
         toolName: string;
-        permission: string;
+        permission: ToolPermissionPolicy;
         enabled: boolean;
     }): Promise<void>;
     listToolPermissions(): Promise<{

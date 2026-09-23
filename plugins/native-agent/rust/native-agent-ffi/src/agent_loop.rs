@@ -4,7 +4,9 @@
 //! Matches the JS behavior: maxTurns, retry with backoff, abort flag.
 
 use crate::event_bus;
-use crate::llm_driver::{AnthropicDriver, CompletionRequest, LlmDriver, LlmError, StreamEvent};
+use crate::llm_driver::{
+    AnthropicDriver, CompletionRequest, LlmDriver, LlmError, OpenAiDriver, StreamEvent,
+};
 use crate::tool_runner;
 use crate::types::{
     ApprovalResponse, ContentBlock, InitConfig, McpToolResult, Message, MessageContent,
@@ -41,7 +43,14 @@ pub struct AgentLoopContext<'a> {
     pub is_background: bool,
     pub wall_clock_timeout_ms: Option<u64>,
     pub prior_messages: Option<Vec<Message>>,
-    pub approval_sender: Arc<Mutex<Option<oneshot::Sender<ApprovalResponse>>>>,
+    /// Pending tool approvals, keyed by `tool_call_id`.
+    ///
+    /// This used to be a single `Option<Sender>`. Claude routinely emits several
+    /// tool_use blocks in one turn, and each new request overwrote the previous
+    /// one, so `respondToApproval` could resolve a *different* tool than the one
+    /// the user was looking at — approving `read_file` could run
+    /// `execute_command`. Keyed pending map, same shape as `mcp_pending`.
+    pub approval_senders: Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalResponse>>>>,
     pub steer_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<String>>>>,
     pub mcp_tools: Arc<Mutex<Vec<ToolDefinition>>>,
     pub mcp_pending: Arc<Mutex<HashMap<String, oneshot::Sender<McpToolResult>>>>,
@@ -152,17 +161,82 @@ pub async fn run_agent_turn(
                     "sessionKey": ctx.session_key,
                 }),
             );
+            // Same hazard as the wall-clock timeout below: the assistant
+            // message just pushed carries one `tool_use` block per pending
+            // call, and the Messages API rejects a transcript where a
+            // `tool_use` has no matching `tool_result` ("tool_use ids were
+            // found without tool_result blocks"). Breaking straight out left
+            // the saved session permanently un-resumable — every later turn
+            // 400'd with no way back. Close each pending call with a synthetic
+            // result before stopping, so the persisted transcript stays valid.
+            let closing: Vec<ContentBlock> = response
+                .tool_calls
+                .iter()
+                .map(|tool_call| {
+                    let content = format!(
+                        "Tool not executed: the turn limit of {} was reached before this call could run.",
+                        max_turns
+                    );
+                    event_bus::emit_tool_result(
+                        callback,
+                        &tool_call.name,
+                        &tool_call.id,
+                        &serde_json::json!({ "content": content, "isError": true }),
+                        &ctx.session_key,
+                    );
+                    ContentBlock::ToolResult {
+                        tool_use_id: tool_call.id.clone(),
+                        content,
+                        is_error: true,
+                    }
+                })
+                .collect();
+            if !closing.is_empty() {
+                messages.push(Message {
+                    role: crate::types::Role::User,
+                    content: MessageContent::Blocks(closing),
+                });
+            }
             break;
         }
 
         let mut tool_results: Vec<ContentBlock> = vec![];
+        // Set when the wall-clock budget runs out mid-loop. We must NOT just
+        // `break`: the assistant message already contains one `tool_use` block
+        // per call, and the Anthropic Messages API rejects any request where a
+        // `tool_use` has no matching `tool_result` ("tool_use ids were found
+        // without tool_result blocks"). Breaking early therefore left the
+        // session permanently un-resumable — every later message 400'd. Instead
+        // we stop doing real work but still synthesise a result for each
+        // remaining call, so the transcript stays valid.
+        let mut timed_out = false;
 
         for tool_call in &response.tool_calls {
-            if wall_clock_timeout_reached(&ctx, started_at) {
-                break;
+            if timed_out || wall_clock_timeout_reached(&ctx, started_at) {
+                timed_out = true;
+                let content =
+                    "Tool call skipped: the turn exceeded its wall-clock budget.".to_string();
+                event_bus::emit_tool_result(
+                    callback,
+                    &tool_call.name,
+                    &tool_call.id,
+                    &serde_json::json!({ "content": content, "isError": true }),
+                    &ctx.session_key,
+                );
+                tool_results.push(ContentBlock::ToolResult {
+                    tool_use_id: tool_call.id.clone(),
+                    content,
+                    is_error: true,
+                });
+                continue;
             }
             ensure_not_aborted(&ctx.abort_flag).await?;
-            event_bus::emit_tool_use(callback, &tool_call.name, &tool_call.id, &tool_call.input, &ctx.session_key);
+
+            // NOTE: `tool_use` is deliberately emitted *after* the disabled and
+            // approval gates (further down), not here. Emitting it up front made
+            // the UI announce "running execute_command…" for calls that were then
+            // refused, and left that phantom entry in the audit trail with no
+            // cancel signal to retract it.
 
             // Check if tool is disabled in permissions DB
             if let Some((_, false)) = db_permissions.get(&tool_call.name) {
@@ -183,15 +257,16 @@ pub async fn run_agent_turn(
             }
 
             if requires_approval(&tool_call.name, skill_tools.as_ref(), &db_permissions) {
-                let require_biometric = db_permissions.get(&tool_call.name)
-                    .map(|(p, _)| p == "always_ask_biometric")
+                let require_biometric = db_permissions
+                    .get(&tool_call.name)
+                    .map(|(p, _)| canonical_permission(p) == "always_ask_biometric")
                     .unwrap_or(false);
                 let approval = wait_for_approval(
                     callback,
                     &tool_call.name,
                     &tool_call.id,
                     &tool_call.input,
-                    &ctx.approval_sender,
+                    &ctx.approval_senders,
                     &ctx.abort_flag,
                     require_biometric,
                     &ctx.session_key,
@@ -218,11 +293,21 @@ pub async fn run_agent_turn(
                 }
             }
 
+            // Gates passed: the tool really is about to run, so announce it now.
+            event_bus::emit_tool_use(
+                callback,
+                &tool_call.name,
+                &tool_call.id,
+                &tool_call.input,
+                &ctx.session_key,
+            );
+
             let (content, is_error) = if tool_runner::is_builtin_tool(&tool_call.name) {
                 match tool_runner::execute_tool(
                     &tool_call.name,
                     &tool_call.input,
                     &ctx.config.workspace_path,
+                    &ctx.config.db_path,
                     ctx.memory_provider.as_ref(),
                 )
                 .await
@@ -264,6 +349,12 @@ pub async fn run_agent_turn(
             role: crate::types::Role::User,
             content: MessageContent::Blocks(tool_results),
         });
+
+        // Every tool_use now has its tool_result, so the transcript is valid and
+        // we can safely stop.
+        if timed_out {
+            break;
+        }
     }
 
     let messages_json = serde_json::to_string(&messages).unwrap_or_else(|_| "[]".to_string());
@@ -347,27 +438,28 @@ async fn wait_for_approval(
     tool_name: &str,
     tool_call_id: &str,
     args: &serde_json::Value,
-    approval_sender: &Arc<Mutex<Option<oneshot::Sender<ApprovalResponse>>>>,
+    approval_senders: &Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalResponse>>>>,
     abort_flag: &Arc<Mutex<bool>>,
     require_biometric: bool,
     session_key: &str,
 ) -> Result<ApprovalResponse, NativeAgentError> {
     let (tx, rx) = oneshot::channel();
     {
-        let mut sender = approval_sender.lock().await;
-        *sender = Some(tx);
+        let mut pending = approval_senders.lock().await;
+        pending.insert(tool_call_id.to_string(), tx);
     }
     event_bus::emit_approval_request(callback, tool_name, tool_call_id, args, require_biometric, session_key);
 
     tokio::select! {
         result = rx => {
+            // Resolved (or the sender was dropped): drop the slot either way.
+            approval_senders.lock().await.remove(tool_call_id);
             result.map_err(|_| NativeAgentError::Agent {
                 msg: format!("Approval channel closed for tool '{}'", tool_call_id),
             })
         }
         _ = wait_until_cancelled(abort_flag) => {
-            let mut sender = approval_sender.lock().await;
-            *sender = None;
+            approval_senders.lock().await.remove(tool_call_id);
             Err(NativeAgentError::Cancelled)
         }
     }
@@ -421,6 +513,23 @@ async fn wait_for_mcp_tool_result(
     }
 }
 
+/// Normalise the permission strings that reach us from JS.
+///
+/// The engine only ever compared against the exact literal `"always_allow"`,
+/// but `definitions.ts` types this field as a free-form `string` and the demo
+/// lab seeds `"allow"` / `"ask"`. `"allow" != "always_allow"`, so every
+/// pre-approved tool still prompted and the allow-list looked broken. Accept
+/// the common spellings and map them onto the canonical policy.
+fn canonical_permission(policy: &str) -> &'static str {
+    match policy.trim().to_ascii_lowercase().as_str() {
+        "always_allow" | "allow" | "allowed" | "auto" | "always" => "always_allow",
+        "always_ask_biometric" | "ask_biometric" | "biometric" => "always_ask_biometric",
+        // Anything unrecognised is treated as "ask": unknown policies must
+        // fail CLOSED, never silently grant access.
+        _ => "always_ask",
+    }
+}
+
 fn requires_approval(
     tool_name: &str,
     skill_tools: Option<&HashSet<String>>,
@@ -435,7 +544,7 @@ fn requires_approval(
 
     // Check DB-stored permission policy (synced from WebView, persists for background)
     if let Some((policy, _)) = db_permissions.get(tool_name) {
-        return policy != "always_allow";
+        return canonical_permission(policy) != "always_allow";
     }
 
     // Fallback for tools not yet in DB: builtin read-only = allow, MCP = ask
@@ -500,8 +609,22 @@ async fn call_with_retry(
                     return Err(NativeAgentError::Llm { msg: e.to_string() });
                 }
 
-                let delay = std::cmp::min(BASE_DELAY_MS * 2u64.pow(attempt), MAX_DELAY_MS);
-                let jitter = delay / 2 + (rand_u64() % (delay / 2 + 1));
+                // Respect a server-supplied cool-off when there is one. The
+                // driver decodes `Retry-After` into the error, but this loop
+                // used to ignore it and always apply its own exponential
+                // backoff — so a "wait 60 s" was retried after ~1 s.
+                let server_delay = match &e {
+                    LlmError::RateLimited { retry_after_ms }
+                    | LlmError::Overloaded { retry_after_ms } => Some(*retry_after_ms),
+                    _ => None,
+                };
+                let backoff = std::cmp::min(BASE_DELAY_MS * 2u64.pow(attempt), MAX_DELAY_MS);
+                let jitter = match server_delay {
+                    // Honour the server's figure, plus a little jitter so
+                    // concurrent clients do not all resume in lockstep.
+                    Some(wait) => wait + (rand_u64() % 1_000),
+                    None => backoff / 2 + (rand_u64() % (backoff / 2 + 1)),
+                };
 
                 event_bus::emit_retry(callback, attempt + 1, jitter, &sk);
 
@@ -525,8 +648,15 @@ fn create_driver(provider: &str, api_key: &str) -> Result<Box<dyn LlmDriver>, Na
             api_key.to_string(),
             Some("https://openrouter.ai/api".to_string()),
         ))),
+        // `openai` was advertised by get_models_json() and default_model() but
+        // had no driver, so choosing it always failed with "Unsupported
+        // provider". Backed by a real Chat Completions implementation now.
+        "openai" => Ok(Box::new(OpenAiDriver::new(api_key.to_string(), None))),
         other => Err(NativeAgentError::Agent {
-            msg: format!("Unsupported provider: {}", other),
+            msg: format!(
+                "Unsupported provider: {}. Supported providers: anthropic, openai, openrouter.",
+                other
+            ),
         }),
     }
 }
@@ -555,14 +685,117 @@ fn rand_u64() -> u64 {
 }
 
 #[cfg(test)]
+mod transcript_invariant_tests {
+    use super::*;
+
+    /// The invariant the Messages API enforces: in a saved transcript every
+    /// `tool_use` id must be answered by a `tool_result` with the same id,
+    /// otherwise the next request 400s and the session is unusable forever.
+    fn unanswered_tool_uses(messages: &[Message]) -> Vec<String> {
+        let mut pending: Vec<String> = Vec::new();
+        for m in messages {
+            if let MessageContent::Blocks(blocks) = &m.content {
+                for b in blocks {
+                    match b {
+                        ContentBlock::ToolUse { id, .. } => pending.push(id.clone()),
+                        ContentBlock::ToolResult { tool_use_id, .. } => {
+                            pending.retain(|p| p != tool_use_id);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        pending
+    }
+
+    fn assistant_with_tool_calls(ids: &[&str]) -> Message {
+        Message::assistant_blocks(
+            ids.iter()
+                .map(|id| ContentBlock::ToolUse {
+                    id: (*id).to_string(),
+                    name: "read_file".into(),
+                    input: serde_json::json!({}),
+                })
+                .collect(),
+        )
+    }
+
+    /// Mirrors what the max_turns branch now builds.
+    fn closing_results(ids: &[&str]) -> Message {
+        Message {
+            role: crate::types::Role::User,
+            content: MessageContent::Blocks(
+                ids.iter()
+                    .map(|id| ContentBlock::ToolResult {
+                        tool_use_id: (*id).to_string(),
+                        content: "Tool not executed: the turn limit was reached".into(),
+                        is_error: true,
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    #[test]
+    fn the_detector_catches_an_orphaned_tool_use() {
+        // This is the shape the OLD max_turns path persisted.
+        let broken = vec![Message::user("hi"), assistant_with_tool_calls(&["toolu_1"])];
+        assert_eq!(
+            unanswered_tool_uses(&broken),
+            vec!["toolu_1".to_string()],
+            "the detector must flag the pre-fix transcript"
+        );
+    }
+
+    #[test]
+    fn closing_every_pending_call_restores_a_valid_transcript() {
+        let fixed = vec![
+            Message::user("hi"),
+            assistant_with_tool_calls(&["toolu_1", "toolu_2"]),
+            closing_results(&["toolu_1", "toolu_2"]),
+        ];
+        assert!(
+            unanswered_tool_uses(&fixed).is_empty(),
+            "every tool_use must be answered"
+        );
+    }
+
+    #[test]
+    fn answering_only_some_calls_is_still_invalid() {
+        // Guards against a partial fix: all pending ids must be closed.
+        let partial = vec![
+            assistant_with_tool_calls(&["toolu_1", "toolu_2"]),
+            closing_results(&["toolu_1"]),
+        ];
+        assert_eq!(unanswered_tool_uses(&partial), vec!["toolu_2".to_string()]);
+    }
+
+    #[test]
+    fn a_multi_turn_transcript_stays_balanced() {
+        let messages = vec![
+            Message::user("hi"),
+            assistant_with_tool_calls(&["a1"]),
+            closing_results(&["a1"]),
+            assistant_with_tool_calls(&["b1", "b2"]),
+            closing_results(&["b2", "b1"]), // order must not matter
+            Message::assistant_blocks(vec![ContentBlock::Text { text: "done".into() }]),
+        ];
+        assert!(unanswered_tool_uses(&messages).is_empty());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
     async fn approval_roundtrip_sends_payload() {
-        let sender = Arc::new(Mutex::new(None));
+        // Senders are now keyed by tool_call_id (a single slot could deliver a
+        // decision to the wrong tool when two approvals were in flight).
+        let senders = Arc::new(Mutex::new(HashMap::new()));
         let abort_flag = Arc::new(Mutex::new(false));
-        let sender_for_task = sender.clone();
+        let senders_for_task = senders.clone();
         let abort_for_task = abort_flag.clone();
 
         let task = tokio::spawn(async move {
@@ -571,7 +804,7 @@ mod tests {
                 "write_file",
                 "toolu_1",
                 &serde_json::json!({"path": "a.txt"}),
-                &sender_for_task,
+                &senders_for_task,
                 &abort_for_task,
                 false,
                 "test-session",
@@ -581,7 +814,7 @@ mod tests {
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        let tx = sender.lock().await.take().unwrap();
+        let tx = senders.lock().await.remove("toolu_1").unwrap();
         tx.send(ApprovalResponse {
             tool_call_id: "toolu_1".to_string(),
             approved: true,
@@ -592,6 +825,60 @@ mod tests {
         let response = task.await.unwrap();
         assert!(response.approved);
         assert_eq!(response.tool_call_id, "toolu_1");
+    }
+
+    /// The bug BUG-10 fixed: with one shared slot, a decision for tool B could
+    /// be handed to tool A. Keyed senders must route each to its own waiter.
+    #[tokio::test]
+    async fn concurrent_approvals_are_routed_by_tool_call_id() {
+        let senders = Arc::new(Mutex::new(HashMap::new()));
+        let abort_flag = Arc::new(Mutex::new(false));
+
+        let mut tasks = Vec::new();
+        for id in ["toolu_a", "toolu_b"] {
+            let s = senders.clone();
+            let a = abort_flag.clone();
+            tasks.push(tokio::spawn(async move {
+                wait_for_approval(
+                    None,
+                    "write_file",
+                    id,
+                    &serde_json::json!({}),
+                    &s,
+                    &a,
+                    false,
+                    "test-session",
+                )
+                .await
+                .unwrap()
+            }));
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        // Answer B first, and deny it, while A is still waiting.
+        let tx_b = senders.lock().await.remove("toolu_b").unwrap();
+        tx_b.send(ApprovalResponse {
+            tool_call_id: "toolu_b".to_string(),
+            approved: false,
+            reason: Some("nope".to_string()),
+        })
+        .unwrap();
+        let tx_a = senders.lock().await.remove("toolu_a").unwrap();
+        tx_a.send(ApprovalResponse {
+            tool_call_id: "toolu_a".to_string(),
+            approved: true,
+            reason: None,
+        })
+        .unwrap();
+
+        let mut results = Vec::new();
+        for t in tasks {
+            results.push(t.await.unwrap());
+        }
+        let a = results.iter().find(|r| r.tool_call_id == "toolu_a").unwrap();
+        let b = results.iter().find(|r| r.tool_call_id == "toolu_b").unwrap();
+        assert!(a.approved, "A was approved and must stay approved");
+        assert!(!b.approved, "B was denied and must stay denied");
     }
 
     #[tokio::test]
@@ -618,12 +905,14 @@ mod tests {
                 description: "WebView only".to_string(),
                 input_schema: serde_json::json!({"type": "object"}),
                 webview_only: true,
+                approval_policy: None,
             },
             ToolDefinition {
                 name: "native_tool".to_string(),
                 description: "Native".to_string(),
                 input_schema: serde_json::json!({"type": "object"}),
                 webview_only: false,
+                approval_policy: None,
             },
         ]));
 
@@ -642,6 +931,7 @@ mod tests {
             description: "MCP memory".to_string(),
             input_schema: serde_json::json!({"type": "object"}),
             webview_only: true,
+            approval_policy: None,
         }]));
 
         let tools = merged_tool_definitions("", None, &mcp_tools, false).await;

@@ -24,6 +24,14 @@ import uniffi.native_agent_ffi.SendMessageParams
 @CapacitorPlugin(name = "NativeAgent")
 class NativeAgentPlugin : Plugin() {
 
+    // @Volatile is required, not cosmetic: `handle` is ASSIGNED from a
+    // Dispatchers.IO coroutine in initialize() and READ from the main thread by
+    // every other bridge method. Without a memory barrier the Java Memory Model
+    // allows a reader thread to keep observing the stale `null` indefinitely,
+    // so a perfectly successful initialize() could still be followed by
+    // "NativeAgent not initialized" — an intermittent failure that is nearly
+    // impossible to reproduce on a fast device but shows up under load.
+    @Volatile
     private var handle: NativeAgentHandle? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -397,12 +405,17 @@ private fun withHandle(call: PluginCall, block: (NativeAgentHandle) -> Unit) {
         val source = call.getString("source") ?: "unknown"
         val startedAt = System.currentTimeMillis()
         NativeWakeCapture.installRecordingNotifier(appContext, h)
-        try {
+        // The recording notifier must stay installed until `capture()` is done.
+        // It used to be swapped out in a `finally` that ran *before* capture, so
+        // any notification the engine posted while the wake was being drained
+        // went to the plain notifier and was never persisted as a surfaced
+        // message. Restore it only once the whole wake window is closed.
+        val captured = try {
             h.handleWake(source)
+            NativeWakeCapture.capture(appContext, h, source, startedAt)
         } finally {
             NativeWakeCapture.restoreDefaultNotifier(appContext, h)
         }
-        val captured = NativeWakeCapture.capture(appContext, h, source, startedAt)
         NativeWakeStore(appContext).recordWake(source, captured.summary, captured.ran, true)
         val ret = JSObject()
         ret.put("ran", captured.ran)

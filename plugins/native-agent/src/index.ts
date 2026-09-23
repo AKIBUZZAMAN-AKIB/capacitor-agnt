@@ -25,5 +25,6 @@ export type {
   SurfacedMessage,
   SurfacedMessagesResult,
   TokenUsage,
+  ToolPermissionPolicy,
 } from './definitions'
 export { NativeAgent } from './plugin'

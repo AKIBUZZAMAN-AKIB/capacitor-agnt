@@ -31,7 +31,13 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), NativeAgentError> {
             model TEXT,
             total_tokens INTEGER DEFAULT 0,
             input_tokens INTEGER DEFAULT 0,
-            output_tokens INTEGER DEFAULT 0
+            output_tokens INTEGER DEFAULT 0,
+            -- Turn budget and tool allow-list the session was created with.
+            -- resumeSession() used to hardcode max_turns = 25 and drop the
+            -- allow-list entirely, so resuming a restricted session silently
+            -- unlocked every tool.
+            max_turns INTEGER,
+            allowed_tools_json TEXT
         );
 
         CREATE TABLE IF NOT EXISTS messages (
@@ -166,10 +172,76 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), NativeAgentError> {
         );
         "
     )?;
+
+    // ── Migrations ─────────────────────────────────────────────────────────
+    // `CREATE TABLE IF NOT EXISTS` never alters an existing table, so columns
+    // added after a release have to be patched in explicitly for databases
+    // created by an older build. Adding a duplicate column is an error, so
+    // check first.
+    add_column_if_missing(conn, "sessions", "max_turns", "INTEGER")?;
+    add_column_if_missing(conn, "sessions", "allowed_tools_json", "TEXT")?;
+
+    Ok(())
+}
+
+/// `ALTER TABLE ... ADD COLUMN`, but only when the column is absent.
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> Result<(), NativeAgentError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+    let exists = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .any(|name| name == column);
+    if !exists {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {} ADD COLUMN {} {};",
+            table, column, decl
+        ))?;
+    }
     Ok(())
 }
 
 // ── Sessions ────────────────────────────────────────────────────────────────
+
+/// Persist the turn budget + tool allow-list a session runs under, so
+/// `resumeSession` can restore the real constraints instead of guessing.
+pub fn save_session_constraints(
+    conn: &Connection,
+    session_key: &str,
+    max_turns: Option<u32>,
+    allowed_tools_json: Option<&str>,
+) -> Result<(), NativeAgentError> {
+    conn.execute(
+        "UPDATE sessions SET max_turns = ?, allowed_tools_json = ? WHERE session_key = ?",
+        params![max_turns.map(|v| v as i64), allowed_tools_json, session_key],
+    )?;
+    Ok(())
+}
+
+/// Read back what `save_session_constraints` stored.
+pub fn load_session_constraints(
+    conn: &Connection,
+    session_key: &str,
+) -> Result<(Option<u32>, Option<String>), NativeAgentError> {
+    let row = conn
+        .query_row(
+            "SELECT max_turns, allowed_tools_json FROM sessions WHERE session_key = ?",
+            params![session_key],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?.map(|v| v.max(1) as u32),
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )
+        .unwrap_or((None, None));
+    Ok(row)
+}
+
 
 pub fn save_session(
     conn: &Connection,
@@ -353,6 +425,18 @@ pub fn queue_pending_event(
             chrono::Utc::now().timestamp_millis()
         ],
     )?;
+
+    // Bound the queue. Background wakes keep appending while the app is closed;
+    // without a cap a device that never foregrounds the app grows this table
+    // forever. Keep the most recent MAX_PENDING_EVENTS and drop the oldest.
+    const MAX_PENDING_EVENTS: i64 = 500;
+    conn.execute(
+        "DELETE FROM pending_events
+         WHERE id NOT IN (
+             SELECT id FROM pending_events ORDER BY created_at DESC, id DESC LIMIT ?1
+         )",
+        params![MAX_PENDING_EVENTS],
+    )?;
     Ok(())
 }
 
@@ -373,7 +457,15 @@ pub fn drain_pending_events(conn: &Connection) -> Result<Vec<PendingEvent>, Nati
         .filter_map(|row| row.ok())
         .collect::<Vec<_>>();
     drop(stmt);
-    conn.execute("DELETE FROM pending_events", [])?;
+
+    // Delete ONLY the rows we just read. A blanket `DELETE FROM
+    // pending_events` also discarded any event a background wake inserted
+    // between the SELECT and the DELETE — those were never delivered to the
+    // callback and were gone for good. Bounding the delete by the highest id
+    // we actually returned closes that window.
+    if let Some(max_id) = events.iter().map(|e| e.id).max() {
+        conn.execute("DELETE FROM pending_events WHERE id <= ?1", params![max_id])?;
+    }
     Ok(events)
 }
 
@@ -1009,65 +1101,238 @@ struct DueCronJob {
     system_prompt: Option<String>,
     allowed_tools: Option<String>,
     delivery_mode: String,
+    delivery_webhook_url: Option<String>,
     delivery_notification_title: Option<String>,
+    session_target: String,
+    /// Per-job quiet hours; `handle_wake` skips the job outside this window.
+    active_hours: Option<ActiveHours>,
+    /// From the job's skill, when it has one.
+    model: Option<String>,
+    provider: Option<String>,
+    max_turns: Option<u32>,
+    timeout_ms: Option<u64>,
+    last_response_hash: Option<String>,
+}
+
+/// A quiet-hours window, stored as "HH:MM" strings plus an optional IANA zone.
+#[derive(Clone, Debug)]
+pub(crate) struct ActiveHours {
+    start_minutes: u32,
+    end_minutes: u32,
+    /// Fixed offset from UTC in minutes. `None` = evaluate in device-local time.
+    tz_offset_minutes: Option<i32>,
+}
+
+fn parse_hhmm(value: &str) -> Option<u32> {
+    let (h, m) = value.split_once(':')?;
+    let h: u32 = h.trim().parse().ok()?;
+    let m: u32 = m.trim().parse().ok()?;
+    if h > 23 || m > 59 {
+        return None;
+    }
+    Some(h * 60 + m)
+}
+
+/// Parse the handful of timezone spellings we can honour without pulling in a
+/// full tz database: "UTC"/"Z", and fixed offsets like "+06:00" / "-0330".
+/// Anything else (a real IANA name such as "Asia/Dhaka") falls back to device
+/// local time, which is the behaviour a phone user actually expects.
+/// Parse a FIXED UTC offset such as `+06:00`, `-0500`, `+6`, `UTC`/`Z`/`GMT`.
+///
+/// IANA zone names (`Asia/Dhaka`, `America/New_York`) are NOT supported: that
+/// needs a tz database (`chrono-tz`), which is not a dependency. Returning
+/// `None` here used to mean "silently use the device's local time", so a job
+/// configured for one zone would run against another with no warning — the
+/// exact silent-failure pattern this audit flagged. Callers now log the
+/// rejection, so a bad value is visible instead of quietly wrong.
+fn parse_tz_offset_minutes(tz: &str) -> Option<i32> {
+    let tz = tz.trim();
+    if tz.eq_ignore_ascii_case("utc") || tz.eq_ignore_ascii_case("z") || tz.eq_ignore_ascii_case("gmt") {
+        return Some(0);
+    }
+    let bytes = tz.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let sign = match bytes[0] {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let rest = &tz[1..];
+    let (h, m) = if let Some((h, m)) = rest.split_once(':') {
+        (h, m)
+    } else if rest.len() == 4 {
+        (&rest[..2], &rest[2..])
+    } else if rest.len() <= 2 {
+        (rest, "0")
+    } else {
+        return None;
+    };
+    let h: i32 = h.trim().parse().ok()?;
+    let m: i32 = m.trim().parse().ok()?;
+    Some(sign * (h * 60 + m))
+}
+
+impl ActiveHours {
+    pub(crate) fn parse(
+        start: Option<String>,
+        end: Option<String>,
+        tz: Option<String>,
+    ) -> Option<ActiveHours> {
+        let start = start?;
+        let end = end?;
+        let start_minutes = parse_hhmm(&start)?;
+        let end_minutes = parse_hhmm(&end)?;
+        // Distinguish "no tz given" (fine — use device local) from "a tz was
+        // given but we cannot honour it" (must not be silently ignored).
+        let tz_offset_minutes = match tz.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(raw) => match parse_tz_offset_minutes(raw) {
+                Some(offset) => Some(offset),
+                None => {
+                    tracing::warn!(
+                        tz = raw,
+                        "active-hours timezone is not a fixed UTC offset (IANA zone names are \
+                         unsupported); falling back to device local time — the window may \
+                         evaluate against the wrong zone. Use a form like +06:00."
+                    );
+                    None
+                }
+            },
+        };
+        Some(ActiveHours {
+            start_minutes,
+            end_minutes,
+            tz_offset_minutes,
+        })
+    }
+
+    /// Is `now_ms` inside the window? Windows that wrap past midnight
+    /// (22:00→06:00) are supported.
+    pub(crate) fn contains(&self, now_ms: i64) -> bool {
+        let minutes_of_day = match self.tz_offset_minutes {
+            Some(offset) => {
+                let shifted = now_ms + (offset as i64) * 60_000;
+                let dt = chrono::DateTime::from_timestamp_millis(shifted).unwrap_or_default();
+                use chrono::Timelike;
+                dt.hour() * 60 + dt.minute()
+            }
+            None => {
+                use chrono::Timelike;
+                let dt = chrono::Local::now();
+                dt.hour() * 60 + dt.minute()
+            }
+        };
+        if self.start_minutes <= self.end_minutes {
+            minutes_of_day >= self.start_minutes && minutes_of_day < self.end_minutes
+        } else {
+            // Wraps midnight.
+            minutes_of_day >= self.start_minutes || minutes_of_day < self.end_minutes
+        }
+    }
+}
+
+/// Resolved scheduler-level gates, read once per wake.
+pub(crate) struct SchedulerGate {
+    pub enabled: bool,
+    pub active_hours: Option<ActiveHours>,
+}
+
+fn load_scheduler_gate(conn: &Connection) -> Result<SchedulerGate, NativeAgentError> {
+    // `get_scheduler_config` seeds the row if missing, so reuse it.
+    let raw = get_scheduler_config(conn)?;
+    let value: serde_json::Value = serde_json::from_str(&raw)?;
+    let enabled = value
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let active_hours = value.get("activeHours").and_then(|ah| {
+        if ah.is_null() {
+            None
+        } else {
+            ActiveHours::parse(
+                ah.get("start").and_then(|v| v.as_str()).map(String::from),
+                ah.get("end").and_then(|v| v.as_str()).map(String::from),
+                ah.get("tz").and_then(|v| v.as_str()).map(String::from),
+            )
+        }
+    });
+    Ok(SchedulerGate {
+        enabled,
+        active_hours,
+    })
 }
 
 fn get_due_jobs(conn: &Connection) -> Result<Vec<DueCronJob>, NativeAgentError> {
     let now = chrono::Utc::now().timestamp_millis();
+    // Single query with a LEFT JOIN: the old code issued two extra SELECTs per
+    // skill-bearing job (N+1) and, worse, swallowed a missing skill row with
+    // `.ok().flatten()` so a job pointing at a deleted skill silently ran with
+    // the default prompt and *unrestricted* tools. We now detect that case and
+    // fail the job closed instead.
     let mut stmt = conn.prepare(
-        "SELECT id, name, prompt, skill_id, delivery_mode, delivery_notification_title
-         FROM cron_jobs
-         WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
-         ORDER BY next_run_at ASC",
+        "SELECT j.id, j.name, j.prompt, j.skill_id, j.delivery_mode, j.delivery_webhook_url,
+                j.delivery_notification_title, j.session_target,
+                j.active_hours_start, j.active_hours_end, j.active_hours_tz,
+                j.last_response_hash,
+                s.id, s.system_prompt, s.allowed_tools, s.model, s.max_turns, s.timeout_ms
+         FROM cron_jobs j
+         LEFT JOIN cron_skills s ON s.id = j.skill_id
+         WHERE j.enabled = 1 AND j.next_run_at IS NOT NULL AND j.next_run_at <= ?
+         ORDER BY j.next_run_at ASC",
     )?;
 
-    let jobs = stmt
+    let rows = stmt
         .query_map(params![now], |row| {
             let skill_id: Option<String> = row.get(3)?;
+            let joined_skill_id: Option<String> = row.get(12)?;
             Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
+                DueCronJob {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    prompt: row.get(2)?,
+                    system_prompt: row.get(13)?,
+                    allowed_tools: row.get(14)?,
+                    delivery_mode: row.get(4)?,
+                    delivery_webhook_url: row.get(5)?,
+                    delivery_notification_title: row.get(6)?,
+                    session_target: row
+                        .get::<_, Option<String>>(7)?
+                        .unwrap_or_else(|| "isolated".to_string()),
+                    active_hours: ActiveHours::parse(row.get(8)?, row.get(9)?, row.get(10)?),
+                    model: row.get(15)?,
+                    provider: None,
+                    max_turns: row.get::<_, Option<i64>>(16)?.map(|v| v.max(1) as u32),
+                    timeout_ms: row.get::<_, Option<i64>>(17)?.map(|v| v.max(1) as u64),
+                    last_response_hash: row.get(11)?,
+                },
                 skill_id,
-                row.get::<_, String>(4)?,
-                row.get::<_, Option<String>>(5)?,
+                joined_skill_id,
             ))
         })?
         .filter_map(|r| r.ok())
         .collect::<Vec<_>>();
 
     let mut result = Vec::new();
-    for (id, name, prompt, skill_id, delivery_mode, delivery_notification_title) in jobs {
-        let (system_prompt, allowed_tools) = if let Some(sid) = &skill_id {
-            let sp: Option<String> = conn
-                .query_row(
-                    "SELECT system_prompt FROM cron_skills WHERE id = ?",
-                    params![sid],
-                    |row| row.get(0),
-                )
-                .ok()
-                .flatten();
-            let at: Option<String> = conn
-                .query_row(
-                    "SELECT allowed_tools FROM cron_skills WHERE id = ?",
-                    params![sid],
-                    |row| row.get(0),
-                )
-                .ok()
-                .flatten();
-            (sp, at)
-        } else {
-            (None, None)
-        };
-        result.push(DueCronJob {
-            id,
-            name,
-            prompt,
-            system_prompt,
-            allowed_tools,
-            delivery_mode,
-            delivery_notification_title,
-        });
+    for (job, skill_id, joined_skill_id) in rows {
+        if skill_id.is_some() && joined_skill_id.is_none() {
+            // The referenced skill was deleted. Running with default settings
+            // would silently widen the job's tool access, so disable it and
+            // record why instead.
+            let msg = format!(
+                "Job references skill '{}' which no longer exists; job disabled.",
+                skill_id.unwrap_or_default()
+            );
+            tracing::warn!(job_id = %job.id, "{}", msg);
+            conn.execute(
+                "UPDATE cron_jobs SET enabled = 0, last_run_status = 'error', last_error = ?, updated_at = ?
+                 WHERE id = ?",
+                params![msg, chrono::Utc::now().timestamp_millis(), job.id],
+            )?;
+            continue;
+        }
+        result.push(job);
     }
 
     Ok(result)
@@ -1092,6 +1357,7 @@ fn insert_cron_run(conn: &Connection, id: &str, source: &str) -> Result<i64, Nat
     Ok(conn.last_insert_rowid())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finalize_cron_run(
     conn: &Connection,
     run_id: i64,
@@ -1100,12 +1366,14 @@ fn finalize_cron_run(
     error: Option<&str>,
     response_text: Option<&str>,
     delivered: bool,
+    was_deduped: bool,
 ) -> Result<(), NativeAgentError> {
     let ended_at = chrono::Utc::now().timestamp_millis();
     conn.execute(
         "UPDATE cron_runs
-         SET ended_at = ?1, status = ?2, duration_ms = ?3, error = ?4, response_text = ?5, delivered = ?6
-         WHERE id = ?7",
+         SET ended_at = ?1, status = ?2, duration_ms = ?3, error = ?4, response_text = ?5,
+             delivered = ?6, was_deduped = ?7
+         WHERE id = ?8",
         params![
             ended_at,
             status,
@@ -1113,11 +1381,15 @@ fn finalize_cron_run(
             error,
             response_text,
             if delivered { 1i64 } else { 0i64 },
+            if was_deduped { 1i64 } else { 0i64 },
             run_id,
         ],
     )?;
     Ok(())
 }
+
+/// Maximum consecutive failures before a job is auto-disabled.
+const MAX_CONSECUTIVE_ERRORS: i64 = 5;
 
 fn mark_job_completed(
     conn: &Connection,
@@ -1128,26 +1400,95 @@ fn mark_job_completed(
     let now = chrono::Utc::now().timestamp_millis();
     let status = if error.is_some() { "error" } else { "ok" };
 
-    // Advance next_run_at for recurring jobs
-    let next: Option<i64> = conn.query_row(
-        "SELECT schedule_kind, schedule_every_ms FROM cron_jobs WHERE id = ?",
+    // Advance next_run_at for recurring jobs.
+    //
+    // Two fixes here:
+    //  * drift — the old code used `now + every_ms`, where `now` is when the run
+    //    *finished*, so every execution's duration was added to the period. A
+    //    hourly job taking 30 s drifted ~12 min/day. We anchor to the schedule
+    //    instead (`schedule_anchor_ms`, which was stored but never read) and
+    //    step forward in whole periods until we are in the future.
+    //  * "at" jobs — they got `next_run_at = NULL` while staying `enabled = 1`,
+    //    leaving a job that looks active in the UI but can never run again.
+    //    One-shot jobs are now disabled explicitly.
+    struct ScheduleRow {
+        kind: Option<String>,
+        every_ms: Option<i64>,
+        anchor_ms: Option<i64>,
+        next_run_at: Option<i64>,
+    }
+    let row = conn.query_row(
+        "SELECT schedule_kind, schedule_every_ms, schedule_anchor_ms, next_run_at
+         FROM cron_jobs WHERE id = ?",
         params![id],
         |row| {
-            let kind: Option<String> = row.get(0)?;
-            let every_ms: Option<i64> = row.get(1)?;
-            Ok(match (kind.as_deref(), every_ms) {
-                (Some("every"), Some(ms)) if ms > 0 => Some(now + ms),
-                _ => None,
+            Ok(ScheduleRow {
+                kind: row.get(0)?,
+                every_ms: row.get(1)?,
+                anchor_ms: row.get(2)?,
+                next_run_at: row.get(3)?,
             })
         },
     )?;
 
-    if error.is_some() {
+    let mut disable_job = false;
+    let next: Option<i64> = match (row.kind.as_deref(), row.every_ms) {
+        (Some("every"), Some(every)) if every > 0 => {
+            // Step from the anchor (or the slot we just served) in whole
+            // periods until strictly after `now` — no accumulated drift.
+            let base = row
+                .anchor_ms
+                .or(row.next_run_at)
+                .unwrap_or(now);
+            let mut next = base;
+            if next <= now {
+                let missed = (now - next) / every + 1;
+                next += missed * every;
+            }
+            Some(next)
+        }
+        (Some("at"), _) => {
+            // One-shot: it has fired, so retire it.
+            disable_job = true;
+            None
+        }
+        _ => None,
+    };
+
+    if let Some(err) = error {
         conn.execute(
             "UPDATE cron_jobs SET last_run_status = ?, last_error = ?, consecutive_errors = consecutive_errors + 1,
              last_duration_ms = ?, next_run_at = ?, updated_at = ? WHERE id = ?",
-            params![status, error, duration_ms, next, now, id],
+            params![status, err, duration_ms, next, now, id],
         )?;
+
+        // Auto-disable a job that keeps failing. Without this a job with, say,
+        // a revoked API key retried on every wake forever, draining the battery
+        // and spamming errors. `consecutive_errors` was incremented but never
+        // read before.
+        let errors: i64 = conn.query_row(
+            "SELECT consecutive_errors FROM cron_jobs WHERE id = ?",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if errors >= MAX_CONSECUTIVE_ERRORS {
+            tracing::warn!(
+                job_id = %id,
+                consecutive_errors = errors,
+                "disabling cron job after repeated failures"
+            );
+            conn.execute(
+                "UPDATE cron_jobs SET enabled = 0, last_error = ?, updated_at = ? WHERE id = ?",
+                params![
+                    format!(
+                        "Disabled automatically after {} consecutive failures. Last error: {}",
+                        errors, err
+                    ),
+                    now,
+                    id
+                ],
+            )?;
+        }
     } else {
         conn.execute(
             "UPDATE cron_jobs SET last_run_status = ?, last_error = NULL, consecutive_errors = 0,
@@ -1155,7 +1496,27 @@ fn mark_job_completed(
             params![status, duration_ms, next, now, id],
         )?;
     }
+
+    if disable_job {
+        conn.execute(
+            "UPDATE cron_jobs SET enabled = 0, updated_at = ? WHERE id = ?",
+            params![now, id],
+        )?;
+    }
     Ok(())
+}
+
+/// Stable hash of a delivered response, used to suppress duplicate
+/// notifications for jobs that keep producing the same answer.
+fn response_hash(text: &str) -> String {
+    // FNV-1a 64: no extra dependency, and collision risk is irrelevant for
+    // "is this the same string as last time".
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in text.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{:016x}", hash)
 }
 
 fn last_response_text(messages: &[crate::types::Message]) -> Option<String> {
@@ -1194,6 +1555,543 @@ fn send_job_notification(
     Some(notifier.send_notification(title, body, data_json))
 }
 
+/// Outcome of delivering one cron result.
+struct DeliveryOutcome {
+    delivered: bool,
+    deduped: bool,
+    detail: Option<String>,
+}
+
+/// POST a cron result to the job's webhook.
+///
+/// `delivery_mode = "webhook"` and `delivery_webhook_url` were stored and
+/// round-tripped through the API, but `handle_wake` only ever handled
+/// `"notification"`, so webhook jobs produced no delivery at all and reported
+/// success anyway.
+async fn send_job_webhook(
+    job: &DueCronJob,
+    source: &str,
+    response_text: &str,
+) -> Result<(), String> {
+    let url = job
+        .delivery_webhook_url
+        .as_deref()
+        .filter(|u| !u.trim().is_empty())
+        .ok_or_else(|| "delivery mode is 'webhook' but no webhook URL is configured".to_string())?;
+
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err(format!("unsupported webhook URL scheme: {}", url));
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let payload = serde_json::json!({
+        "jobId": job.id,
+        "jobName": job.name,
+        "source": source,
+        "response": response_text,
+        "deliveredAt": chrono::Utc::now().timestamp_millis(),
+    });
+
+    let response = client
+        .post(url)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("webhook request failed: {}", e))?;
+
+    let status = response.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(format!("webhook returned HTTP {}", status.as_u16()))
+    }
+}
+
+/// Deliver a finished cron run according to its `delivery_mode`, suppressing a
+/// repeat of the previous response.
+async fn deliver_job_result(
+    conn: &Connection,
+    notifier: Option<&Arc<dyn NativeNotifier>>,
+    job: &DueCronJob,
+    source: &str,
+    response_text: &str,
+) -> DeliveryOutcome {
+    // De-duplication: `last_response_hash` / `last_response_sent_at` existed in
+    // the schema but were never written or compared, so an unchanged answer was
+    // re-notified on every single run.
+    let hash = response_hash(response_text);
+    if !response_text.trim().is_empty() && job.last_response_hash.as_deref() == Some(hash.as_str()) {
+        return DeliveryOutcome {
+            delivered: false,
+            deduped: true,
+            detail: Some("identical to the previous response — delivery suppressed".into()),
+        };
+    }
+
+    let outcome = match job.delivery_mode.as_str() {
+        "notification" => match send_job_notification(notifier, job, source, response_text) {
+            Some(id) => DeliveryOutcome {
+                delivered: true,
+                deduped: false,
+                detail: Some(id),
+            },
+            None => DeliveryOutcome {
+                delivered: false,
+                deduped: false,
+                detail: Some("no notifier registered on this platform".into()),
+            },
+        },
+        "webhook" => match send_job_webhook(job, source, response_text).await {
+            Ok(()) => DeliveryOutcome {
+                delivered: true,
+                deduped: false,
+                detail: None,
+            },
+            Err(err) => DeliveryOutcome {
+                delivered: false,
+                deduped: false,
+                detail: Some(err),
+            },
+        },
+        "silent" | "none" => DeliveryOutcome {
+            delivered: false,
+            deduped: false,
+            detail: Some("delivery mode is silent".into()),
+        },
+        other => DeliveryOutcome {
+            delivered: false,
+            deduped: false,
+            detail: Some(format!("unknown delivery mode '{}'", other)),
+        },
+    };
+
+    if outcome.delivered {
+        let _ = conn.execute(
+            "UPDATE cron_jobs SET last_response_hash = ?, last_response_sent_at = ? WHERE id = ?",
+            params![hash, chrono::Utc::now().timestamp_millis(), job.id],
+        );
+    }
+    outcome
+}
+
+/// Run one cron job end to end. Shared by the due-job loop and the heartbeat.
+#[allow(clippy::too_many_arguments)]
+async fn execute_cron_job(
+    conn: &Connection,
+    config: &InitConfig,
+    job: &DueCronJob,
+    source: &str,
+    effective_callback: &Arc<dyn NativeEventCallback>,
+    notifier: Option<&Arc<dyn NativeNotifier>>,
+    memory_provider: &Option<Arc<dyn MemoryProvider>>,
+    abort_flag: &Arc<Mutex<bool>>,
+    approval_senders: &Arc<Mutex<HashMap<String, oneshot::Sender<crate::types::ApprovalResponse>>>>,
+    steer_rx: &Arc<Mutex<Option<mpsc::UnboundedReceiver<String>>>>,
+    mcp_tools: &Arc<Mutex<Vec<crate::types::ToolDefinition>>>,
+    mcp_pending: &Arc<Mutex<HashMap<String, oneshot::Sender<crate::types::McpToolResult>>>>,
+) -> Result<(), NativeAgentError> {
+    let callback_ref = Some(effective_callback.as_ref());
+
+    crate::event_bus::emit(
+        callback_ref,
+        "cron.job.started",
+        &serde_json::json!({ "jobId": job.id, "source": source }),
+    );
+
+    mark_job_running(conn, &job.id)?;
+    let run_id = insert_cron_run(conn, &job.id, source)?;
+
+    // `session_target` was stored and patchable but never read: every job was
+    // forced into its own "cron-<id>" session, so `sessionTarget: "main"` was a
+    // no-op. Honour it, and carry prior history when the job shares a session.
+    let session_key = match job.session_target.as_str() {
+        "main" => "main".to_string(),
+        "shared" => "cron-shared".to_string(),
+        _ => format!("cron-{}", job.id),
+    };
+    let prior_messages = if job.session_target == "isolated" {
+        None
+    } else {
+        load_session_messages_raw(conn, &session_key)
+            .ok()
+            .filter(|messages| !messages.is_empty())
+    };
+
+    let params = crate::types::SendMessageParams {
+        prompt: job.prompt.clone(),
+        session_key: session_key.clone(),
+        // The skill's model/provider were stored but ignored, so every cron run
+        // used the default (most expensive) model even when the skill asked for
+        // a cheap one.
+        model: job.model.clone(),
+        provider: job.provider.clone(),
+        system_prompt: job.system_prompt.clone().unwrap_or_else(|| {
+            "You are a helpful assistant running a scheduled task.".to_string()
+        }),
+        // Likewise `max_turns` / `timeout_ms` from the skill row.
+        max_turns: Some(job.max_turns.unwrap_or(10)),
+        allowed_tools_json: job.allowed_tools.clone(),
+        prior_messages_json: None,
+    };
+
+    let start_time = chrono::Utc::now().timestamp_millis();
+    let start = std::time::Instant::now();
+    let result = crate::agent_loop::run_agent_turn(crate::agent_loop::AgentLoopContext {
+        config,
+        params: &params,
+        callback: Some(effective_callback.clone()),
+        abort_flag: abort_flag.clone(),
+        is_background: true,
+        wall_clock_timeout_ms: Some(job.timeout_ms.unwrap_or(25_000)),
+        prior_messages,
+        approval_senders: approval_senders.clone(),
+        steer_rx: steer_rx.clone(),
+        mcp_tools: mcp_tools.clone(),
+        mcp_pending: mcp_pending.clone(),
+        memory_provider: memory_provider.clone(),
+        skip_user_echo: false,
+        session_key: params.session_key.clone(),
+    })
+    .await;
+    let duration_ms = start.elapsed().as_millis() as i64;
+
+    match result {
+        Ok(turn_result) => {
+            let _ = save_session(
+                conn,
+                &params.session_key,
+                &format!("cron:{}", job.id),
+                &turn_result.messages_json,
+                Some(&turn_result.model),
+                start_time,
+                Some(&turn_result.usage),
+            );
+            let response_text = last_response_text(&turn_result.messages);
+            let outcome = deliver_job_result(
+                conn,
+                notifier,
+                job,
+                source,
+                response_text.as_deref().unwrap_or(""),
+            )
+            .await;
+
+            if outcome.delivered {
+                crate::event_bus::emit(
+                    callback_ref,
+                    "cron.notification",
+                    &serde_json::json!({
+                        "jobId": job.id,
+                        "deliveryMode": job.delivery_mode,
+                        "notificationId": outcome.detail,
+                    }),
+                );
+            } else if let Some(detail) = outcome.detail.as_deref() {
+                crate::event_bus::emit(
+                    callback_ref,
+                    if outcome.deduped { "cron.deduped" } else { "cron.delivery_skipped" },
+                    &serde_json::json!({
+                        "jobId": job.id,
+                        "deliveryMode": job.delivery_mode,
+                        "reason": detail,
+                    }),
+                );
+            }
+
+            finalize_cron_run(
+                conn,
+                run_id,
+                "ok",
+                duration_ms,
+                None,
+                response_text.as_deref(),
+                outcome.delivered,
+                outcome.deduped,
+            )?;
+            mark_job_completed(conn, &job.id, None, duration_ms)?;
+            crate::event_bus::emit(
+                callback_ref,
+                "cron.job.completed",
+                &serde_json::json!({
+                    "jobId": job.id,
+                    "status": "ok",
+                    "durationMs": duration_ms,
+                    "delivered": outcome.delivered,
+                    "deduped": outcome.deduped,
+                }),
+            );
+        }
+        Err(e) => {
+            let err_msg = e.to_string();
+            // NOTE: deliberately NOT calling save_session with "[]" here. The
+            // old error path overwrote the session row with an empty message
+            // array, destroying the entire conversation history on any
+            // transient failure (a dropped connection was enough).
+            finalize_cron_run(
+                conn,
+                run_id,
+                "error",
+                duration_ms,
+                Some(&err_msg),
+                None,
+                false,
+                false,
+            )?;
+            mark_job_completed(conn, &job.id, Some(&err_msg), duration_ms)?;
+            crate::event_bus::emit(
+                callback_ref,
+                "cron.job.error",
+                &serde_json::json!({ "jobId": job.id, "error": err_msg }),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Build the synthetic job that represents the heartbeat.
+fn heartbeat_due_job(conn: &Connection, now: i64) -> Result<Option<DueCronJob>, NativeAgentError> {
+    let raw = get_heartbeat_config(conn)?;
+    let cfg: serde_json::Value = serde_json::from_str(&raw)?;
+
+    if !cfg.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Ok(None);
+    }
+    let next_run_at = cfg.get("nextRunAt").and_then(|v| v.as_i64());
+    // A heartbeat that has never run is due immediately.
+    if let Some(next) = next_run_at {
+        if next > now {
+            return Ok(None);
+        }
+    }
+
+    let active_hours = cfg.get("activeHours").and_then(|ah| {
+        if ah.is_null() {
+            None
+        } else {
+            ActiveHours::parse(
+                ah.get("start").and_then(|v| v.as_str()).map(String::from),
+                ah.get("end").and_then(|v| v.as_str()).map(String::from),
+                ah.get("tz").and_then(|v| v.as_str()).map(String::from),
+            )
+        }
+    });
+
+    let skill_id = cfg.get("skillId").and_then(|v| v.as_str());
+    let (system_prompt, allowed_tools, model, max_turns, timeout_ms) = match skill_id {
+        Some(sid) => conn
+            .query_row(
+                "SELECT system_prompt, allowed_tools, model, max_turns, timeout_ms
+                 FROM cron_skills WHERE id = ?",
+                params![sid],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<i64>>(3)?.map(|v| v.max(1) as u32),
+                        row.get::<_, Option<i64>>(4)?.map(|v| v.max(1) as u64),
+                    ))
+                },
+            )
+            .unwrap_or((None, None, None, None, None)),
+        None => (None, None, None, None, None),
+    };
+
+    Ok(Some(DueCronJob {
+        id: HEARTBEAT_JOB_ID.to_string(),
+        name: "Heartbeat".to_string(),
+        prompt: cfg
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .filter(|p| !p.trim().is_empty())
+            .unwrap_or(
+                "Run the periodic check described in HEARTBEAT.md. Report only what changed.",
+            )
+            .to_string(),
+        system_prompt,
+        allowed_tools,
+        delivery_mode: "notification".to_string(),
+        delivery_webhook_url: None,
+        delivery_notification_title: Some("Heartbeat".to_string()),
+        session_target: "shared".to_string(),
+        active_hours,
+        model,
+        provider: None,
+        max_turns,
+        timeout_ms,
+        last_response_hash: cfg
+            .get("lastHash")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+    }))
+}
+
+/// Synthetic job id used for heartbeat runs in `cron_runs`.
+const HEARTBEAT_JOB_ID: &str = "__heartbeat__";
+
+/// Run the heartbeat turn and roll its schedule forward.
+#[allow(clippy::too_many_arguments)]
+async fn run_heartbeat(
+    conn: &Connection,
+    config: &InitConfig,
+    job: &DueCronJob,
+    source: &str,
+    effective_callback: &Arc<dyn NativeEventCallback>,
+    notifier: Option<&Arc<dyn NativeNotifier>>,
+    memory_provider: &Option<Arc<dyn MemoryProvider>>,
+    abort_flag: &Arc<Mutex<bool>>,
+    approval_senders: &Arc<Mutex<HashMap<String, oneshot::Sender<crate::types::ApprovalResponse>>>>,
+    steer_rx: &Arc<Mutex<Option<mpsc::UnboundedReceiver<String>>>>,
+    mcp_tools: &Arc<Mutex<Vec<crate::types::ToolDefinition>>>,
+    mcp_pending: &Arc<Mutex<HashMap<String, oneshot::Sender<crate::types::McpToolResult>>>>,
+) -> Result<(), NativeAgentError> {
+    let callback_ref = Some(effective_callback.as_ref());
+    let now = chrono::Utc::now().timestamp_millis();
+
+    crate::event_bus::emit(
+        callback_ref,
+        "heartbeat.started",
+        &serde_json::json!({ "source": source }),
+    );
+
+    let run_id = insert_cron_run(conn, HEARTBEAT_JOB_ID, source)?;
+    let start = std::time::Instant::now();
+    let start_time = now;
+
+    let params = crate::types::SendMessageParams {
+        prompt: job.prompt.clone(),
+        session_key: "heartbeat".to_string(),
+        model: job.model.clone(),
+        provider: None,
+        system_prompt: job
+            .system_prompt
+            .clone()
+            .unwrap_or_else(|| "You are the device heartbeat. Be brief.".to_string()),
+        max_turns: Some(job.max_turns.unwrap_or(5)),
+        allowed_tools_json: job.allowed_tools.clone(),
+        prior_messages_json: None,
+    };
+
+    let prior_messages = load_session_messages_raw(conn, &params.session_key)
+        .ok()
+        .filter(|messages| !messages.is_empty());
+
+    let result = crate::agent_loop::run_agent_turn(crate::agent_loop::AgentLoopContext {
+        config,
+        params: &params,
+        callback: Some(effective_callback.clone()),
+        abort_flag: abort_flag.clone(),
+        is_background: true,
+        wall_clock_timeout_ms: Some(job.timeout_ms.unwrap_or(25_000)),
+        prior_messages,
+        approval_senders: approval_senders.clone(),
+        steer_rx: steer_rx.clone(),
+        mcp_tools: mcp_tools.clone(),
+        mcp_pending: mcp_pending.clone(),
+        memory_provider: memory_provider.clone(),
+        skip_user_echo: true,
+        session_key: params.session_key.clone(),
+    })
+    .await;
+    let duration_ms = start.elapsed().as_millis() as i64;
+
+    // Roll the schedule forward regardless of the outcome, so a failing
+    // heartbeat does not hot-loop on every wake.
+    let every_ms: i64 = conn
+        .query_row(
+            "SELECT every_ms FROM heartbeat_config WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(1_800_000);
+    let next = now + every_ms.max(60_000);
+    conn.execute(
+        "UPDATE heartbeat_config SET next_run_at = ?, updated_at = ? WHERE id = 1",
+        params![next, now],
+    )?;
+
+    match result {
+        Ok(turn_result) => {
+            let _ = save_session(
+                conn,
+                &params.session_key,
+                "heartbeat",
+                &turn_result.messages_json,
+                Some(&turn_result.model),
+                start_time,
+                Some(&turn_result.usage),
+            );
+            let response_text = last_response_text(&turn_result.messages).unwrap_or_default();
+            let hash = response_hash(&response_text);
+            let deduped = !response_text.trim().is_empty()
+                && job.last_response_hash.as_deref() == Some(hash.as_str());
+
+            let delivered = if deduped {
+                false
+            } else {
+                let sent = send_job_notification(notifier, job, source, &response_text).is_some();
+                if sent {
+                    conn.execute(
+                        "UPDATE heartbeat_config SET last_heartbeat_hash = ?, last_heartbeat_sent_at = ?
+                         WHERE id = 1",
+                        params![hash, now],
+                    )?;
+                }
+                sent
+            };
+
+            finalize_cron_run(
+                conn,
+                run_id,
+                "ok",
+                duration_ms,
+                None,
+                Some(&response_text),
+                delivered,
+                deduped,
+            )?;
+            conn.execute(
+                "UPDATE cron_runs SET was_heartbeat_ok = 1 WHERE id = ?",
+                params![run_id],
+            )?;
+            crate::event_bus::emit(
+                callback_ref,
+                "heartbeat.completed",
+                &serde_json::json!({
+                    "durationMs": duration_ms,
+                    "delivered": delivered,
+                    "deduped": deduped,
+                    "nextRunAt": next,
+                }),
+            );
+        }
+        Err(e) => {
+            let err_msg = e.to_string();
+            finalize_cron_run(
+                conn,
+                run_id,
+                "error",
+                duration_ms,
+                Some(&err_msg),
+                None,
+                false,
+                false,
+            )?;
+            crate::event_bus::emit(
+                callback_ref,
+                "heartbeat.error",
+                &serde_json::json!({ "error": err_msg, "nextRunAt": next }),
+            );
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_wake(
     config: &InitConfig,
     source: &str,
@@ -1201,7 +2099,7 @@ pub async fn handle_wake(
     notifier: Option<Arc<dyn NativeNotifier>>,
     memory_provider: Option<Arc<dyn MemoryProvider>>,
     abort_flag: Arc<Mutex<bool>>,
-    approval_sender: Arc<Mutex<Option<oneshot::Sender<crate::types::ApprovalResponse>>>>,
+    approval_senders: Arc<Mutex<HashMap<String, oneshot::Sender<crate::types::ApprovalResponse>>>>,
     steer_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<String>>>>,
     mcp_tools: Arc<Mutex<Vec<crate::types::ToolDefinition>>>,
     mcp_pending: Arc<Mutex<HashMap<String, oneshot::Sender<crate::types::McpToolResult>>>>,
@@ -1215,15 +2113,73 @@ pub async fn handle_wake(
     let conn = open_db(&config.db_path)?;
     ensure_schema(&conn)?;
 
-    let due_jobs = get_due_jobs(&conn)?;
+    let now = chrono::Utc::now().timestamp_millis();
 
-    if due_jobs.is_empty() {
+    // ── Gate 1: the scheduler master switch ────────────────────────────────
+    // `scheduler_config.enabled` was written and read back by the API but never
+    // consulted here, so "pause all scheduling" did nothing at all.
+    let gate = load_scheduler_gate(&conn)?;
+    if !gate.enabled {
+        crate::event_bus::emit(
+            callback_ref,
+            "wake.skipped",
+            &serde_json::json!({ "source": source, "reason": "scheduler disabled" }),
+        );
+        return Ok(());
+    }
+
+    // ── Gate 2: global quiet hours ─────────────────────────────────────────
+    if let Some(hours) = gate.active_hours.as_ref() {
+        if !hours.contains(now) {
+            crate::event_bus::emit(
+                callback_ref,
+                "wake.skipped",
+                &serde_json::json!({
+                    "source": source,
+                    "reason": "outside global active hours",
+                }),
+            );
+            return Ok(());
+        }
+    }
+
+    let all_due = get_due_jobs(&conn)?;
+
+    // ── Gate 3: per-job quiet hours ────────────────────────────────────────
+    let mut due_jobs = Vec::new();
+    let mut skipped = 0usize;
+    for job in all_due {
+        if let Some(hours) = job.active_hours.as_ref() {
+            if !hours.contains(now) {
+                skipped += 1;
+                crate::event_bus::emit(
+                    callback_ref,
+                    "cron.job.skipped",
+                    &serde_json::json!({
+                        "jobId": job.id,
+                        "reason": "outside job active hours",
+                    }),
+                );
+                continue;
+            }
+        }
+        due_jobs.push(job);
+    }
+
+    // The heartbeat is a first-class schedule that `handle_wake` simply never
+    // ran: `heartbeat_config` was pure storage.
+    let heartbeat = heartbeat_due_job(&conn, now)?.filter(|hb| {
+        hb.active_hours
+            .as_ref()
+            .map(|hours| hours.contains(now))
+            .unwrap_or(true)
+    });
+
+    if due_jobs.is_empty() && heartbeat.is_none() {
         crate::event_bus::emit(
             callback_ref,
             "wake.no_jobs",
-            &serde_json::json!({
-                "source": source,
-            }),
+            &serde_json::json!({ "source": source, "skipped": skipped }),
         );
         return Ok(());
     }
@@ -1234,6 +2190,8 @@ pub async fn handle_wake(
         &serde_json::json!({
             "source": source,
             "count": due_jobs.len(),
+            "skipped": skipped,
+            "heartbeat": heartbeat.is_some(),
         }),
     );
 
@@ -1241,135 +2199,42 @@ pub async fn handle_wake(
         if *abort_flag.lock().await {
             return Err(NativeAgentError::Cancelled);
         }
-
-        crate::event_bus::emit(
-            callback_ref,
-            "cron.job.started",
-            &serde_json::json!({
-                "jobId": job.id,
-            }),
-        );
-
-        mark_job_running(&conn, &job.id)?;
-        let run_id = insert_cron_run(&conn, &job.id, source)?;
-
-        let params = crate::types::SendMessageParams {
-            prompt: job.prompt.clone(),
-            session_key: format!("cron-{}", job.id),
-            model: None,
-            provider: None,
-            system_prompt: job.system_prompt.clone().unwrap_or_else(|| {
-                "You are a helpful assistant running a scheduled task.".to_string()
-            }),
-            max_turns: Some(10),
-            allowed_tools_json: job.allowed_tools.clone(),
-            prior_messages_json: None,
-        };
-
-        let start_time = chrono::Utc::now().timestamp_millis();
-        let start = std::time::Instant::now();
-        let result = crate::agent_loop::run_agent_turn(crate::agent_loop::AgentLoopContext {
+        execute_cron_job(
+            &conn,
             config,
-            params: &params,
-            callback: Some(effective_callback.clone()),
-            abort_flag: abort_flag.clone(),
-            is_background: true,
-            wall_clock_timeout_ms: Some(25_000),
-            prior_messages: None,
-            approval_sender: approval_sender.clone(),
-            steer_rx: steer_rx.clone(),
-            mcp_tools: mcp_tools.clone(),
-            mcp_pending: mcp_pending.clone(),
-            memory_provider: memory_provider.clone(),
-            skip_user_echo: false,
-            session_key: params.session_key.clone(),
-        })
-        .await;
-        let duration_ms = start.elapsed().as_millis() as i64;
+            job,
+            source,
+            &effective_callback,
+            notifier.as_ref(),
+            &memory_provider,
+            &abort_flag,
+            &approval_senders,
+            &steer_rx,
+            &mcp_tools,
+            &mcp_pending,
+        )
+        .await?;
+    }
 
-        match result {
-            Ok(turn_result) => {
-                let _ = save_session(
-                    &conn,
-                    &params.session_key,
-                    &format!("cron:{}", job.id),
-                    &turn_result.messages_json,
-                    Some(&turn_result.model),
-                    start_time,
-                    Some(&turn_result.usage),
-                );
-                let response_text = last_response_text(&turn_result.messages);
-                let notification_result = if job.delivery_mode == "notification" {
-                    send_job_notification(
-                        notifier.as_ref(),
-                        job,
-                        source,
-                        response_text.as_deref().unwrap_or(""),
-                    )
-                } else {
-                    None
-                };
-                if let Some(notification_id) = notification_result.as_ref() {
-                    crate::event_bus::emit(
-                        callback_ref,
-                        "cron.notification",
-                        &serde_json::json!({
-                            "jobId": job.id,
-                            "notificationId": notification_id,
-                        }),
-                    );
-                }
-                finalize_cron_run(
-                    &conn,
-                    run_id,
-                    "ok",
-                    duration_ms,
-                    None,
-                    response_text.as_deref(),
-                    notification_result.is_some(),
-                )?;
-                mark_job_completed(&conn, &job.id, None, duration_ms)?;
-                crate::event_bus::emit(
-                    callback_ref,
-                    "cron.job.completed",
-                    &serde_json::json!({
-                        "jobId": job.id,
-                        "status": "ok",
-                        "durationMs": duration_ms,
-                    }),
-                );
-            }
-            Err(e) => {
-                let err_msg = e.to_string();
-                let _ = save_session(
-                    &conn,
-                    &params.session_key,
-                    &format!("cron:{}", job.id),
-                    "[]",
-                    None,
-                    start_time,
-                    None,
-                );
-                finalize_cron_run(
-                    &conn,
-                    run_id,
-                    "error",
-                    duration_ms,
-                    Some(&err_msg),
-                    None,
-                    false,
-                )?;
-                mark_job_completed(&conn, &job.id, Some(&err_msg), duration_ms)?;
-                crate::event_bus::emit(
-                    callback_ref,
-                    "cron.job.error",
-                    &serde_json::json!({
-                        "jobId": job.id,
-                        "error": err_msg,
-                    }),
-                );
-            }
+    if let Some(hb) = heartbeat.as_ref() {
+        if *abort_flag.lock().await {
+            return Err(NativeAgentError::Cancelled);
         }
+        run_heartbeat(
+            &conn,
+            config,
+            hb,
+            source,
+            &effective_callback,
+            notifier.as_ref(),
+            &memory_provider,
+            &abort_flag,
+            &approval_senders,
+            &steer_rx,
+            &mcp_tools,
+            &mcp_pending,
+        )
+        .await?;
     }
 
     Ok(())
@@ -1487,4 +2352,423 @@ fn active_hours_json(
         "end": end,
         "tz": tz,
     })
+}
+
+#[cfg(test)]
+mod pending_event_tests {
+    use super::*;
+
+    fn tmp() -> String {
+        std::env::temp_dir()
+            .join(format!(
+                "nk-pe-{}-{}.db",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn db() -> (String, Connection) {
+        let path = tmp();
+        let conn = open_db(&path).unwrap();
+        ensure_schema(&conn).unwrap();
+        (path, conn)
+    }
+
+    #[test]
+    fn events_drain_in_order_and_only_once() {
+        let (path, conn) = db();
+        for i in 0..3 {
+            queue_pending_event(&conn, "wake.jobs_found", &format!("{{\"n\":{i}}}")).unwrap();
+        }
+        let drained = drain_pending_events(&conn).unwrap();
+        assert_eq!(drained.len(), 3);
+        assert_eq!(drained[0].payload_json, r#"{"n":0}"#, "oldest first");
+        assert_eq!(drained[2].payload_json, r#"{"n":2}"#);
+        // A second drain must return nothing.
+        assert!(drain_pending_events(&conn).unwrap().is_empty());
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The race the bounded DELETE closes: a background wake inserting an event
+    /// after the SELECT must NOT be wiped by the drain.
+    #[test]
+    fn an_event_arriving_during_a_drain_is_not_lost() {
+        let (path, conn) = db();
+        queue_pending_event(&conn, "cron.job.completed", "{\"a\":1}").unwrap();
+
+        // Simulate the drain's read half.
+        let read: Vec<i64> = {
+            let mut st = conn
+                .prepare("SELECT id FROM pending_events ORDER BY created_at ASC, id ASC")
+                .unwrap();
+            let v = st
+                .query_map([], |r| r.get::<_, i64>(0))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect();
+            v
+        };
+        // A wake fires here, between SELECT and DELETE.
+        queue_pending_event(&conn, "cron.job.completed", "{\"b\":2}").unwrap();
+
+        // The bounded delete only removes what was read.
+        let max_id = read.iter().copied().max().unwrap();
+        conn.execute("DELETE FROM pending_events WHERE id <= ?1", params![max_id])
+            .unwrap();
+
+        let left = drain_pending_events(&conn).unwrap();
+        assert_eq!(left.len(), 1, "the late event must survive");
+        assert_eq!(left[0].payload_json, r#"{"b":2}"#);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// An app that never foregrounds must not grow the table without bound.
+    #[test]
+    fn the_queue_is_capped_and_keeps_the_newest() {
+        let (path, conn) = db();
+        for i in 0..520 {
+            queue_pending_event(&conn, "wake.no_jobs", &format!("{{\"i\":{i}}}")).unwrap();
+        }
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pending_events", [], |r| r.get(0))
+            .unwrap();
+        assert!(count <= 500, "queue grew to {count}");
+
+        let drained = drain_pending_events(&conn).unwrap();
+        // The newest event must be retained; the oldest dropped.
+        let last = drained.last().unwrap();
+        assert_eq!(last.payload_json, r#"{"i":519}"#);
+        assert!(
+            !drained.iter().any(|e| e.payload_json == r#"{"i":0}"#),
+            "the oldest events should have been evicted"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn draining_an_empty_queue_is_a_no_op() {
+        let (path, conn) = db();
+        assert!(drain_pending_events(&conn).unwrap().is_empty());
+        std::fs::remove_file(&path).ok();
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    fn tmp_db() -> String {
+        std::env::temp_dir()
+            .join(format!(
+                "nk-mig-{}-{}.db",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// `CREATE TABLE IF NOT EXISTS` does NOT add columns to a table that
+    /// already exists. An app upgrading from the published version has a
+    /// `sessions` table without `max_turns`/`allowed_tools_json`, so the
+    /// migration must add them or every session query fails with
+    /// "no such column" on real user devices.
+    #[test]
+    fn upgrading_an_existing_database_adds_the_new_session_columns() {
+        let path = tmp_db();
+        {
+            // Exactly the pre-upgrade `sessions` table (v0.5.2 shape).
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE sessions (
+                    session_key TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL DEFAULT 'main',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    model TEXT,
+                    total_tokens INTEGER DEFAULT 0,
+                    input_tokens INTEGER DEFAULT 0,
+                    output_tokens INTEGER DEFAULT 0
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (session_key, created_at, updated_at) VALUES ('old', 1, 1)",
+                [],
+            )
+            .unwrap();
+        }
+
+        // The upgrade path.
+        let conn = open_db(&path).unwrap();
+        ensure_schema(&conn).unwrap();
+
+        let mut stmt = conn.prepare("PRAGMA table_info(sessions)").unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(names.contains(&"max_turns".to_string()), "max_turns missing: {names:?}");
+        assert!(
+            names.contains(&"allowed_tools_json".to_string()),
+            "allowed_tools_json missing: {names:?}"
+        );
+
+        // The pre-existing row must survive, and the new columns must be usable.
+        save_session_constraints(&conn, "old", Some(7), Some(r#"["read_file"]"#)).unwrap();
+        let (turns, tools): (Option<u32>, Option<String>) = conn
+            .query_row(
+                "SELECT max_turns, allowed_tools_json FROM sessions WHERE session_key='old'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(turns, Some(7));
+        assert_eq!(tools.as_deref(), Some(r#"["read_file"]"#));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Running the migration repeatedly must be a no-op — a duplicate
+    /// `ALTER TABLE ADD COLUMN` is a hard error that would brick every launch.
+    #[test]
+    fn the_migration_is_idempotent() {
+        let path = tmp_db();
+        let conn = open_db(&path).unwrap();
+        for i in 0..5 {
+            ensure_schema(&conn).unwrap_or_else(|e| panic!("run {i} failed: {e:?}"));
+        }
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A fresh install and an upgraded install must end up identical.
+    #[test]
+    fn a_fresh_database_matches_an_upgraded_one() {
+        let fresh_path = tmp_db();
+        let fresh = open_db(&fresh_path).unwrap();
+        ensure_schema(&fresh).unwrap();
+
+        let upgraded_path = tmp_db();
+        {
+            let c = Connection::open(&upgraded_path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE sessions (
+                    session_key TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL DEFAULT 'main',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    model TEXT,
+                    total_tokens INTEGER DEFAULT 0,
+                    input_tokens INTEGER DEFAULT 0,
+                    output_tokens INTEGER DEFAULT 0
+                );",
+            )
+            .unwrap();
+        }
+        let upgraded = open_db(&upgraded_path).unwrap();
+        ensure_schema(&upgraded).unwrap();
+
+        let names = |c: &Connection| -> Vec<String> {
+            let mut st = c.prepare("PRAGMA table_info(sessions)").unwrap();
+            let mut v: Vec<String> = st
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(names(&fresh), names(&upgraded));
+
+        std::fs::remove_file(&fresh_path).ok();
+        std::fs::remove_file(&upgraded_path).ok();
+    }
+
+    /// WAL + busy_timeout must actually be applied: without them concurrent
+    /// access from the WebView and the agent returns SQLITE_BUSY.
+    #[test]
+    fn the_connection_uses_wal_and_a_busy_timeout() {
+        let path = tmp_db();
+        let conn = open_db(&path).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+        let timeout: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert!(timeout >= 5000, "busy_timeout was {timeout}");
+        std::fs::remove_file(&path).ok();
+    }
+}
+
+#[cfg(test)]
+mod scheduler_gate_tests {
+    use super::*;
+
+    /// The exact arithmetic `mark_job_completed` uses to advance a recurring
+    /// job, extracted so the drift property can be asserted directly.
+    fn next_slot(base: i64, every: i64, now: i64) -> i64 {
+        let mut next = base;
+        if next <= now {
+            let missed = (now - next) / every + 1;
+            next += missed * every;
+        }
+        next
+    }
+
+    #[test]
+    fn a_recurring_job_does_not_drift_when_runs_take_time() {
+        let every = 3_600_000; // hourly
+        let anchor = 0;
+        // Each run finishes 30 s late. Anchored scheduling must keep landing on
+        // exact hour boundaries; `now + every` would add 30 s every single time
+        // (~12 min/day).
+        let mut slot = anchor;
+        for hour in 1..=24 {
+            let finished = slot + 30_000;
+            slot = next_slot(anchor, every, finished);
+            assert_eq!(
+                slot,
+                hour * every,
+                "hour {hour} must stay on the exact boundary"
+            );
+        }
+        assert_eq!(slot, 24 * every, "no drift after a full day");
+    }
+
+    #[test]
+    fn a_long_outage_skips_missed_slots_instead_of_replaying_them() {
+        let every = 3_600_000;
+        let anchor = 0;
+        // Device asleep for ~3.5 h: schedule the NEXT future slot, not a backlog.
+        let now = 3 * every + 1_800_000;
+        let slot = next_slot(anchor, every, now);
+        assert_eq!(slot, 4 * every);
+        assert!(slot > now, "must be strictly in the future");
+    }
+
+    #[test]
+    fn the_next_slot_is_always_strictly_in_the_future() {
+        let every = 900_000; // 15 min
+        for offset in [0, 1, every - 1, every, every + 1, 10 * every] {
+            let slot = next_slot(0, every, offset);
+            assert!(slot > offset, "slot {slot} must be after now {offset}");
+            assert_eq!(slot % every, 0, "must stay aligned to the anchor grid");
+        }
+    }
+
+    #[test]
+    fn identical_text_hashes_identically_and_different_text_does_not() {
+        // Drives the cron dedup: same answer twice must not notify twice.
+        assert_eq!(response_hash("no changes"), response_hash("no changes"));
+        assert_ne!(response_hash("no changes"), response_hash("no changes."));
+        assert_ne!(response_hash(""), response_hash(" "));
+        // Known FNV-1a 64 vector for the empty string (the offset basis).
+        assert_eq!(response_hash(""), "cbf29ce484222325");
+        // Bangla text must hash stably too (bytes, not chars).
+        assert_eq!(response_hash("আমি"), response_hash("আমি"));
+        assert_eq!(response_hash("আমি").len(), 16);
+    }
+
+    /// Midnight UTC on 2026-01-01, as epoch millis.
+    const MIDNIGHT_UTC: i64 = 1_767_225_600_000;
+
+    fn at_utc(hour: i64, minute: i64) -> i64 {
+        MIDNIGHT_UTC + hour * 3_600_000 + minute * 60_000
+    }
+
+    #[test]
+    fn fixed_utc_offsets_parse_in_every_accepted_spelling() {
+        assert_eq!(parse_tz_offset_minutes("+06:00"), Some(360));
+        assert_eq!(parse_tz_offset_minutes("+0600"), Some(360));
+        assert_eq!(parse_tz_offset_minutes("+6"), Some(360));
+        assert_eq!(parse_tz_offset_minutes("-05:30"), Some(-330));
+        assert_eq!(parse_tz_offset_minutes("-0530"), Some(-330));
+        for z in ["UTC", "utc", "Z", "gmt"] {
+            assert_eq!(parse_tz_offset_minutes(z), Some(0), "{z}");
+        }
+        // IANA names are deliberately unsupported (no tz database linked).
+        assert_eq!(parse_tz_offset_minutes("Asia/Dhaka"), None);
+        assert_eq!(parse_tz_offset_minutes("garbage"), None);
+        assert_eq!(parse_tz_offset_minutes(""), None);
+    }
+
+    #[test]
+    fn a_normal_window_includes_its_start_and_excludes_its_end() {
+        // 09:00–17:00 in UTC+00.
+        let ah = ActiveHours::parse(
+            Some("09:00".into()),
+            Some("17:00".into()),
+            Some("UTC".into()),
+        )
+        .unwrap();
+
+        assert!(!ah.contains(at_utc(8, 59)));
+        assert!(ah.contains(at_utc(9, 0)), "start is inclusive");
+        assert!(ah.contains(at_utc(16, 59)));
+        assert!(!ah.contains(at_utc(17, 0)), "end is exclusive");
+    }
+
+    #[test]
+    fn a_window_that_wraps_midnight_is_handled() {
+        // 22:00–06:00 in UTC+00 — the case a naive start<=now<end test breaks on.
+        let ah = ActiveHours::parse(
+            Some("22:00".into()),
+            Some("06:00".into()),
+            Some("UTC".into()),
+        )
+        .unwrap();
+
+        assert!(ah.contains(at_utc(23, 0)), "before midnight");
+        assert!(ah.contains(at_utc(0, 30)), "after midnight");
+        assert!(ah.contains(at_utc(5, 59)));
+        assert!(!ah.contains(at_utc(6, 0)), "end is exclusive");
+        assert!(!ah.contains(at_utc(12, 0)), "midday is outside");
+        assert!(ah.contains(at_utc(22, 0)), "start is inclusive");
+    }
+
+    #[test]
+    fn the_offset_actually_shifts_the_window() {
+        // 09:00–17:00 at UTC+06 (Dhaka) == 03:00–11:00 UTC.
+        let ah = ActiveHours::parse(
+            Some("09:00".into()),
+            Some("17:00".into()),
+            Some("+06:00".into()),
+        )
+        .unwrap();
+
+        assert!(ah.contains(at_utc(3, 0)), "09:00 local");
+        assert!(ah.contains(at_utc(10, 59)), "16:59 local");
+        assert!(!ah.contains(at_utc(11, 0)), "17:00 local is excluded");
+        assert!(!ah.contains(at_utc(2, 59)), "08:59 local");
+        // Same clock times with no offset must behave differently, proving the
+        // offset is applied rather than ignored.
+        let utc = ActiveHours::parse(
+            Some("09:00".into()),
+            Some("17:00".into()),
+            Some("UTC".into()),
+        )
+        .unwrap();
+        assert!(!utc.contains(at_utc(3, 0)));
+    }
+
+    #[test]
+    fn a_window_needs_both_ends_and_valid_times() {
+        assert!(ActiveHours::parse(Some("09:00".into()), None, None).is_none());
+        assert!(ActiveHours::parse(None, Some("17:00".into()), None).is_none());
+        assert!(
+            ActiveHours::parse(Some("nope".into()), Some("17:00".into()), None).is_none(),
+            "an unparseable time must not silently become a window"
+        );
+    }
 }
