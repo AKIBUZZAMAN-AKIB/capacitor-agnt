@@ -1020,4 +1020,56 @@ Swift-এ হুবহু একই সমস্যা (`DispatchQueue.global` �
 
 ---
 
+# ১৩. পঞ্চম রাউন্ড — persistence durability
+
+বাকি অদেখা অংশগুলো (`types.rs`, `config_store.rs`, `bridge/app-browser.ts`) যাচাই করা হলো। **৩টি নতুন বাগ**, তিনটিই একই মূল কারণে।
+
+### ১৩.১ 🔴 `edit_file` ব্যবহারকারীর ফাইল মুছে ফেলতে পারত (নতুন, গুরুতর)
+
+`std::fs::write` আগে ফাইল **truncate** করে, তারপর লেখে। `edit_file` সবে ফাইলটা পড়েছে — এই দুইয়ের মাঝে প্রসেস মারা গেলে (ফোনে OOM-kill, ব্যাটারি শেষ, force-quit) ব্যবহারকারীর সোর্স ফাইল **খালি** থেকে যেত, আর আসল কনটেন্ট চিরতরে হারাত।
+
+`write_file` একই ঝুঁকিতে ছিল।
+
+**ফিক্স:** `write_file_atomic()` — **একই ডিরেক্টরিতে** temp ফাইল (cross-filesystem rename atomic নয়) লিখে তারপর rename। গন্তব্য ফাইল সবসময় হয় পুরোনো, নয় সম্পূর্ণ নতুন — কখনো অর্ধেক নয়।
+
+### ১৩.২ Config corrupt হলে সব background job স্থায়ীভাবে বন্ধ
+
+`persist_config`-ও non-atomic ছিল। এই ফাইলটাই `handle_wake` পড়ে background-এ engine পুনর্গঠন করতে — তাই truncate হলে **প্রতিটি cron job ব্যর্থ** হতো, আর সেই পথে কোনো UI নেই যে error দেখাবে বা মেরামত করবে।
+
+### ১৩.৩ প্যাটার্নটি স্বীকার করা
+
+তিনটিই একই কারণ: **গুরুত্বপূর্ণ state-এর non-atomic write**। আগের রাউন্ডে `auth.rs`-এ এটি ঠিক করেছিলাম কিন্তু **একই প্যাটার্ন অন্য কোথায় আছে খুঁজিনি**। এবার `grep` দিয়ে সব `fs::write` স্ক্যান করে বাকিগুলো পাওয়া গেল। (`workspace.rs:241` ইচ্ছাকৃতভাবে বাদ — সেটি `write_if_missing`, শুধু নতুন ফাইল তৈরি করে, কিছু নষ্ট করার সুযোগ নেই।)
+
+### ১৩.৪ যা যাচাই করে **সঠিক** পাওয়া গেছে
+
+| যাচাই | ফল |
+|---|---|
+| সব `ContentBlock` variant JSON round-trip | ✅ কোনোটিই হারায় না |
+| `MessageContent` untagged enum সংঘর্ষ | ✅ Blocks কখনো Text হিসেবে ভুল পড়া হয় না |
+| `Role` lowercase serde (DB এই বানানেই match করে) | ✅ সঠিক |
+| App Browser iframe sandbox | ✅ `allow-scripts` only, `allow-same-origin` **নেই** |
+| `postMessage(..., '*')` | ✅ বাগ নয় — opaque origin-এ wildcard বাধ্যতামূলক; token-ভিত্তিক যাচাই আছে |
+| RPC listener | ✅ channel + token + `event.source` তিনটিই যাচাই করে |
+| CSP injection | ✅ আক্রমণকারীর `base`/CSP ট্যাগ সরিয়ে নিজেরটা বসায় |
+| Session token | ✅ `crypto.randomUUID()` |
+| `innerHTML` / `eval` | ✅ একটিও নেই |
+
+### ১৩.৫ টেস্ট: ৬৭ → ৭৬
+
+- Atomic write (৫): কনটেন্ট, সম্পূর্ণ overwrite, temp leak নেই, temp sibling কিনা, ব্যর্থতায় মূল ফাইল অক্ষত
+- Serde round-trip (৪): সব block variant, untagged সংঘর্ষ, পূর্ণ assistant turn, Role বানান
+
+### চূড়ান্ত অবস্থা
+
+| পরীক্ষা | ফল |
+|---|---|
+| `cargo check` | ✅ ০ warning |
+| `cargo test --lib` | ✅ **৭৬/৭৬** |
+| Kotlin / header / ৫৬ checksum | ✅ সব অভিন্ন |
+| `tsc` / `vitest` | ✅ clean / ১৬৭ |
+
+**মোট: ৬০টি বাগ চিহ্নিত, ৫৮টি ঠিক করা।**
+
+---
+
 *রিপোর্ট শেষ।*

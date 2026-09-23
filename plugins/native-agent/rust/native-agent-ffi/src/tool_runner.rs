@@ -338,6 +338,33 @@ fn tool_read_file(
     }
 }
 
+/// Write a file atomically: temp file in the same directory, then rename.
+///
+/// `std::fs::write` TRUNCATES the destination before writing. For `edit_file`
+/// that is genuinely dangerous: the tool has just read the file, and if the
+/// process dies between the truncate and the write — OOM-killed on a phone,
+/// battery dies, user force-quits — the user's source file is left EMPTY and
+/// the original content is gone. A rename within the same directory is atomic
+/// on every platform we ship, so the destination is always either the old file
+/// or the complete new one.
+fn write_file_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    // The temp file MUST be in the same directory: a rename across filesystems
+    // is not atomic (and fails outright on some devices).
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string());
+    let tmp = parent.join(format!(".{}.tmp", file_name));
+
+    std::fs::write(&tmp, content)?;
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
+}
+
 fn tool_write_file(
     args: &serde_json::Value,
     workspace: &str,
@@ -349,7 +376,7 @@ fn tool_write_file(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    match std::fs::write(&path, content) {
+    match write_file_atomic(&path, content) {
         Ok(_) => ok_json(serde_json::json!({ "success": true, "path": rel })),
         Err(e) => ok_json(serde_json::json!({ "error": format!("Failed to write file: {}", e) })),
     }
@@ -378,7 +405,9 @@ fn tool_edit_file(
             new_text,
             &content[idx + old_text.len()..]
         );
-        std::fs::write(&path, new_content)?;
+        // Atomic: edit_file has already read the file, so a truncating write
+        // that dies half-way would destroy the only copy of the content.
+        write_file_atomic(&path, &new_content)?;
         ok_json(serde_json::json!({ "success": true, "path": rel, "replacements": 1 }))
     } else {
         ok_json(
@@ -1584,6 +1613,86 @@ mod tests {
         assert_eq!(result["success"], true);
         assert_eq!(result["text"], "hello");
         assert_eq!(result["metadata"], r#"{"category":"fact"}"#);
+    }
+}
+
+#[cfg(test)]
+mod atomic_write_tests {
+    use super::*;
+
+    fn dir() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "nk-atomic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn content_is_written_and_readable() {
+        let d = dir();
+        let f = d.join("note.txt");
+        write_file_atomic(&f, "hello আমি 🇧🇩").unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "hello আমি 🇧🇩");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn overwriting_replaces_content_completely() {
+        let d = dir();
+        let f = d.join("note.txt");
+        write_file_atomic(&f, "a much longer original body").unwrap();
+        write_file_atomic(&f, "short").unwrap();
+        // A partial overwrite would leave trailing bytes of the old content.
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "short");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn no_temp_file_is_left_behind() {
+        let d = dir();
+        write_file_atomic(&d.join("note.txt"), "x").unwrap();
+        let leftovers: Vec<String> = std::fs::read_dir(&d)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "left temp files: {leftovers:?}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The temp file must live in the SAME directory, otherwise the rename
+    /// crosses a filesystem boundary and stops being atomic.
+    #[test]
+    fn the_temp_file_is_a_sibling_of_the_target() {
+        let d = dir();
+        let sub = d.join("nested");
+        std::fs::create_dir_all(&sub).unwrap();
+        let f = sub.join("deep.txt");
+        write_file_atomic(&f, "content").unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "content");
+        // Nothing stray in the parent.
+        assert!(!d.join(".deep.txt.tmp").exists());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_failure_reports_an_error_instead_of_destroying_the_original() {
+        let d = dir();
+        let f = d.join("exists.txt");
+        write_file_atomic(&f, "original").unwrap();
+        // Target a path whose parent does not exist: the write must fail and
+        // the untouched file must still hold its original content.
+        let bad = d.join("missing-dir").join("x.txt");
+        assert!(write_file_atomic(&bad, "new").is_err());
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "original");
+        std::fs::remove_dir_all(&d).ok();
     }
 }
 
