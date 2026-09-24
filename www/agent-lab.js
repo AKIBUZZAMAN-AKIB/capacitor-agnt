@@ -17,6 +17,10 @@ const state = {
   sessionKey: `demo-${Date.now()}`,
   lastRunId: null,
   lastToolCallId: null,
+  // MCP tool calls need their OWN id. Reusing lastToolCallId (set only by
+  // approval_request) meant the MCP button either threw "no pending call" or
+  // answered an unrelated approval id.
+  lastMcpCall: null,
   lastCronJobId: null,
   lastSkillId: null,
   streamed: '',
@@ -63,6 +67,18 @@ async function wireEvents() {
         // Human-in-the-loop: the agent wants to run a tool and is waiting.
         state.lastToolCallId = payload?.toolCallId ?? payload?.tool_call_id ?? null;
         setStatus(`Tool approval চাইছে: ${payload?.toolName ?? payload?.tool_name ?? '?'}`, 'warn');
+        break;
+      }
+      case 'mcp_tool_call': {
+        // The engine is asking the WebView to run an MCP tool and is blocked
+        // until respondToMcpTool() answers (or 30 s elapses). This case was
+        // missing entirely, so the MCP demo could never respond.
+        state.lastMcpCall = {
+          id: payload?.toolCallId ?? payload?.tool_call_id ?? null,
+          name: payload?.toolName ?? payload?.tool_name ?? '?',
+          args: payload?.args ?? {},
+        };
+        setStatus(`MCP tool চাইছে: ${state.lastMcpCall.name}`, 'warn');
         break;
       }
       case 'cron_approval_request': {
@@ -243,9 +259,19 @@ const agentActions = {
   },
   agentmcpresult: async () => {
     requireInit();
-    if (!state.lastToolCallId) throw new Error('কোনো pending MCP tool call নেই।');
-    await window.NativeKit.agent.respondToMcpTool(state.lastToolCallId, JSON.stringify({ ok: true, from: 'demo lab' }), false);
-    return { responded: state.lastToolCallId };
+    const call = state.lastMcpCall;
+    if (!call?.id) throw new Error('কোনো pending MCP tool call নেই — আগে এমন prompt দিন যাতে agent একটি MCP tool চালাতে চায়।');
+    // Answer in the MCP `CallToolResult` shape the spec defines:
+    //   { content: ContentBlock[], isError?: boolean, structuredContent?: object }
+    // The engine flattens `content` into readable text and honours the inner
+    // `isError`, so a real MCP client can forward its server's reply verbatim.
+    const result = {
+      content: [{ type: 'text', text: `demo lab ran '${call.name}' successfully` }],
+      isError: false,
+    };
+    await window.NativeKit.agent.respondToMcpTool(call.id, JSON.stringify(result), false);
+    state.lastMcpCall = null;
+    return { responded: call.id, tool: call.name };
   },
   agentcronapprove: async () => {
     requireInit();

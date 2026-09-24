@@ -315,6 +315,31 @@ pub async fn run_agent_turn(
                     Ok(val) => (serde_json::to_string(&val).unwrap_or_default(), false),
                     Err(e) => (e.to_string(), true),
                 }
+            } else if !is_registered_mcp_tool(&ctx.mcp_tools, &tool_call.name).await {
+                // Dispatch used to be "builtin, otherwise MCP", with no check
+                // that the name is actually in the registered catalogue. A model
+                // that invents a tool name therefore fell through to the MCP
+                // path and blocked the whole turn for the full 30-second
+                // timeout, waiting for a WebView response that was never coming
+                // — and then reported a misleading "timed out" to the model.
+                // Fail immediately and say what is actually wrong, so the model
+                // can pick a real tool on the next turn.
+                let known = {
+                    let mcp = ctx.mcp_tools.lock().await;
+                    let mut names: Vec<String> =
+                        tool_runner::builtin_tool_names().iter().map(|s| s.to_string()).collect();
+                    names.extend(mcp.iter().map(|t| t.name.clone()));
+                    names.sort();
+                    names.join(", ")
+                };
+                (
+                    format!(
+                        "Unknown tool '{}'. It is neither a built-in tool nor a registered MCP \
+                         tool. Available tools: {}.",
+                        tool_call.name, known
+                    ),
+                    true,
+                )
             } else {
                 let result = wait_for_mcp_tool_result(
                     callback,
@@ -463,6 +488,14 @@ async fn wait_for_approval(
             Err(NativeAgentError::Cancelled)
         }
     }
+}
+
+/// Is `name` present in the MCP catalogue the WebView published?
+async fn is_registered_mcp_tool(
+    mcp_tools: &Arc<Mutex<Vec<ToolDefinition>>>,
+    name: &str,
+) -> bool {
+    mcp_tools.lock().await.iter().any(|t| t.name == name)
 }
 
 async fn wait_for_mcp_tool_result(

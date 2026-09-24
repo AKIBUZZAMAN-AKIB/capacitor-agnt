@@ -160,30 +160,41 @@ pub fn get_tool_definitions(_workspace: &str, allowed_json: Option<&str>) -> Vec
     }
 }
 
+/// Every tool the engine executes natively.
+///
+/// Single source of truth: `is_builtin_tool` and `builtin_tool_names` both read
+/// this, so the membership test and the human-readable list can never drift
+/// apart the way a duplicated `matches!` arm and a duplicated array would.
+pub const BUILTIN_TOOL_NAMES: [&str; 20] = [
+    "read_file",
+    "write_file",
+    "edit_file",
+    "list_files",
+    "find_files",
+    "grep_files",
+    "execute_command",
+    "git_init",
+    "git_status",
+    "git_add",
+    "git_commit",
+    "git_log",
+    "git_diff",
+    "web_fetch",
+    "manage_cron",
+    "memory_recall",
+    "memory_store",
+    "memory_forget",
+    "memory_search",
+    "memory_list",
+];
+
 pub fn is_builtin_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "read_file"
-            | "write_file"
-            | "edit_file"
-            | "list_files"
-            | "find_files"
-            | "grep_files"
-            | "execute_command"
-            | "git_init"
-            | "git_status"
-            | "git_add"
-            | "git_commit"
-            | "git_log"
-            | "git_diff"
-            | "web_fetch"
-            | "manage_cron"
-            | "memory_recall"
-            | "memory_store"
-            | "memory_forget"
-            | "memory_search"
-            | "memory_list"
-    )
+    BUILTIN_TOOL_NAMES.contains(&name)
+}
+
+/// The builtin names, for error messages that tell the model what it may call.
+pub fn builtin_tool_names() -> &'static [&'static str] {
+    &BUILTIN_TOOL_NAMES
 }
 
 pub async fn execute_tool(

@@ -305,6 +305,29 @@ export interface NativeAgentPlugin {
         approved: boolean;
         reason?: string;
     }): Promise<void>;
+    /**
+     * Answer a pending `mcp_tool_call`.
+     *
+     * `resultJson` SHOULD be an MCP `CallToolResult`, which you can forward from
+     * your server verbatim:
+     *
+     * ```json
+     * { "content": [{ "type": "text", "text": "16C" }], "isError": false }
+     * ```
+     *
+     * The engine flattens `content` into the text the model reads (image, audio
+     * and resource blocks are described rather than inlined as base64) and keeps
+     * `structuredContent` — including on the error path, where servers put error
+     * codes and retry hints.
+     *
+     * The `isError` INSIDE the result is honoured and OR-ed with the `isError`
+     * argument, so forwarding a failed `CallToolResult` verbatim correctly tells
+     * the model the call failed. Per the MCP spec that is the whole point of the
+     * field: the model has to see the failure to be able to self-correct.
+     *
+     * Anything that is not shaped like a `CallToolResult` — plain text, or your
+     * own JSON — is passed through to the model unchanged.
+     */
     respondToMcpTool(options: {
         toolCallId: string;
         resultJson: string;

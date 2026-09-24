@@ -382,6 +382,29 @@ export interface NativeAgentPlugin {
   // ── Approval gate ──
 
   respondToApproval(options: { toolCallId: string; approved: boolean; reason?: string }): Promise<void>
+  /**
+   * Answer a pending `mcp_tool_call`.
+   *
+   * `resultJson` SHOULD be an MCP `CallToolResult`, which you can forward from
+   * your server verbatim:
+   *
+   * ```json
+   * { "content": [{ "type": "text", "text": "16C" }], "isError": false }
+   * ```
+   *
+   * The engine flattens `content` into the text the model reads (image, audio
+   * and resource blocks are described rather than inlined as base64) and keeps
+   * `structuredContent` — including on the error path, where servers put error
+   * codes and retry hints.
+   *
+   * The `isError` INSIDE the result is honoured and OR-ed with the `isError`
+   * argument, so forwarding a failed `CallToolResult` verbatim correctly tells
+   * the model the call failed. Per the MCP spec that is the whole point of the
+   * field: the model has to see the failure to be able to self-correct.
+   *
+   * Anything that is not shaped like a `CallToolResult` — plain text, or your
+   * own JSON — is passed through to the model unchanged.
+   */
   respondToMcpTool(options: { toolCallId: string; resultJson: string; isError?: boolean }): Promise<void>
 
   // ── Auth ──
@@ -452,6 +475,28 @@ export interface NativeAgentPlugin {
   resetToolPermissions(): Promise<void>
 
   // ── MCP ──
+  //
+  // IMPORTANT — what this plugin does and does not do.
+  //
+  // It is NOT an MCP client. There is no JSON-RPC layer, no stdio or
+  // Streamable-HTTP transport, and nothing that speaks `tools/list` or
+  // `tools/call` to an MCP server. The engine only keeps a CATALOGUE of tool
+  // definitions and dispatches calls back to your WebView code.
+  //
+  // You own the MCP client. The wiring is:
+  //
+  //   1. Your JS connects to the MCP server and calls `tools/list`.
+  //   2. Pass those tools to `startMcp` / `setMcpTools` so the model can see
+  //      them. The JSON is an array of
+  //      `{ name, description?, inputSchema?, approvalPolicy? }`.
+  //   3. When the model calls one, the plugin emits a `mcp_tool_call` event
+  //      with `{ toolCallId, toolName, args }` and BLOCKS the turn.
+  //   4. Your code forwards it to the server as `tools/call` and returns the
+  //      reply with `respondToMcpTool`.
+  //
+  // The turn is blocked for at most 30 seconds; after that the model is told
+  // the tool timed out. A tool name that is in neither the built-in set nor
+  // this catalogue fails immediately rather than waiting out that timeout.
 
   startMcp(options: { toolsJson: string }): Promise<{ toolCount: number }>
   restartMcp(options: { toolsJson: string }): Promise<{ toolCount: number }>

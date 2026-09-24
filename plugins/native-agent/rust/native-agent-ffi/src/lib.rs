@@ -152,6 +152,107 @@ fn detached_steer_rx() -> Arc<Mutex<Option<mpsc::UnboundedReceiver<String>>>> {
     Arc::new(Mutex::new(Some(rx)))
 }
 
+/// Normalise a JS-supplied MCP tool result into what the model should read.
+///
+/// The MCP spec's `CallToolResult` is
+/// `{ content: ContentBlock[], isError?: bool, structuredContent?: object }`,
+/// and the spec is explicit that a tool's own failures are reported *inside*
+/// the result with `isError: true` — not as a protocol error — precisely so the
+/// model can see the failure and self-correct.
+///
+/// Two problems this fixes:
+///
+///  * `respond_to_mcp_tool` takes `is_error` as a SEPARATE argument, so a
+///    caller that forwards a real `CallToolResult` verbatim (the obvious thing
+///    to do) had its `isError` silently ignored. A failed MCP tool was handed
+///    to the model as a success, defeating the one guarantee the field exists
+///    to provide.
+///  * The whole JSON blob was passed through as the tool-result text, so the
+///    model saw `{"content":[{"type":"text","text":"16C"}]}` instead of `16C` —
+///    noisier, more tokens, and meaningless for image/resource blocks.
+///
+/// Anything that is not shaped like a `CallToolResult` is passed through
+/// unchanged, so existing callers that already send plain text or their own
+/// JSON keep working.
+fn normalize_mcp_result(result_json: &str, is_error_arg: bool) -> (String, bool) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(result_json) else {
+        // Not JSON at all — plain text is a perfectly good tool result.
+        return (result_json.to_string(), is_error_arg);
+    };
+
+    let Some(content) = value.get("content").and_then(|c| c.as_array()) else {
+        return (result_json.to_string(), is_error_arg);
+    };
+
+    // `isError` is OR-ed, never overridden: an explicit `true` from the caller
+    // must not be downgraded by a result that omits the field.
+    let is_error = is_error_arg
+        || value
+            .get("isError")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+    let mut parts: Vec<String> = Vec::new();
+    for block in content {
+        match block.get("type").and_then(|t| t.as_str()) {
+            Some("text") => {
+                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                    parts.push(text.to_string());
+                }
+            }
+            // The model cannot consume raw base64 here, but it must still learn
+            // that the tool produced something and what kind.
+            Some("image") => {
+                let mime = block
+                    .get("mimeType")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("image");
+                parts.push(format!("[image content returned ({mime})]"));
+            }
+            Some("audio") => {
+                let mime = block
+                    .get("mimeType")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("audio");
+                parts.push(format!("[audio content returned ({mime})]"));
+            }
+            Some("resource") | Some("resource_link") => {
+                // An embedded resource carries its text inline when it is textual.
+                let res = block.get("resource").unwrap_or(block);
+                if let Some(text) = res.get("text").and_then(|t| t.as_str()) {
+                    parts.push(text.to_string());
+                } else {
+                    let uri = res.get("uri").and_then(|u| u.as_str()).unwrap_or("unknown");
+                    parts.push(format!("[resource: {uri}]"));
+                }
+            }
+            // Unknown/future block types: keep the raw JSON rather than drop it.
+            _ => parts.push(block.to_string()),
+        }
+    }
+
+    // `structuredContent` is the machine-readable half and must survive even on
+    // the error path — it is where servers put error codes and retry hints.
+    if let Some(structured) = value.get("structuredContent") {
+        if !structured.is_null() {
+            parts.push(structured.to_string());
+        }
+    }
+
+    if parts.is_empty() {
+        // A CallToolResult with an empty content array is legal. Say so plainly
+        // instead of handing the model "".
+        let fallback = if is_error {
+            "The MCP tool reported an error with no content.".to_string()
+        } else {
+            "The MCP tool returned no content.".to_string()
+        };
+        return (fallback, is_error);
+    }
+
+    (parts.join("\n"), is_error)
+}
+
 /// Clears the `turn_in_flight` flag on drop.
 ///
 /// A plain "set it back to false at the end" would leak the flag whenever the
@@ -351,6 +452,9 @@ impl NativeAgentHandle {
         self.runtime.block_on(async {
             let mut pending = self.mcp_pending.lock().await;
             if let Some(tx) = pending.remove(&tool_call_id) {
+                // Honour the MCP `isError` carried inside the result and flatten
+                // its content blocks into text the model can actually read.
+                let (result_json, is_error) = normalize_mcp_result(&result_json, is_error);
                 let _ = tx.send(types::McpToolResult {
                     result_json,
                     is_error,
@@ -1374,5 +1478,110 @@ mod turn_guard_tests {
             );
             drop(TurnGuard(flag.clone()));
         }
+    }
+}
+
+#[cfg(test)]
+mod mcp_result_tests {
+    use super::*;
+
+    /// The spec is explicit: a tool's own failure is reported inside the result
+    /// with `isError: true`, so the model can see it and self-correct. The
+    /// engine took `is_error` as a separate argument and ignored the one in the
+    /// payload, turning every forwarded failure into a silent success.
+    #[test]
+    fn the_is_error_inside_a_call_tool_result_is_honoured() {
+        let raw = r#"{"content":[{"type":"text","text":"rate limited"}],"isError":true}"#;
+        // Caller forwards the result verbatim and passes false, as is natural.
+        let (text, is_error) = normalize_mcp_result(raw, false);
+        assert!(is_error, "the inner isError must not be lost");
+        assert_eq!(text, "rate limited");
+    }
+
+    /// OR, never override: an explicit error from the caller must survive a
+    /// result that omits the field.
+    #[test]
+    fn an_explicit_error_is_never_downgraded() {
+        let raw = r#"{"content":[{"type":"text","text":"partial"}]}"#;
+        let (_, is_error) = normalize_mcp_result(raw, true);
+        assert!(is_error);
+        let (_, is_error) = normalize_mcp_result(raw, false);
+        assert!(!is_error, "absent isError means success");
+    }
+
+    #[test]
+    fn text_blocks_are_flattened_instead_of_dumped_as_json() {
+        let raw = r#"{"content":[{"type":"text","text":"16C"},{"type":"text","text":"cloudy"}]}"#;
+        let (text, is_error) = normalize_mcp_result(raw, false);
+        // Previously the model saw the entire JSON blob.
+        assert_eq!(text, "16C\ncloudy");
+        assert!(!text.contains("\"type\""), "no raw JSON should leak through");
+        assert!(!is_error);
+    }
+
+    #[test]
+    fn non_text_blocks_are_described_rather_than_dropped() {
+        let raw = r#"{"content":[
+            {"type":"image","mimeType":"image/png","data":"aGk="},
+            {"type":"resource","resource":{"uri":"file:///a.txt","text":"file body"}},
+            {"type":"resource","resource":{"uri":"file:///b.bin"}}
+        ]}"#;
+        let (text, _) = normalize_mcp_result(raw, false);
+        assert!(text.contains("[image content returned (image/png)]"));
+        assert!(text.contains("file body"), "textual resources inline their text");
+        assert!(text.contains("[resource: file:///b.bin]"));
+        // The base64 payload is useless to the model and must not be inlined.
+        assert!(!text.contains("aGk="));
+    }
+
+    /// structuredContent is where servers put error codes and retry hints, and
+    /// the spec does not gate it on isError.
+    #[test]
+    fn structured_content_survives_even_on_the_error_path() {
+        let raw = r#"{"content":[],"isError":true,
+                      "structuredContent":{"code":"RATE_LIMITED","retry_after":30}}"#;
+        let (text, is_error) = normalize_mcp_result(raw, false);
+        assert!(is_error);
+        assert!(text.contains("RATE_LIMITED"), "got: {text}");
+        assert!(text.contains("retry_after"));
+    }
+
+    #[test]
+    fn an_empty_content_array_produces_a_readable_message() {
+        let (text, is_error) = normalize_mcp_result(r#"{"content":[]}"#, false);
+        assert!(!is_error);
+        assert_eq!(text, "The MCP tool returned no content.");
+
+        let (text, is_error) = normalize_mcp_result(r#"{"content":[],"isError":true}"#, false);
+        assert!(is_error);
+        assert!(text.contains("error"), "got: {text}");
+        // The model must never be handed an empty string.
+        assert!(!text.is_empty());
+    }
+
+    /// Backward compatibility: callers already sending plain text or their own
+    /// JSON shape must keep working untouched.
+    #[test]
+    fn non_call_tool_result_payloads_pass_through_unchanged() {
+        for raw in [
+            "just plain text",
+            r#"{"ok":true,"from":"demo lab"}"#,
+            r#"[1,2,3]"#,
+            "",
+        ] {
+            let (text, is_error) = normalize_mcp_result(raw, false);
+            assert_eq!(text, raw, "payload must be untouched");
+            assert!(!is_error);
+        }
+        // And the explicit flag still applies to them.
+        let (_, is_error) = normalize_mcp_result("boom", true);
+        assert!(is_error);
+    }
+
+    #[test]
+    fn unknown_block_types_are_preserved_not_silently_dropped() {
+        let raw = r#"{"content":[{"type":"future_kind","payload":{"a":1}}]}"#;
+        let (text, _) = normalize_mcp_result(raw, false);
+        assert!(text.contains("future_kind"), "got: {text}");
     }
 }
