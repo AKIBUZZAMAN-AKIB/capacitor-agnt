@@ -291,7 +291,15 @@ jobs:
           retention-days: 30
 
       - name: Commit rebuilt slices back
-        if: ${{ inputs.commit_slices != false }}
+        # `inputs.commit_slices` is undefined on a push, and GitHub coerces the
+        # empty value to false, so `inputs.commit_slices != false` was FALSE for
+        # every push — the workflow built and verified the slices and then
+        # silently skipped committing them. The push trigger above therefore
+        # never actually shipped anything: Android binaries kept lagging the
+        # Rust source until somebody dispatched this workflow by hand, while the
+        # iOS xcframework job (which has no such guard) shipped every time. The
+        # asymmetry was invisible because the run still reported success.
+        if: ${{ github.event_name == 'push' || inputs.commit_slices != false }}
         shell: bash
         run: |
           set -euo pipefail
