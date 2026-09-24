@@ -1072,4 +1072,62 @@ Swift-এ হুবহু একই সমস্যা (`DispatchQueue.global` �
 
 ---
 
+# ১৪. ষষ্ঠ রাউন্ড — background wake path
+
+Wake path সম্পূর্ণ (Kotlin worker → Rust `handle_wake` → capture) যাচাই করা হলো। **২টি নতুন বাগ।**
+
+### ১৪.১ 🔴 অতিরিক্ত job থাকলে OS পুরো wake মেরে ফেলত (নতুন, গুরুতর)
+
+প্রতিটি job আলাদাভাবে bounded (`wall_clock_timeout_ms`), কিন্তু **পুরো loop-এর কোনো সময়সীমা ছিল না**। N টা due job × ৬০ সেকেন্ড = সহজেই WorkManager-এর **১০ মিনিটের সীমা** পার।
+
+OS মাঝপথে মেরে ফেললে সবচেয়ে খারাপ অবস্থা হতো:
+- চলমান `cron_runs` row চিরকাল `'running'` অবস্থায় আটকে থাকত
+- বাকি job-গুলোর `next_run_at` আর এগোত না → **পরের wake-এও একই overload** (স্থায়ী backlog)
+- `recordWake` পর্যন্ত পৌঁছাত না → `getWakeStatus()` কিছুই দেখাত না, **ব্যর্থতা সম্পূর্ণ অদৃশ্য**
+
+**ফিক্স:** ৮ মিনিটের total budget (WorkManager-এর ১০ মিনিটের নিচে margin)। যাচাই হয় **কেবল job-এর মাঝখানে** — শুরু হওয়া job সবসময় শেষ করে নিজের row finalize করে, তাই zombie row হয় না। বাকি job due থেকেই যায়, পরের wake-এ চলে। নতুন `wake.budget_exhausted` event emit হয়, আর heartbeat (সর্বনিম্ন অগ্রাধিকার) budget ফুরালে নিজে থেকে সরে যায়।
+
+### ১৪.২ `cron_runs` অসীম বাড়ত
+
+মোছা হতো **শুধু job delete করলে**। ১৫ মিনিটের একটা job = বছরে ~৩৫,০০০ row, প্রতিটিতে `response_text` (সম্পূর্ণ মডেল উত্তর, প্রায়ই কয়েক KB) → ফোনে **কয়েকশো MB**, আর প্রতিটি `listCronRuns` scan ধীর হতো। এখন newest ২০০০ row-তে সীমাবদ্ধ।
+
+### ১৪.৩ যা যাচাই করে **সঠিক/অপ্রয়োজনীয়** পাওয়া গেছে
+
+| বিষয় | সিদ্ধান্ত |
+|---|---|
+| **BUG-40** (`RUN_SCAN_LIMIT = 200`) | ✅ **ক্ষতিকর নয়** — `list_cron_runs` `started_at DESC` করে, তাই wake-এর নিজের run সবসময় window-এর ভিতরে; আর নতুন budget একক wake-এ ২০০ job হওয়াই আটকায় |
+| `system_events` টেবিল | ✅ **সম্পূর্ণ মৃত** — কোথাও read/write নেই (Rust/Kotlin/Swift/TS grep)। বাড়তে পারে না, তাই retention অপ্রয়োজনীয়। DB WebView-এর সাথে শেয়ার্ড বলে drop না করে কমেন্টে নথিভুক্ত |
+| `NativeWakeRunner` / `WakeWorker` | ✅ exception-safe, `finally`-তে handle close; periodic work fail state-এ শেষ হতে পারে না বলে `Result.success()` সঠিক |
+| `MemoryProviderImpl` (Kotlin ও Swift) | ✅ lock + atomic rename, early-return leak নেই |
+| App Browser (`app-browser.ts`, ২৬৮৫ লাইন) | ✅ iframe `allow-scripts` only, token `crypto.randomUUID()`, RPC-তে channel+token+`event.source` যাচাই, CSP injection সুরক্ষিত, `innerHTML`/`eval` একটিও নেই |
+
+### ১৪.৪ নিজের একটা ভুল সংশোধন
+
+প্রথমে ভেবেছিলাম Android slice auto-rebuild হয় না (iOS হয়)। **ভুল** — `native-agent-ffi.yml`-এ push trigger আগে থেকেই ছিল, ফাইলের শেষে। একটা duplicate `push:` key যোগ করে ফেলেছিলাম যা YAML নীরবে উপেক্ষা করত; সেটা revert করা হয়েছে।
+
+### ১৪.৫ শিপ করা বাইনারি যাচাই
+
+CI সব slice **নতুন Rust সোর্স থেকে rebuild** করেছে, আর আমি প্রতিটিতে fix-গুলোর উপস্থিতি যাচাই করেছি:
+
+| Slice | অবস্থা |
+|---|---|
+| arm64-v8a / armeabi-v7a / x86 / x86_64 | ✅ সব fix + ৫৬ checksum |
+| ios-arm64 (+ simulator) | ✅ সব fix + ৫৬ checksum |
+| `abi-manifest.json` sha256 | ✅ সব মিলে যায় |
+| committed bindings | ✅ rebuild-এ অপরিবর্তিত |
+
+### চূড়ান্ত অবস্থা
+
+| পরীক্ষা | ফল |
+|---|---|
+| `cargo check` | ✅ ০ warning |
+| `cargo test --lib` | ✅ **৮৪/৮৪** |
+| Kotlin / header / ৫৬ checksum | ✅ সব অভিন্ন |
+| `tsc` / `vitest` | ✅ clean / ১৬৭ |
+| GitHub CI (৫টি workflow) | ✅ সব সবুজ |
+
+**মোট: ৬২টি বাগ চিহ্নিত, ৬০টি ঠিক করা।**
+
+---
+
 *রিপোর্ট শেষ।*
