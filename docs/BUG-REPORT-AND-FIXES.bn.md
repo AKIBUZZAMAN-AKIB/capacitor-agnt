@@ -1130,4 +1130,75 @@ CI সব slice **নতুন Rust সোর্স থেকে rebuild** ক�
 
 ---
 
+# ১৫. সপ্তম রাউন্ড — MCP connector (স্পেসিফিকেশনের বিপরীতে)
+
+MCP অংশটি **Model Context Protocol স্পেসিফিকেশন (2025-06-18 schema)** মিলিয়ে যাচাই করা হলো। **৫টি বাগ**, একটি MCP-র মূল নিরাপত্তা-গ্যারান্টিই উল্টে দিচ্ছিল।
+
+### ১৫.১ 🔴 MCP-র নিজের `isError` উপেক্ষা করা হতো (নতুন, গুরুতর)
+
+`respondToMcpTool(id, resultJson, isError)` — `isError` আলাদা প্যারামিটার। কিন্তু আসল MCP `CallToolResult`-এ `isError` **ভিতরে** থাকে:
+
+```json
+{ "content": [{"type":"text","text":"rate limited"}], "isError": true }
+```
+
+একজন ডেভেলপার সার্ভারের উত্তর হুবহু ফরোয়ার্ড করলে (সবচেয়ে স্বাভাবিক কাজ) ভিতরের `isError` **নীরবে হারিয়ে যেত** → **ব্যর্থ tool মডেলের কাছে সফল হিসেবে** পৌঁছাত।
+
+স্পেক স্পষ্ট বলে: tool-এর ব্যর্থতা result-এর ভিতরে `isError: true` দিয়ে জানাতে হবে **ঠিক এই কারণেই যেন মডেল দেখে নিজেকে সংশোধন করতে পারে**। উপেক্ষা করায় ফিল্ডটার একমাত্র উদ্দেশ্যই ব্যর্থ হতো।
+
+**ফিক্স:** ভিতরের `isError` এখন মানা হয়, আর প্যারামিটারের সাথে **OR** করা হয় — তাই স্পষ্ট error কখনো নিচে নামে না।
+
+### ১৫.২ `content[]` block সমান করা হতো না
+
+পুরো JSON blob-টাই tool result-এর টেক্সট হয়ে যেত — মডেল দেখত `{"content":[{"type":"text","text":"16C"}]}`, `16C` নয়। বেশি token, বেশি noise, আর image/resource block তো অর্থহীন।
+
+**ফিক্স:** text block জোড়া লাগে; image/audio/resource **বর্ণনা** করা হয় (base64 inline হয় না); textual resource-এর টেক্সট ঢোকে; অজানা (ভবিষ্যৎ) block টাইপ raw JSON হিসেবে **রাখা হয়, ফেলা হয় না**। `structuredContent` **error পথেও** সংরক্ষিত — সেখানেই সার্ভার error code ও retry hint রাখে।
+
+### ১৫.৩ অচেনা tool নাম ৩০ সেকেন্ড turn আটকে রাখত
+
+Dispatch ছিল "builtin, নাহলে MCP" — registered catalogue-এর সাথে **কোনো যাচাই ছাড়াই**। মডেল একটা নাম বানিয়ে ফেললে সেটা MCP পথে গিয়ে ৩০ সেকেন্ড অপেক্ষা করত এমন উত্তরের জন্য যা কখনো আসবে না, তারপর বিভ্রান্তিকর "timed out" বলত।
+
+**ফিক্স:** এখন সাথে সাথে ব্যর্থ হয় আর মডেলকে **কোন tool গুলো আসলে আছে** তা বলে দেয়। `BUILTIN_TOOL_NAMES` একক সত্যের উৎস হলো, তাই membership test আর তালিকা আলাদা হয়ে যেতে পারে না।
+
+### ১৫.৪ ডেমো কখনো MCP call-এর উত্তর দিতে পারত না
+
+`mcp_tool_call` event **একেবারেই handle করা হতো না**, আর বাটনটা `lastToolCallId` পুনর্ব্যবহার করত — যা কেবল `approval_request` সেট করে। ফলে হয় "no pending call" থ্রো করত, নয় **সম্পর্কহীন একটা approval-এর উত্তর** দিয়ে দিত।
+
+**ফিক্স:** MCP call আলাদা ট্র্যাক হয়, আর উত্তর যায় আসল `CallToolResult` আকারে।
+
+### ১৫.৫ 🔴 CI: Android slice push-এ কখনো commit হতো না (নতুন)
+
+সবচেয়ে গুরুত্বপূর্ণ প্রক্রিয়াগত আবিষ্কার। প্রতিটি push-এ workflow চারটি ABI build করত, binding identity যাচাই করত, artefact upload করত — **তারপর "Commit rebuilt slices back" ধাপ skip করে success বলত।**
+
+কারণ: `if: inputs.commit_slices != false`. Push-এ input থাকে না, GitHub খালি মানকে `false`-এ রূপ দেয় → `false != false` → **false** → skip।
+
+ফল ছিল একটা **অদৃশ্য অসামঞ্জস্য**: iOS workflow-এ এমন guard নেই, তাই Rust ফিক্স সাথে সাথে iOS-এ পৌঁছাত, কিন্তু Android `.so` আগের build নিয়ে বসে থাকত। কিছুই fail করত না — বাইনারি শুধু নীরবে পুরোনো হয়ে যেত, আর প্রতি রাউন্ডে আমাকে হাতে dispatch করতে হতো।
+
+**ফিক্স:** `github.event_name == 'push' || inputs.commit_slices != false`. যাচাই করা হয়েছে — পরের push-এ ধাপটি **success** দেখিয়েছে এবং চারটি ABI-ই নতুন বাইনারি পেয়েছে।
+
+### ১৫.৬ গুরুত্বপূর্ণ স্থাপত্য স্পষ্টীকরণ
+
+এই প্লাগইন **MCP client নয়**। কোনো JSON-RPC স্তর নেই, কোনো stdio/Streamable-HTTP transport নেই, `tools/list`/`tools/call` বলার কিছু নেই — grep করে নিশ্চিত। এটি শুধু tool **catalogue** রাখে আর call গুলো WebView-এ ফেরত পাঠায়; **MCP client আপনাকেই লিখতে হবে**।
+
+আগে এটা পাঠকের অনুমানের উপর ছাড়া ছিল। এখন `definitions.ts`-এ পূর্ণ ৪-ধাপের wiring সহ স্পষ্ট লেখা আছে।
+
+### ১৫.৭ টেস্ট: ৮৪ → ৯২
+
+MCP wire-format-এর ৮টি টেস্ট: ভিতরের `isError`, OR আচরণ, text flatten, non-text block, `structuredContent` error পথে, খালি content, backward-compat pass-through, অজানা block টাইপ।
+
+### চূড়ান্ত অবস্থা
+
+| পরীক্ষা | ফল |
+|---|---|
+| `cargo check` | ✅ ০ warning |
+| `cargo test --lib` | ✅ **৯২/৯২** |
+| Kotlin / header / ৫৬ checksum | ✅ সব অভিন্ন |
+| `tsc` / `vitest` | ✅ clean / ১৬৭ |
+| GitHub CI (৫টি workflow) | ✅ সব সবুজ |
+| শিপ করা বাইনারি (৪ Android + iOS) | ✅ সব fix উপস্থিত, ৫৬ checksum |
+
+**মোট: ৬৭টি বাগ চিহ্নিত, ৬৫টি ঠিক করা।**
+
+---
+
 *রিপোর্ট শেষ।*
