@@ -336,6 +336,12 @@ export type NativeAgentEventType =
   | 'wake.no_jobs'
   | 'wake.jobs_found'
   | 'wake.skipped'
+  /**
+   * The wake ran out of its total time budget and stopped between jobs.
+   * `deferred` jobs were left untouched and stay due, so the next wake picks
+   * them up. Emitted instead of letting the OS kill the background task.
+   */
+  | 'wake.budget_exhausted'
   // ── Cron ──
   | 'cron.job.started'
   | 'cron.job.completed'

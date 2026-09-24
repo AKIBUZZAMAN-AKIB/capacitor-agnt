@@ -142,6 +142,12 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), NativeAgentError> {
 
         CREATE INDEX IF NOT EXISTS idx_cron_runs_job ON cron_runs(job_id);
 
+        -- NOTE: `system_events` is currently unused by this engine — nothing
+        -- reads or writes it (verified by grep across Rust/Kotlin/Swift/TS).
+        -- It is kept because this database file is shared with the WebView,
+        -- which may own it; dropping it here could break that consumer. If it
+        -- turns out to be dead everywhere, remove the table and its index
+        -- together, and add a retention bound if it ever starts being written.
         CREATE TABLE IF NOT EXISTS system_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_key TEXT NOT NULL,
@@ -1347,6 +1353,35 @@ fn mark_job_running(conn: &Connection, id: &str) -> Result<(), NativeAgentError>
     Ok(())
 }
 
+/// How many `cron_runs` rows to keep. A job on a 15-minute schedule produces
+/// ~96 rows/day, and each row stores `response_text` — a full model answer,
+/// often several KB. Nothing ever deleted them except "the job was removed",
+/// so the history grew forever: ~35k rows/year per job, easily hundreds of MB
+/// on a phone, and it also slowed every `listCronRuns` scan.
+const MAX_CRON_RUNS: i64 = 2_000;
+
+/// Trim a table to its newest `keep` rows by autoincrement id.
+///
+/// Called after an insert rather than on a timer: there is no scheduler thread
+/// in the background path, so insertion time is the only reliable moment.
+fn prune_to_newest(
+    conn: &Connection,
+    table: &str,
+    keep: i64,
+) -> Result<(), NativeAgentError> {
+    // `table` is never user input — only the two literals above — so the
+    // format! here cannot be injected into.
+    conn.execute(
+        &format!(
+            "DELETE FROM {table} WHERE id NOT IN (
+                 SELECT id FROM {table} ORDER BY id DESC LIMIT ?1
+             )"
+        ),
+        params![keep],
+    )?;
+    Ok(())
+}
+
 fn insert_cron_run(conn: &Connection, id: &str, source: &str) -> Result<i64, NativeAgentError> {
     let now = chrono::Utc::now().timestamp_millis();
     conn.execute(
@@ -1354,7 +1389,10 @@ fn insert_cron_run(conn: &Connection, id: &str, source: &str) -> Result<i64, Nat
          VALUES (?1, ?2, 'running', ?3)",
         params![id, now, source],
     )?;
-    Ok(conn.last_insert_rowid())
+    let run_id = conn.last_insert_rowid();
+    // Bound the history. Failure to prune must not fail the run itself.
+    let _ = prune_to_newest(conn, "cron_runs", MAX_CRON_RUNS);
+    Ok(run_id)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2195,9 +2233,56 @@ pub async fn handle_wake(
         }),
     );
 
-    for job in &due_jobs {
+    // Total budget for the whole wake.
+    //
+    // Each job is individually bounded (`wall_clock_timeout_ms`), but the loop
+    // was not: N due jobs x up to 60 s each runs unbounded. Both platforms kill
+    // a background task that overruns — WorkManager at 10 minutes, iOS when the
+    // BGTask expiration handler fires — and being killed mid-loop is the worst
+    // outcome available: the in-flight `cron_runs` row is stranded in
+    // 'running' forever, the remaining jobs never advance `next_run_at` so they
+    // stay due and rebuild the same overload on the next wake, and the Kotlin
+    // caller never reaches `recordWake`, so the telemetry shows nothing at all.
+    //
+    // Stopping cleanly between jobs instead leaves the untouched jobs due —
+    // they simply run on the next wake — and every completed job keeps its
+    // result. 8 minutes keeps a margin under WorkManager's hard 10.
+    const WAKE_BUDGET_MS: i64 = 8 * 60 * 1000;
+    let wake_started_at = chrono::Utc::now().timestamp_millis();
+    let budget_exhausted = |remaining: usize| -> bool {
+        let spent = chrono::Utc::now().timestamp_millis() - wake_started_at;
+        if spent >= WAKE_BUDGET_MS {
+            tracing::warn!(
+                spent_ms = spent,
+                remaining_jobs = remaining,
+                "wake budget exhausted; the remaining jobs stay due and run on the next wake"
+            );
+            true
+        } else {
+            false
+        }
+    };
+
+    let mut deferred = 0usize;
+    for (index, job) in due_jobs.iter().enumerate() {
         if *abort_flag.lock().await {
             return Err(NativeAgentError::Cancelled);
+        }
+        // Checked BEFORE starting a job, never during: a job that has begun
+        // always gets to finish and finalize its own run row.
+        if budget_exhausted(due_jobs.len() - index) {
+            deferred = due_jobs.len() - index;
+            crate::event_bus::emit(
+                callback_ref,
+                "wake.budget_exhausted",
+                &serde_json::json!({
+                    "source": source,
+                    "completed": index,
+                    "deferred": deferred,
+                    "budgetMs": WAKE_BUDGET_MS,
+                }),
+            );
+            break;
         }
         execute_cron_job(
             &conn,
@@ -2219,6 +2304,13 @@ pub async fn handle_wake(
     if let Some(hb) = heartbeat.as_ref() {
         if *abort_flag.lock().await {
             return Err(NativeAgentError::Cancelled);
+        }
+        // The heartbeat is the lowest-priority work in a wake; if the cron jobs
+        // already used the budget it waits for the next one rather than risking
+        // an OS kill that would strand everything.
+        if deferred > 0 || budget_exhausted(1) {
+            tracing::warn!("skipping the heartbeat: the wake budget is spent");
+            return Ok(());
         }
         run_heartbeat(
             &conn,
@@ -2352,6 +2444,195 @@ fn active_hours_json(
         "end": end,
         "tz": tz,
     })
+}
+
+#[cfg(test)]
+mod wake_budget_tests {
+    use super::*;
+
+    /// Mirrors the budget predicate used by `handle_wake`.
+    fn exhausted(started_at: i64, now: i64, budget_ms: i64) -> bool {
+        now - started_at >= budget_ms
+    }
+
+    const BUDGET: i64 = 8 * 60 * 1000;
+
+    #[test]
+    fn a_wake_that_fits_the_budget_runs_every_job() {
+        let start = 1_000_000;
+        // Ten jobs at 30 s each = 5 min, comfortably inside 8 min.
+        let mut now = start;
+        let mut completed = 0;
+        for _ in 0..10 {
+            if exhausted(start, now, BUDGET) {
+                break;
+            }
+            now += 30_000;
+            completed += 1;
+        }
+        assert_eq!(completed, 10, "nothing should be deferred");
+    }
+
+    /// The case that used to get the worker killed: enough due jobs to exceed
+    /// WorkManager's 10-minute ceiling.
+    #[test]
+    fn an_overloaded_wake_stops_before_the_os_kills_it() {
+        let start = 1_000_000;
+        let mut now = start;
+        let mut completed = 0;
+        let total = 30;
+        for _ in 0..total {
+            if exhausted(start, now, BUDGET) {
+                break;
+            }
+            now += 60_000; // worst case per job
+            completed += 1;
+        }
+        let deferred = total - completed;
+        assert!(deferred > 0, "an overloaded wake must defer work");
+        assert!(
+            now - start <= 10 * 60 * 1000,
+            "must stay under WorkManager's 10-minute limit, spent {}ms",
+            now - start
+        );
+        // And the jobs that did run are all accounted for.
+        assert_eq!(completed + deferred, total);
+    }
+
+    /// The check happens BEFORE a job starts, so a job that began always gets
+    /// to finish and finalize its own run row — no stranded 'running' rows.
+    #[test]
+    fn the_budget_is_only_checked_between_jobs() {
+        let start = 1_000_000;
+        // Already over budget at the moment of the check.
+        assert!(exhausted(start, start + BUDGET, BUDGET));
+        // Just under: the next job is allowed to start and may overrun a little.
+        assert!(!exhausted(start, start + BUDGET - 1, BUDGET));
+    }
+
+    #[test]
+    fn deferred_jobs_stay_due_so_the_next_wake_picks_them_up() {
+        // A deferred job is one whose next_run_at was never advanced, so it is
+        // still <= now and get_due_jobs returns it again.
+        let now = chrono::Utc::now().timestamp_millis();
+        let untouched_next_run_at = now - 5_000;
+        assert!(
+            untouched_next_run_at <= now,
+            "an unprocessed job must remain due"
+        );
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+
+    fn tmp() -> String {
+        std::env::temp_dir()
+            .join(format!(
+                "nk-ret-{}-{}.db",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn db() -> (String, Connection) {
+        let path = tmp();
+        let conn = open_db(&path).unwrap();
+        ensure_schema(&conn).unwrap();
+        (path, conn)
+    }
+
+    /// cron_runs used to be deleted only when its job was deleted, so a job on
+    /// a 15-minute schedule grew the table by ~35k rows/year, each holding a
+    /// full model answer in `response_text`.
+    #[test]
+    fn cron_run_history_is_bounded() {
+        let (path, conn) = db();
+        let total = MAX_CRON_RUNS + 250;
+        for _ in 0..total {
+            insert_cron_run(&conn, "job-1", "background").unwrap();
+        }
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM cron_runs", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            count <= MAX_CRON_RUNS,
+            "history grew to {count}, cap is {MAX_CRON_RUNS}"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The run we just inserted must survive its own pruning pass — otherwise
+    /// `finalize_cron_run` would update a row that no longer exists and the
+    /// result would vanish.
+    #[test]
+    fn the_newly_inserted_run_is_never_pruned_away() {
+        let (path, conn) = db();
+        let mut last = 0;
+        for _ in 0..(MAX_CRON_RUNS + 50) {
+            last = insert_cron_run(&conn, "job-1", "background").unwrap();
+        }
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM cron_runs WHERE id = ?1",
+                params![last],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "the just-inserted run id {last} was pruned");
+
+        // And finalizing it still works end to end.
+        finalize_cron_run(&conn, last, "ok", 120, None, Some("answer"), true, false).unwrap();
+        let (status, text): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, response_text FROM cron_runs WHERE id = ?1",
+                params![last],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "ok");
+        assert_eq!(text.as_deref(), Some("answer"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Pruning keeps the NEWEST rows — the wake capture reads recent runs, so
+    /// evicting the wrong end would silently drop results the user should see.
+    #[test]
+    fn pruning_keeps_the_newest_rows() {
+        let (path, conn) = db();
+        for _ in 0..(MAX_CRON_RUNS + 10) {
+            insert_cron_run(&conn, "job-1", "background").unwrap();
+        }
+        let (lo, hi): (i64, i64) = conn
+            .query_row("SELECT MIN(id), MAX(id) FROM cron_runs", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        // The surviving window must be the top of the id range.
+        assert_eq!(hi - lo + 1, MAX_CRON_RUNS, "window should be exactly the cap");
+        assert!(lo > 1, "the oldest rows should have been evicted");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Under the cap nothing is touched.
+    #[test]
+    fn a_small_history_is_left_alone() {
+        let (path, conn) = db();
+        for _ in 0..5 {
+            insert_cron_run(&conn, "job-1", "background").unwrap();
+        }
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM cron_runs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 5);
+        std::fs::remove_file(&path).ok();
+    }
 }
 
 #[cfg(test)]
