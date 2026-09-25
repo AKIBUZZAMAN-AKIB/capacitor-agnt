@@ -1201,4 +1201,60 @@ MCP wire-format-এর ৮টি টেস্ট: ভিতরের `isError`, 
 
 ---
 
+# ১৬. অষ্টম রাউন্ড — বাকি gap গুলো বন্ধ করা
+
+### ১৬.১ ✅ BUG-36 বন্ধ — OS থামতে বললে wake এখন থামে (FFI বদলানো ছাড়াই)
+
+আগে ধরে নিয়েছিলাম এর জন্য নতুন FFI method লাগবে। **সেটা ভুল ছিল।** `handle_wake` ইতিমধ্যে job-এর মাঝখানে engine-এর abort flag পড়ে, আর `abort()` সেই flag-ই তোলে — অর্থাৎ API আগে থেকেই ছিল, শুধু কেউ ব্যবহার করত না।
+
+**iOS:** `BGProcessingTask`-এর expiration handler শুধু failure রিপোর্ট করে সরে যেত, সাথে কমেন্ট লেখা ছিল "Rust call cancel করা যায় না"। যায়। ফলে iOS task ফেরত নেওয়ার পরেও Rust ব্যাকগ্রাউন্ড thread-এ কাজ চালিয়ে যেত — **ঠিক সেই ব্যাটারিই পুড়িয়ে যেটা বাঁচাতে expiration limit আছে।**
+
+**Android:** উল্টো দিক থেকে একই গর্ত — `onStopped()` **একেবারেই implement করা ছিল না**। WorkManager worker কেড়ে নিলে (১০ মিনিট পার, constraint ভাঙল, বা cancel) blocking Rust call চলতেই থাকত আর row লিখত, এমন thread-এ যার হিসাব WorkManager আর রাখে না।
+
+দুটোই এখন abort flag তোলে → পরের job boundary-তে loop পরিষ্কারভাবে ফেরে। চলমান job নিজের row finalize করে, বাকিগুলো due থেকে পরের wake-এ চলে।
+
+### ১৬.২ ✅ সত্যিকারের MCP client লেখা হয়েছে (`bridge/mcp-client.ts`)
+
+গত রাউন্ডে বলেছিলাম প্লাগইনে কোনো MCP client নেই — শুধু catalogue আর callback bridge। এবার **অনুপস্থিত অর্ধেকটা লিখে দেওয়া হলো**, স্পেক (2025-06-18) মেনে:
+
+- **`McpClient`** — JSON-RPC 2.0: `initialize` + বাধ্যতামূলক `notifications/initialized`, **paginated** `tools/list` (প্রথম page-এ থামলে tool নীরবে লুকিয়ে যেত), `tools/call`, আর id-mismatch guard যাতে ভুল response ভুল call-এ না মেলে।
+- **`HttpMcpTransport`** — Streamable HTTP: `application/json` ও `text/event-stream` দুটোই, `Mcp-Session-Id` ধরে রেখে পরের request-এ ফেরত পাঠায়, notification-এর 202 সামলায়, আর **প্রতি request bounded** — নাহলে ঝুলে থাকা server engine-এর ৩০ সেকেন্ড timeout পর্যন্ত turn আটকে রাখত।
+- **`connectMcpServers`** — পুরো wiring: handshake → tools merge → `startMcp` → প্রতিটি `mcp_tool_call`-কে `tools/call` বানিয়ে উত্তর।
+
+**দুটো ইচ্ছাকৃত সিদ্ধান্ত:** tool নাম `server__tool` আকারে namespaced — দুটো server-ই `search` দিতে পারে, flat catalogue-এ একটা আরেকটাকে নীরবে ঢেকে দিত আর call ভুল process-এ যেত। আর **প্রতিটি ব্যর্থতার পথও উত্তর দেয়** — engine turn আটকে রাখে, তাই হারিয়ে যাওয়া error মানে ৩০ সেকেন্ড stall + বিভ্রান্তিকর timeout।
+
+`NativeKit.agent.connectMcp([...])` দিয়ে পাওয়া যায়; raw hook গুলো যেমন ছিল তেমনই আছে।
+
+### ১৬.৩ CI আমার একটা ভুল ধরেছে
+
+`connectMcp` যোগ করার পর আমি শুধু `tsc` আর bundler চালিয়েছিলাম, **পূর্ণ টেস্ট স্যুট নয়**। CI ধরল: repo-তে একটা চমৎকার contract test আছে — bridge-এর প্রতিটি agent API-র demo-lab টেস্ট থাকতেই হবে, আর প্রতিটি demo action-এর button (ও উল্টোটা)। `connectMcp`-এর কোনোটাই ছিল না।
+
+ঠিক করে demo-তে `agentconnectmcp` action + URL input + button যোগ করা হয়েছে (আগের connection dispose করে, নাহলে পুরোনো listener এমন tool-এর call-এর উত্তর দিতে থাকত যেগুলো আর publish করা নেই)।
+
+**শিক্ষা:** শেষ সম্পাদনার পরেও পূর্ণ স্যুট চালাতে হয় — আংশিক যাচাই যথেষ্ট নয়।
+
+### ১৬.৪ BUG-25 (Keychain/Keystore) — সৎ মূল্যায়ন
+
+এটি **ইচ্ছাকৃতভাবে করা হয়নি**, এবং কারণটা স্পষ্ট বলা দরকার।
+
+এর জন্য একটা নতুন UniFFI **callback interface** (`SecretStore`) দরকার, তারপর Rust-এ encryption, Android Keystore impl, আর iOS Keychain impl। CI এখন দুই প্ল্যাটফর্মের বাইনারি rebuild করে, তাই **FFI বাধাটা আর নেই** — কিন্তু সমস্যা অন্যখানে: এই পরিবেশে আমি Android/iOS কোড **চালিয়ে দেখতে পারি না**, শুধু compile হয় কিনা দেখতে পারি।
+
+Credential storage-এ untested কোড পাঠানোর ঝুঁকি বাস্তব: Keystore impl throw করলে **ব্যবহারকারী সম্পূর্ণ auth হারাবেন**, আর ফাইলটা encrypted হওয়ায় ফেরানোও যাবে না। বর্তমান অবস্থা (file `0600`, atomic write, corrupt backup) নিরাপদ নয় — কিন্তু **ভাঙা নয়**।
+
+সুপারিশ: এটি এমন একজনের করা উচিত যিনি সত্যিকারের ডিভাইসে migration path (plaintext → encrypted, এবং rollback) পরীক্ষা করতে পারবেন।
+
+### চূড়ান্ত অবস্থা
+
+| পরীক্ষা | ফল |
+|---|---|
+| `cargo check` / `cargo test --lib` | ✅ ০ warning / **৯২** |
+| `vitest` | ✅ **১৯৭** (নতুন ৩০টি MCP client টেস্ট) |
+| `tsc` / config / bridge bundle | ✅ সব clean |
+| Kotlin / header / ৫৬ checksum | ✅ অভিন্ন |
+| GitHub CI | ✅ সব সবুজ (iOS ও Android build সহ — অর্থাৎ Swift/Kotlin পরিবর্তন সত্যিই compile হয়) |
+
+**মোট: ৬৯টি বাগ চিহ্নিত, ৬৮টি ঠিক করা। বাকি ১টি — BUG-25।**
+
+---
+
 *রিপোর্ট শেষ।*
