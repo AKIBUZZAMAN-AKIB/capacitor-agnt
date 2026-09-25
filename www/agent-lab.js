@@ -21,6 +21,8 @@ const state = {
   // approval_request) meant the MCP button either threw "no pending call" or
   // answered an unrelated approval id.
   lastMcpCall: null,
+  // Live MCP client connection, so it can be disposed before reconnecting.
+  mcp: null,
   lastCronJobId: null,
   lastSkillId: null,
   streamed: '',
@@ -463,6 +465,26 @@ const agentActions = {
     ]));
   },
   agentrestartmcp: async () => { requireInit(); return window.NativeKit.agent.restartMcp(JSON.stringify([])); },
+  // The real MCP client: handshake a server, publish its tools/list as the
+  // agent's catalogue, and answer every mcp_tool_call as tools/call. The three
+  // buttons above are the raw engine hooks; this one is the whole protocol.
+  agentconnectmcp: async () => {
+    requireInit();
+    const url = (val('agent-mcp-url') || '').trim();
+    if (!url) throw new Error('একটি MCP server URL দিন (যেমন https://example.com/mcp)।');
+    // Disconnect a previous session first, otherwise its listener keeps
+    // answering calls for tools that are no longer published.
+    if (state.mcp) { await state.mcp.dispose(); state.mcp = null; }
+    const connection = await window.NativeKit.agent.connectMcp([{ name: 'lab', url }]);
+    state.mcp = connection;
+    return {
+      tools: connection.toolCount,
+      failures: connection.failures,
+      note: connection.toolCount
+        ? 'এখন এমন prompt দিন যাতে agent এই tool গুলো ব্যবহার করে।'
+        : 'server কোনো tool দেয়নি।',
+    };
+  },
 
   // 13 ── Models & tools ─────────────────────────────────────────────────────
   agentmodels: async () => { requireInit(); return window.NativeKit.agent.getModels(val('agent-provider', 'anthropic') || 'anthropic'); },
