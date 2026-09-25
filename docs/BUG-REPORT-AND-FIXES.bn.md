@@ -1257,4 +1257,55 @@ Credential storage-এ untested কোড পাঠানোর ঝুঁকি 
 
 ---
 
+# ১৭. নবম রাউন্ড — BUG-25 (শেষ বাকি বাগ)
+
+### ১৭.১ প্রথমে প্রশ্নটা ঠিক করা
+
+আগের রাউন্ডগুলোতে BUG-25 কে ধরা হয়েছিল "auth store Keychain/Keystore-এ সরাও"। কিন্তু **আসল exposure মেপে** দেখলে উত্তরটা আলাদা:
+
+| হুমকি | বর্তমান সুরক্ষা |
+|---|---|
+| অন্য অ্যাপ ফাইল পড়া | ✅ OS sandbox + আগের রাউন্ডের `0600` |
+| ডিভাইস জব্দ / বন্ধ অবস্থা | ✅ Android FBE + iOS Data Protection |
+| **Backup** | ❌ **সুরক্ষিত ছিল না** |
+
+Android ঠিকই ছিল (`allowBackup="false"`)। কিন্তু **iOS-এ কিছুই বাদ দেওয়া ছিল না** — `auth-profiles.json` (API key + OAuth refresh token) আর পুরো conversation database **ব্যবহারকারীর iCloud backup-এ চলে যেত**।
+
+এটাই সেই একমাত্র পথ যেখানে গোপন তথ্য **ব্যবহারকারীর সিদ্ধান্ত ছাড়াই ডিভাইস ছেড়ে যায়** — আর app-level encryption করলে এই ফাঁকটাই ঢাকা পড়ে যেত, বন্ধ হতো না।
+
+### ১৭.২ ফিক্স
+
+`hardenAtRest()` — auth ফাইল, database ও তাদের ডিরেক্টরিতে `isExcludedFromBackup` বসায়, **দুটো entry point থেকেই** (`initWorkspace` ও `initialize` আলাদা path বানায়; একটাতে দিলে অন্যটা খোলা থেকে যেত)।
+
+**গুরুত্বপূর্ণ সিদ্ধান্ত:** protection class `completeUntilFirstUserAuthentication`, **`complete` নয়**। `complete` দিলে ডিভাইস lock থাকা অবস্থায় ফাইল পড়া যায় না — অর্থাৎ **যে কারণে এই প্লাগইন আছে সেটাই ভেঙে যেত**: background cron wake পকেটে থাকা ফোনে চলে, তার auth ও DB পড়তে হয়। বেছে নেওয়া class রিবুটের পর প্রথম unlock পর্যন্ত সব encrypted রাখে — বন্ধ ডিভাইস ঠিক এতেই সুরক্ষিত।
+
+সব কল best-effort (`try?`): file attribute বসাতে না পারা কখনোই ব্যবহারকারীকে অচল agent দেওয়ার কারণ নয়।
+
+সাথে: OAuth refresh error body এখন `safe_excerpt` দিয়ে bounded — proxy-র HTML error page প্রায়ই দশ-বিশ KB হয়, আর char-safe cut multi-byte উত্তরে panic করতে পারে না।
+
+### ১৭.৩ ১১টি contract টেস্ট
+
+প্রতিটি সুরক্ষা একেকটা লাইন — ভুলে মুছে গেলে **কিছুই fail করে না, গোপন তথ্য শুধু বেরিয়ে যেতে শুরু করে**। তাই টেস্ট দিয়ে বেঁধে দেওয়া হলো, `.complete` ব্যবহার **না** করার শর্তসহ (ওই regression নীরবে background wake ভাঙত)।
+
+একটা টেস্ট নিজের false positive ধরেছে — auth সোর্সে পুরোনো `&key[..7]` বাগের **বর্ণনা** আছে — তাই এখন comment বাদ দিয়ে স্ক্যান করে।
+
+### ১৭.৪ যা এখনো হয়নি — স্পষ্ট করে
+
+Store এখনো **disk-এ plaintext**। Encrypt করতে হলে FFI-তে `SecretStore` callback + দুই প্ল্যাটফর্মে Keystore/Keychain implementation লাগবে — যার কোনোটাই এই পরিবেশে **চালিয়ে দেখা যায় না**।
+
+ঝুঁকিটা বাস্তব: Keystore implementation throw করলে ব্যবহারকারী **নিজের credential থেকেই স্থায়ীভাবে বেরিয়ে যাবেন**, কারণ ফাইল ততক্ষণে unreadable। এটা এমন কারো কাজ যিনি সত্যিকারের ডিভাইসে migration **এবং তার rollback** পরীক্ষা করতে পারবেন।
+
+### চূড়ান্ত অবস্থা
+
+| পরীক্ষা | ফল |
+|---|---|
+| `cargo check` / `cargo test --lib` | ✅ ০ warning / **৯২** |
+| `vitest` | ✅ **২০৮** |
+| Kotlin / header / ৫৬ checksum | ✅ অভিন্ন |
+| GitHub CI (৫টি workflow) | ✅ সব সবুজ |
+
+**মোট: ৭০টি বাগ চিহ্নিত, ৭০টিই সমাধান বা সচেতনভাবে নিষ্পত্তি করা।**
+
+---
+
 *রিপোর্ট শেষ।*
