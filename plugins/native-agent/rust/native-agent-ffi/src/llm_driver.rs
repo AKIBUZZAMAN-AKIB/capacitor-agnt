@@ -121,7 +121,7 @@ pub trait LlmDriver: Send + Sync {
 /// Take at most `max_bytes` from `s` without splitting a UTF-8 character.
 /// `&s[..n]` panics when the cut lands mid-character, which any non-ASCII
 /// error body can trigger.
-fn safe_excerpt(s: &str, max_bytes: usize) -> &str {
+pub(crate) fn safe_excerpt(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
     }

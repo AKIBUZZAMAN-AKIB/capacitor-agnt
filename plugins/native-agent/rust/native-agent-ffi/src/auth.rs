@@ -418,8 +418,13 @@ pub async fn refresh_oauth_token(
             .text()
             .await
             .unwrap_or_else(|_| "Unable to read response body".to_string());
+        // Bounded: this body comes from the provider and ends up in an error
+        // string that the app may log or show. An HTML error page from a proxy
+        // is routinely tens of KB, and a char-safe cut keeps a multi-byte
+        // response from panicking the way the old byte slices did.
+        let excerpt = crate::llm_driver::safe_excerpt(&body, 500);
         return Err(NativeAgentError::Auth {
-            msg: format!("OAuth refresh failed ({}): {}", status, body),
+            msg: format!("OAuth refresh failed ({}): {}", status, excerpt),
         });
     }
 

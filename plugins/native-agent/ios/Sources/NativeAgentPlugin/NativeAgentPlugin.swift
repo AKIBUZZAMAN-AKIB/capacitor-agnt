@@ -185,16 +185,62 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
 
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             do {
+                let resolvedDb = self.resolvePath(dbPath)
+                let resolvedAuth = self.resolvePath(authProfilesPath)
                 try callInitWorkspace(
                     config: InitConfig(
-                        dbPath: self.resolvePath(dbPath),
+                        dbPath: resolvedDb,
                         workspacePath: self.resolvePath(workspacePath),
-                        authProfilesPath: self.resolvePath(authProfilesPath)
+                        authProfilesPath: resolvedAuth
                     )
                 )
+                self.hardenAtRest([resolvedAuth, resolvedDb])
                 call.resolve()
             } catch {
                 call.reject("initWorkspace failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Keep credentials out of iCloud backups, and pin the Data Protection class.
+    ///
+    /// `auth-profiles.json` holds API keys and OAuth refresh tokens, and the
+    /// engine's SQLite file holds the whole conversation history. Neither was
+    /// excluded from backup, so both were copied into the user's iCloud backup
+    /// — the one place these secrets leave the device without the user ever
+    /// choosing to send them anywhere.
+    ///
+    /// The protection class is deliberately `completeUntilFirstUserAuthentication`
+    /// and NOT `complete`. `complete` makes a file unreadable whenever the
+    /// device is locked, which would break exactly the feature this plugin
+    /// exists for: background cron wakes fire while the phone is in a pocket,
+    /// and they must be able to read the auth file and the database. The chosen
+    /// class still keeps everything encrypted until the first unlock after a
+    /// reboot, which is what protects a powered-off or freshly-seized device.
+    ///
+    /// Best effort by design: a failure here must never stop initialization,
+    /// because being unable to set an attribute is not a reason to leave the
+    /// user without a working agent.
+    private func hardenAtRest(_ paths: [String]) {
+        for path in paths {
+            let url = URL(fileURLWithPath: path)
+            // The file may not exist yet on a first run; create the directory so
+            // the attribute can be applied to it, and apply the rest lazily.
+            let directory = url.deletingLastPathComponent()
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+            for target in [url, directory] {
+                var marked = target
+                var values = URLResourceValues()
+                values.isExcludedFromBackup = true
+                try? marked.setResourceValues(values)
+
+                if FileManager.default.fileExists(atPath: target.path) {
+                    try? FileManager.default.setAttributes(
+                        [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                        ofItemAtPath: target.path
+                    )
+                }
             }
         }
     }
@@ -213,10 +259,12 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             do {
                 let resolvedWorkspacePath = self.resolvePath(workspacePath)
+                let resolvedDbPath = self.resolvePath(dbPath)
+                let resolvedAuthPath = self.resolvePath(authProfilesPath)
                 let config = InitConfig(
-                    dbPath: self.resolvePath(dbPath),
+                    dbPath: resolvedDbPath,
                     workspacePath: resolvedWorkspacePath,
-                    authProfilesPath: self.resolvePath(authProfilesPath)
+                    authProfilesPath: resolvedAuthPath
                 )
                 let h = try NativeAgentHandle(config: config)
                 try h.setEventCallback(callback: NativeAgentEventBridge(plugin: self))
@@ -231,6 +279,9 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
                     try h.setMemoryProvider(provider: memoryProvider)
                 }
                 try h.persistConfig()
+                // Applied after the engine has created the files, so the
+                // attributes land on real paths rather than being skipped.
+                self.hardenAtRest([resolvedAuthPath, resolvedDbPath])
                 self.handle = h
                 UserDefaults.standard.set(
                     self.resolveConfigPath(workspacePath: resolvedWorkspacePath),
