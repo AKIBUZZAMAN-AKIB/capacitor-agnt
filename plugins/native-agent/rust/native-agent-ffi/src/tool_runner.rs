@@ -593,6 +593,40 @@ fn walk_grep(dir: &Path, re: &regex::Regex, matches: &mut Vec<serde_json::Value>
 
 // ── Shell execution ─────────────────────────────────────────────────────────
 
+/// iOS forbids process spawning outright for sandboxed apps: `fork`, `exec`
+/// and `posix_spawn` all fail with EPERM, and `NSTask` is not part of the iOS
+/// SDK. `tokio::process::Command` goes through `posix_spawn`, so this tool can
+/// never work there.
+///
+/// Previously the model was simply told "Execute a shell command", tried it,
+/// and got a bare "Command failed to start: Operation not permitted (os error
+/// 1)". Nothing in that says the tool is *permanently* unavailable, so a model
+/// would reasonably retry it — burning turns for the rest of the session.
+/// Answering with an explicit, final explanation lets it switch strategy on the
+/// very next step.
+#[cfg(target_os = "ios")]
+async fn tool_execute_command(
+    args: &serde_json::Value,
+    _workspace: &str,
+) -> Result<serde_json::Value, NativeAgentError> {
+    let command = args["command"].as_str().unwrap_or("");
+    ok_json(serde_json::json!({
+        "exitCode": -1,
+        "stdout": "",
+        "stderr": format!(
+            "execute_command is not available on iOS: the operating system does not \
+             permit an app to start another process, so no shell exists to run '{}'. \
+             This is permanent — do not retry it. Use read_file, write_file, edit_file, \
+             list_files, find_files, grep_files and the git_* tools instead, which are \
+             implemented natively and work on iOS.",
+            command
+        ),
+        "timedOut": false,
+        "unsupported": true,
+    }))
+}
+
+#[cfg(not(target_os = "ios"))]
 async fn tool_execute_command(
     args: &serde_json::Value,
     workspace: &str,
@@ -1367,7 +1401,16 @@ fn all_tool_definitions() -> Vec<ToolDefinition> {
         ),
         tool_def(
             "execute_command",
-            "Execute a shell command",
+            // The model plans around this string, so it has to state the real
+            // constraints: there is no shell at all on iOS, and Android ships a
+            // minimal toybox userland — no git binary, no python, no node.
+            "Execute a shell command via `sh -c` in the workspace. \
+             ANDROID ONLY: iOS forbids starting processes, and this returns an \
+             \"unsupported\" result there. The Android userland is minimal \
+             (toybox): common file utilities exist, but git, python and node do \
+             not — use the git_* tools for version control. Times out after 30 s \
+             by default (`timeout_ms`, max 300000). stdin is /dev/null, so \
+             interactive commands see EOF rather than hanging.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
