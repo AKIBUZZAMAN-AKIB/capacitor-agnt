@@ -18,6 +18,7 @@ import { Widget } from '@nativekit/widget';
 import { NativeAgent } from 'capacitor-native-agent';
 import { InAppBrowser } from '@capgo/capacitor-inappbrowser';
 import { createAppBrowser } from './app-browser';
+import { connectMcpServers, type McpConnection, type McpServerConfig } from './mcp-client';
 
 interface NativeKitBuildConfig {
   app: { name: string; id: string; versionName: string; versionCode: number; buildNumber: string };
@@ -926,6 +927,34 @@ const NativeKit: any = {
     resetToolPermissions: async () => { feature('agent'); requireNative(); return NativeAgent.resetToolPermissions(); },
 
     // ── MCP ──
+    //
+    // `startMcp`/`setMcpTools`/`respondToMcpTool` are the raw engine hooks: they
+    // register a tool catalogue and answer the calls the model makes. They do
+    // NOT speak to an MCP server — the plugin has no MCP client.
+    //
+    // `connectMcp` is that client. It performs the JSON-RPC handshake against
+    // each server, publishes every server's `tools/list` as one namespaced
+    // catalogue, and answers each `mcp_tool_call` by forwarding it as
+    // `tools/call`. Use it unless you need the raw hooks.
+    //
+    //   const mcp = await NativeKit.agent.connectMcp([
+    //     { name: 'github', url: 'https://mcp.example/github' },
+    //   ]);
+    //   // ... later
+    //   await mcp.dispose();
+    connectMcp: async (servers: McpServerConfig[]): Promise<McpConnection> => {
+      feature('agent'); requireNative();
+      return connectMcpServers(
+        {
+          startMcp: (toolsJson: string) => NativeAgent.startMcp({ toolsJson }),
+          respondToMcpTool: (toolCallId: string, resultJson: string, isError?: boolean) =>
+            NativeAgent.respondToMcpTool({ toolCallId, resultJson, isError: Boolean(isError) }),
+          addListener: (event: string, handler: (payload: any) => void) =>
+            (NativeAgent as any).addListener(event, handler),
+        },
+        servers,
+      );
+    },
     startMcp: async (toolsJson: string) => { feature('agent'); requireNative(); return NativeAgent.startMcp({ toolsJson }); },
     restartMcp: async (toolsJson: string) => { feature('agent'); requireNative(); return NativeAgent.restartMcp({ toolsJson }); },
     setMcpTools: async (toolsJson: string) => {

@@ -25,6 +25,33 @@ public enum NativeAgentWakeRunner {
         public let summary: String
     }
 
+    /// The handle of the wake currently in flight, if any.
+    ///
+    /// `run` blocks its thread inside Rust, so the only way to stop it from
+    /// outside is to raise the engine's own abort flag. `handleWake` checks that
+    /// flag between cron jobs, so aborting makes the loop return cleanly at the
+    /// next boundary — the job in flight still finalizes its own `cron_runs`
+    /// row, and everything untouched stays due for the next wake.
+    private static let activeHandleLock = NSLock()
+    private static var activeHandle: NativeAgentHandle?
+
+    /// Ask the in-flight wake to stop at the next safe point.
+    ///
+    /// Called from the `BGProcessingTask` expiration handler. Before this the
+    /// handler could only report failure and walk away while Rust kept running
+    /// on a background thread — burning the battery the expiration exists to
+    /// protect, and still writing rows after iOS considered the task over.
+    ///
+    /// Safe to call when nothing is running, and safe to call twice.
+    public static func requestCancel() {
+        activeHandleLock.lock()
+        let handle = activeHandle
+        activeHandleLock.unlock()
+        // A fresh handle is built for every wake, so raising the flag here can
+        // never leak into the next one.
+        try? handle?.abort()
+    }
+
     /// Runs one wake. Synchronous and blocking (the Rust FFI blocks its calling
     /// thread), so callers hand it to a background queue.
     public static func run(source: String) -> Outcome {
@@ -39,6 +66,14 @@ public enum NativeAgentWakeRunner {
 
         do {
             let handle = try createHandleFromPersistedConfig(configPath: configPath)
+            activeHandleLock.lock()
+            activeHandle = handle
+            activeHandleLock.unlock()
+            defer {
+                activeHandleLock.lock()
+                activeHandle = nil
+                activeHandleLock.unlock()
+            }
             NativeAgentWakeCapture.installRecordingNotifier(handle: handle, store: store)
             // Same provider the foreground wires in initialize(); without it the
             // engine's memory tools answer "Memory provider not configured".

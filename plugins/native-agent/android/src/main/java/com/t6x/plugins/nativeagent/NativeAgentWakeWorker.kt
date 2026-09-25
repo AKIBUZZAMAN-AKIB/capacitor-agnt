@@ -38,6 +38,21 @@ class NativeAgentWakeWorker(
         return Result.success()
     }
 
+    /**
+     * WorkManager is taking the worker away — past the 10-minute ceiling, a
+     * constraint no longer met, or the work was cancelled.
+     *
+     * Stopping the worker does not stop the blocking Rust call underneath, so
+     * without this the engine kept running (and writing rows) on a thread the
+     * OS had already stopped accounting for. Raising the engine's abort flag
+     * makes the wake loop return at its next job boundary instead.
+     */
+    override fun onStopped() {
+        Log.w(TAG, "WorkManager stopped the worker — asking the engine to wind down")
+        NativeWakeRunner.requestCancel()
+        super.onStopped()
+    }
+
     private companion object {
         const val TAG = "NativeAgentWakeWorker"
     }

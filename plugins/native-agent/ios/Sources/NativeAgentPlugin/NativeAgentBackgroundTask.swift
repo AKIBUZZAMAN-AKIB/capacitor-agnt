@@ -136,9 +136,17 @@ public final class NativeAgentBackgroundTask: NSObject {
         // exactly once, from whichever finishes first.
         let completion = CompletedOnce()
         task.expirationHandler = {
-            // The Rust call cannot be cancelled mid-flight — the engine bounds each
-            // job itself (25 s wall clock) — so the honest answer here is "not
-            // finished", and the next wake picks the work up again.
+            // Signal the engine to stop at its next safe point. `handleWake`
+            // checks the abort flag between cron jobs, so the loop returns
+            // cleanly: the job in flight still finalizes its own run row, and
+            // everything untouched stays due for the next wake.
+            //
+            // This used to be a no-op with a comment saying the Rust call could
+            // not be cancelled. It can — `abort()` raises the very flag the wake
+            // loop polls — and without it Rust kept working on a background
+            // thread after iOS had already reclaimed the task, burning the
+            // battery that the expiration limit exists to protect.
+            NativeAgentWakeRunner.requestCancel()
             completion.run { task.setTaskCompleted(success: false) }
         }
 

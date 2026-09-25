@@ -28,6 +28,35 @@ internal object NativeWakeRunner {
     /** `wake_source` used by OS-initiated wakes; also what `wakeSource` reports. */
     const val SOURCE_WORKER = "android-worker"
 
+    /**
+     * The handle of the wake currently in flight, if any.
+     *
+     * [run] blocks its thread inside Rust, so the only way to stop it from
+     * outside is to raise the engine's own abort flag. `handleWake` checks that
+     * flag between cron jobs, so aborting returns the loop cleanly at the next
+     * boundary: the job in flight still finalizes its own `cron_runs` row and
+     * everything untouched stays due for the next wake.
+     */
+    @Volatile
+    private var activeHandle: uniffi.native_agent_ffi.NativeAgentHandle? = null
+
+    /**
+     * Ask the in-flight wake to stop at the next safe point.
+     *
+     * Called from [NativeAgentWakeWorker.onStopped]. WorkManager stops a worker
+     * when it exceeds its 10-minute ceiling, when its constraints stop being
+     * met, or when the work is cancelled — but stopping the worker does NOT
+     * stop this blocking Rust call, which carried on running (and writing) on a
+     * thread WorkManager had already stopped accounting for.
+     *
+     * Safe to call when nothing is running, and safe to call twice.
+     */
+    fun requestCancel() {
+        // A fresh handle is built for every wake, so raising the flag here can
+        // never leak into the next one.
+        runCatching { activeHandle?.abort() }
+    }
+
     data class RunResult(val ok: Boolean, val ran: Int, val failed: Int, val summary: String)
 
     fun run(context: Context, source: String): RunResult {
@@ -46,6 +75,7 @@ internal object NativeWakeRunner {
         return try {
             val restored = createHandleFromPersistedConfig(configPath)
             handle = restored
+            activeHandle = restored
             NativeWakeCapture.installRecordingNotifier(appContext, restored)
             // Same provider the foreground wires in initialize(); without it the
             // engine's memory tools answer "Memory provider not configured".
@@ -62,6 +92,7 @@ internal object NativeWakeRunner {
             store.recordWake(source, summary, 0, false)
             RunResult(false, 0, 0, summary)
         } finally {
+            activeHandle = null
             try {
                 handle?.close()
             } catch (t: Throwable) {
