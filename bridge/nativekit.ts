@@ -944,6 +944,42 @@ const NativeKit: any = {
     //   await mcp.dispose();
     connectMcp: async (servers: McpServerConfig[]): Promise<McpConnection> => {
       feature('agent'); requireNative();
+      // Remote MCP providers (Composio, Zapier, any hosted endpoint) are built
+      // for server and desktop clients, so they generally do NOT send
+      // `Access-Control-Allow-Origin` for a WebView origin like
+      // `capacitor://localhost`. A plain `fetch` from here is therefore blocked
+      // by CORS before the request ever leaves the device, and the failure
+      // looks like a network or auth error rather than a browser policy.
+      //
+      // CapacitorHttp performs the request natively, outside the WebView's
+      // origin rules, which is the same reason `NativeKit.http` uses it. The
+      // response is adapted back to the small slice of `fetch` the MCP
+      // transport needs.
+      const nativeFetch = (async (input: any, init: any = {}) => {
+        const response: any = await CapacitorHttp.request({
+          url: String(input),
+          method: init.method ?? 'GET',
+          headers: init.headers ?? {},
+          data: init.body,
+          connectTimeout: config.network.connectTimeoutMs,
+          readTimeout: config.network.readTimeoutMs,
+          // MCP replies are JSON or SSE text; never let the plugin guess.
+          responseType: 'text',
+        });
+        const headers = new Map<string, string>(
+          Object.entries(response.headers ?? {}).map(([k, v]) => [k.toLowerCase(), String(v)]),
+        );
+        const body = typeof response.data === 'string'
+          ? response.data
+          : JSON.stringify(response.data ?? '');
+        return {
+          ok: response.status >= 200 && response.status < 300,
+          status: response.status,
+          headers: { get: (name: string) => headers.get(name.toLowerCase()) ?? null },
+          text: async () => body,
+        };
+      }) as unknown as typeof fetch;
+
       return connectMcpServers(
         {
           startMcp: (toolsJson: string) => NativeAgent.startMcp({ toolsJson }),
@@ -953,6 +989,7 @@ const NativeKit: any = {
             (NativeAgent as any).addListener(event, handler),
         },
         servers,
+        { fetchImpl: isNative ? nativeFetch : undefined },
       );
     },
     startMcp: async (toolsJson: string) => { feature('agent'); requireNative(); return NativeAgent.startMcp({ toolsJson }); },
