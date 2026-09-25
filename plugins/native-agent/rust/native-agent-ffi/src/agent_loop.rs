@@ -82,7 +82,7 @@ pub async fn run_agent_turn(
         .model
         .as_deref()
         .unwrap_or(default_model(provider));
-    let driver = create_driver(provider, &api_key)?;
+    let driver = create_driver(provider, &api_key, &ctx.config.workspace_path)?;
 
     let max_turns = ctx.params.max_turns.unwrap_or(DEFAULT_MAX_TURNS);
     let mut messages = ctx.prior_messages.clone().unwrap_or_default();
@@ -123,6 +123,22 @@ pub async fn run_agent_turn(
         }
         ensure_not_aborted(&ctx.abort_flag).await?;
         apply_steer_messages(&ctx.steer_rx, &mut messages).await;
+
+        // Keep the replayed conversation inside a size the provider will
+        // accept. Reported rather than done silently: the user should know
+        // that the earliest part of the conversation is no longer in context.
+        let dropped = trim_to_context_budget(&mut messages, CONTEXT_CHAR_BUDGET);
+        if dropped > 0 {
+            event_bus::emit(
+                callback,
+                "context.trimmed",
+                &serde_json::json!({
+                    "droppedMessages": dropped,
+                    "remainingMessages": messages.len(),
+                    "sessionKey": ctx.session_key,
+                }),
+            );
+        }
 
         let req = CompletionRequest {
             model: model.to_string(),
@@ -390,6 +406,97 @@ pub async fn run_agent_turn(
         messages,
         model: model.to_string(),
     })
+}
+
+/// Rough character budget for the conversation replayed to the provider.
+///
+/// Deliberately a CHARACTER budget and not a token count: tokenising properly
+/// would mean shipping a tokeniser per provider, and the number only has to be
+/// safe, not exact. The ratio is language-dependent and English is NOT the
+/// worst case — Bengali, Hindi and Thai tokenise at roughly 1.5–2 characters
+/// per token against English's ~4, so the same text costs two to three times
+/// more tokens. This value is chosen so that even the expensive case stays
+/// inside a 128k-token window with room for the system prompt, the tool
+/// schemas and the reply.
+const CONTEXT_CHAR_BUDGET: usize = 150_000;
+
+/// Approximate size of a message as replayed to the provider.
+fn message_cost(message: &Message) -> usize {
+    match &message.content {
+        MessageContent::Text(t) => t.chars().count(),
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .map(|b| match b {
+                ContentBlock::Text { text } => text.chars().count(),
+                ContentBlock::Thinking { thinking } => thinking.chars().count(),
+                ContentBlock::ToolResult { content, .. } => content.chars().count(),
+                ContentBlock::ToolUse { input, .. } | ContentBlock::ServerToolUse { input, .. } => {
+                    input.to_string().chars().count()
+                }
+                ContentBlock::WebSearchToolResult { content, .. } => {
+                    content.to_string().chars().count()
+                }
+            })
+            .sum::<usize>()
+            // Every block carries wrapper JSON and role framing too.
+            .saturating_add(blocks.len() * 16),
+    }
+}
+
+/// Does this message only answer earlier tool calls?
+///
+/// Such a message can never begin a transcript: the API rejects a
+/// `tool_result` whose matching `tool_use` is not present.
+fn is_tool_result_only(message: &Message) -> bool {
+    match &message.content {
+        MessageContent::Blocks(blocks) => {
+            !blocks.is_empty()
+                && blocks
+                    .iter()
+                    .all(|b| matches!(b, ContentBlock::ToolResult { .. }))
+        }
+        MessageContent::Text(_) => false,
+    }
+}
+
+/// Drop the oldest messages until the replayed conversation fits the budget.
+///
+/// Without this the whole history is re-sent every turn and grows without
+/// bound: a long session eventually gets a hard "prompt is too long" from the
+/// provider, and because the stored transcript only ever grows, EVERY later
+/// turn fails the same way. The session becomes permanently unusable with no
+/// way back — the same shape of failure as an orphaned `tool_use`.
+///
+/// Two invariants make the trim safe:
+///
+///  * the result never starts with a message that only contains
+///    `tool_result` blocks, because its `tool_use` would have been dropped;
+///  * the newest messages are always kept, since they carry the live task.
+///
+/// Returns how many messages were dropped.
+fn trim_to_context_budget(messages: &mut Vec<Message>, budget: usize) -> usize {
+    let mut total: usize = messages.iter().map(message_cost).sum();
+    if total <= budget {
+        return 0;
+    }
+
+    let mut drop_to = 0usize;
+    // Never drop the final message: it is the turn we are answering.
+    while total > budget && drop_to < messages.len().saturating_sub(1) {
+        total = total.saturating_sub(message_cost(&messages[drop_to]));
+        drop_to += 1;
+    }
+
+    // Advance past any message that cannot legally start a transcript.
+    while drop_to < messages.len().saturating_sub(1) && is_tool_result_only(&messages[drop_to]) {
+        drop_to += 1;
+    }
+
+    if drop_to == 0 {
+        return 0;
+    }
+    messages.drain(..drop_to);
+    drop_to
 }
 
 fn wall_clock_timeout_reached(ctx: &AgentLoopContext<'_>, started_at: std::time::Instant) -> bool {
@@ -674,17 +781,27 @@ async fn call_with_retry(
     })
 }
 
-fn create_driver(provider: &str, api_key: &str) -> Result<Box<dyn LlmDriver>, NativeAgentError> {
+fn create_driver(
+    provider: &str,
+    api_key: &str,
+    workspace_path: &str,
+) -> Result<Box<dyn LlmDriver>, NativeAgentError> {
+    // A user-supplied endpoint from `.openclaw/openclaw.json`, if any, always
+    // wins over the built-in default.
+    let override_url = crate::workspace::provider_base_url(workspace_path, provider);
     match provider {
-        "anthropic" => Ok(Box::new(AnthropicDriver::new(api_key.to_string(), None))),
+        "anthropic" => Ok(Box::new(AnthropicDriver::new(
+            api_key.to_string(),
+            override_url,
+        ))),
         "openrouter" => Ok(Box::new(AnthropicDriver::new(
             api_key.to_string(),
-            Some("https://openrouter.ai/api".to_string()),
+            Some(override_url.unwrap_or_else(|| "https://openrouter.ai/api".to_string())),
         ))),
         // `openai` was advertised by get_models_json() and default_model() but
         // had no driver, so choosing it always failed with "Unsupported
         // provider". Backed by a real Chat Completions implementation now.
-        "openai" => Ok(Box::new(OpenAiDriver::new(api_key.to_string(), None))),
+        "openai" => Ok(Box::new(OpenAiDriver::new(api_key.to_string(), override_url))),
         other => Err(NativeAgentError::Agent {
             msg: format!(
                 "Unsupported provider: {}. Supported providers: anthropic, openai, openrouter.",
@@ -715,6 +832,103 @@ fn rand_u64() -> u64 {
     x ^= x >> 7;
     x ^= x << 17;
     x
+}
+
+#[cfg(test)]
+mod context_budget_tests {
+    use super::*;
+
+    fn user(text: &str) -> Message {
+        Message::user(text)
+    }
+    fn assistant_tool(id: &str) -> Message {
+        Message::assistant_blocks(vec![ContentBlock::ToolUse {
+            id: id.into(),
+            name: "read_file".into(),
+            input: serde_json::json!({}),
+        }])
+    }
+    fn tool_result(id: &str, body: &str) -> Message {
+        Message {
+            role: crate::types::Role::User,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: id.into(),
+                content: body.into(),
+                is_error: false,
+            }]),
+        }
+    }
+
+    #[test]
+    fn a_short_conversation_is_left_alone() {
+        let mut m = vec![user("hi"), Message::assistant_blocks(vec![ContentBlock::Text { text: "hello".into() }])];
+        let before = m.len();
+        assert_eq!(trim_to_context_budget(&mut m, CONTEXT_CHAR_BUDGET), 0);
+        assert_eq!(m.len(), before);
+    }
+
+    #[test]
+    fn an_oversized_conversation_is_cut_down() {
+        let big = "x".repeat(5_000);
+        let mut m: Vec<Message> = (0..50).map(|_| user(&big)).collect();
+        m.push(user("the live question"));
+
+        let dropped = trim_to_context_budget(&mut m, 20_000);
+        assert!(dropped > 0, "an oversized history must be trimmed");
+        let total: usize = m.iter().map(message_cost).sum();
+        assert!(total <= 20_000 + 5_100, "still oversized: {total}");
+        // The newest message carries the live task and must survive.
+        assert_eq!(m.last().unwrap().text(), "the live question");
+    }
+
+    /// The invariant that makes trimming safe: the API rejects a transcript
+    /// beginning with a `tool_result` whose `tool_use` was dropped.
+    #[test]
+    fn the_result_never_begins_with_an_orphan_tool_result() {
+        let big = "y".repeat(4_000);
+        let mut m = vec![
+            user(&big),
+            assistant_tool("t1"),
+            tool_result("t1", &big),
+            assistant_tool("t2"),
+            tool_result("t2", &big),
+            user("now answer"),
+        ];
+        trim_to_context_budget(&mut m, 5_000);
+        assert!(!m.is_empty());
+        assert!(
+            !is_tool_result_only(&m[0]),
+            "transcript starts with an orphaned tool_result"
+        );
+    }
+
+    #[test]
+    fn trimming_is_stable_when_run_twice() {
+        let big = "z".repeat(3_000);
+        let mut m: Vec<Message> = (0..20).map(|_| user(&big)).collect();
+        trim_to_context_budget(&mut m, 10_000);
+        let after_first = m.len();
+        // A second pass on an already-trimmed history must be a no-op.
+        assert_eq!(trim_to_context_budget(&mut m, 10_000), 0);
+        assert_eq!(m.len(), after_first);
+    }
+
+    #[test]
+    fn a_single_huge_message_is_never_dropped() {
+        // Dropping the only message would leave nothing to answer; the turn
+        // should reach the provider and fail there with a real error instead.
+        let mut m = vec![user(&"w".repeat(100_000))];
+        assert_eq!(trim_to_context_budget(&mut m, 1_000), 0);
+        assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn cost_counts_characters_not_bytes() {
+        // Bengali is 3 bytes per character; counting bytes would over-trim by
+        // 3x for exactly the users this app targets.
+        let bengali = user("আমি");
+        assert!(message_cost(&bengali) <= 8, "got {}", message_cost(&bengali));
+    }
 }
 
 #[cfg(test)]

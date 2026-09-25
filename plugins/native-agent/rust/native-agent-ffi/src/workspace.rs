@@ -196,6 +196,12 @@ const DEFAULT_OPENCLAW_CONFIG: &str = r#"{
   "gateway": {
     "port": 18789
   },
+  "//providers": "Point a provider at your own gateway, proxy or self-hosted endpoint. Edit this file and restart the app; it is never overwritten. Anthropic-shaped providers get /v1/messages appended, openai gets /chat/completions.",
+  "providers": {
+    "anthropic": { "baseUrl": "https://api.anthropic.com" },
+    "openai": { "baseUrl": "https://api.openai.com/v1" },
+    "openrouter": { "baseUrl": "https://openrouter.ai/api" }
+  },
   "agents": {
     "defaults": {
       "model": {
@@ -274,6 +280,50 @@ pub fn init_default_files(config: &InitConfig) -> Result<(), NativeAgentError> {
     )?;
 
     Ok(())
+}
+
+/// Read a provider's base URL from `openclaw.json` (the workspace's parent).
+///
+/// That file was written on first run and then never read by anything — a
+/// config surface that looked real and did nothing. It is now the supported
+/// way to point a provider somewhere else: a corporate gateway, a caching
+/// proxy, a self-hosted or region-pinned endpoint, or a local mock in tests.
+///
+/// Chosen over a new FFI parameter deliberately. The file already exists, it
+/// lives outside the agent's own sandbox so the agent cannot rewrite its own
+/// endpoint, it is `write_if_missing` so a user's edit survives every upgrade,
+/// and it needs no change to the UniFFI surface — which would otherwise
+/// invalidate the prebuilt `.so` and `.xcframework` slices.
+///
+/// Any problem — missing file, bad JSON, absent key — returns `None`, and the
+/// caller falls back to the built-in default. A malformed config must never
+/// stop the agent from reaching its provider.
+pub fn provider_base_url(workspace_path: &str, provider: &str) -> Option<String> {
+    let path = openclaw_root(workspace_path).ok()?.join("openclaw.json");
+    let raw = fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let url = value
+        .get("providers")?
+        .get(provider)?
+        .get("baseUrl")?
+        .as_str()?
+        .trim()
+        .to_string();
+    if url.is_empty() {
+        return None;
+    }
+    // Only http(s) — a file:// or similar here would be a way to make the
+    // engine read arbitrary local paths.
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        tracing::warn!(
+            provider,
+            url = %url,
+            "ignoring a provider baseUrl that is not http(s)"
+        );
+        return None;
+    }
+    // A trailing slash would produce `//v1/messages`.
+    Some(url.trim_end_matches('/').to_string())
 }
 
 /// Generate the "Available Tools" section of the system prompt dynamically
@@ -367,6 +417,83 @@ pub fn get_models_json(provider: &str) -> String {
     };
 
     models.to_string()
+}
+
+#[cfg(test)]
+mod base_url_tests {
+    use super::*;
+
+    fn workspace_with(config: Option<&str>) -> (std::path::PathBuf, String) {
+        let root = std::env::temp_dir().join(format!("nk-url-{}", uuid::Uuid::new_v4()));
+        let ws = root.join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+        if let Some(c) = config {
+            // openclaw_root() is the workspace's PARENT, and the file sits
+            // directly in it — not under a `.openclaw/` subdirectory.
+            std::fs::write(root.join("openclaw.json"), c).unwrap();
+        }
+        let p = ws.to_string_lossy().into_owned();
+        (root, p)
+    }
+
+    #[test]
+    fn a_configured_base_url_is_used() {
+        let (root, ws) = workspace_with(Some(
+            r#"{"providers":{"anthropic":{"baseUrl":"https://gw.corp.example"}}}"#,
+        ));
+        assert_eq!(
+            provider_base_url(&ws, "anthropic").as_deref(),
+            Some("https://gw.corp.example")
+        );
+        // An unconfigured provider falls back to the built-in default.
+        assert!(provider_base_url(&ws, "openai").is_none());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_trailing_slash_is_removed() {
+        // Otherwise the request URL becomes `https://x//v1/messages`.
+        let (root, ws) = workspace_with(Some(
+            r#"{"providers":{"openai":{"baseUrl":"https://x.example/v1/"}}}"#,
+        ));
+        assert_eq!(
+            provider_base_url(&ws, "openai").as_deref(),
+            Some("https://x.example/v1")
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn non_http_schemes_are_refused() {
+        // file:// here would turn the endpoint setting into arbitrary local reads.
+        for bad in ["file:///etc/passwd", "ftp://x.example", "javascript:alert(1)", ""] {
+            let (root, ws) = workspace_with(Some(&format!(
+                r#"{{"providers":{{"openai":{{"baseUrl":"{bad}"}}}}}}"#
+            )));
+            assert!(provider_base_url(&ws, "openai").is_none(), "{bad} was accepted");
+            std::fs::remove_dir_all(root).ok();
+        }
+    }
+
+    #[test]
+    fn a_broken_config_never_blocks_the_agent() {
+        // Every failure mode must fall back to the built-in default.
+        for cfg in [Some("{ not json"), Some("{}"), Some(r#"{"providers":{}}"#), None] {
+            let (root, ws) = workspace_with(cfg);
+            assert!(provider_base_url(&ws, "anthropic").is_none());
+            std::fs::remove_dir_all(root).ok();
+        }
+    }
+
+    #[test]
+    fn the_shipped_default_config_documents_the_providers_block() {
+        let v: serde_json::Value = serde_json::from_str(DEFAULT_OPENCLAW_CONFIG).unwrap();
+        let providers = v.get("providers").expect("providers block is missing");
+        for name in ["anthropic", "openai", "openrouter"] {
+            let url = providers.get(name).and_then(|p| p.get("baseUrl")).and_then(|u| u.as_str());
+            assert!(url.is_some_and(|u| u.starts_with("https://")), "{name}");
+        }
+    }
 }
 
 #[cfg(test)]

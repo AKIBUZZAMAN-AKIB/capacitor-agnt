@@ -63,7 +63,7 @@ workspace-এর ভিতরে নয়। কারণ workspace হলো �
 |---|---|---|---|
 | ৭টি `.md` | `initWorkspace()` | system prompt-এর উপাদান | ❌ `write_if_missing` — **আপনার সম্পাদনা টিকে থাকে** |
 | `auth-profiles.json` | `initWorkspace()` | credential | ❌ শুধু না থাকলে |
-| `.openclaw/openclaw.json` | `initWorkspace()` | engine config | ❌ শুধু না থাকলে |
+| `openclaw.json` | `initWorkspace()` | **provider base URL** | ❌ শুধু না থাকলে — **আপনার সম্পাদনা টেকে** |
 | `agent.db` | প্রথম DB access | সব persistent state | — |
 | `.native-agent-config.json` | `initialize()` → `persistConfig()` | background wake-এ WebView থাকে না, তাই তিনটি path ডিস্ক থেকে পড়তে হয় | ✅ প্রতি `initialize()`-এ (atomic) |
 | `native-agent-memory/memory.json` | প্রথম `memory_store` | long-term memory | ✅ atomic rewrite |
@@ -182,7 +182,7 @@ scoring** — কোনো embedding বা vector DB নেই। কাজ ক
 
 | মান | বর্তমান | কোথায় |
 |---|---|---|
-| `temperature` | **0.0** (fixed) | `agent_loop.rs:138` |
+| `temperature` | **0.0** (fixed) | `agent_loop.rs` |
 | `max_tokens` | 8192 | `DEFAULT_MAX_TOKENS` |
 | ডিফল্ট max turns | 25 | `DEFAULT_MAX_TURNS` |
 | Retry | 2 বার, 2s→30s backoff | `MAX_RETRIES` |
@@ -195,6 +195,32 @@ scoring** — কোনো embedding বা vector DB নেই। কাজ ক
 **সবচেয়ে উল্লেখযোগ্য ফাঁক:** `temperature` শূন্যে স্থির — সৃজনশীল লেখার জন্য
 বদলানোর কোনো উপায় নেই। এটা যোগ করতে `SendMessageParams`-এ ফিল্ড লাগবে, যা FFI
 signature বদলায় (এখন CI দুই প্ল্যাটফর্মের বাইনারি rebuild করে, তাই সম্ভব)।
+
+### ৩.৩ ✅ Provider base URL (নতুন)
+
+`openclaw.json` আগে লেখা হতো কিন্তু **কখনো পড়া হতো না**। এখন এটাই base URL
+কাস্টমাইজ করার সমর্থিত জায়গা:
+
+```jsonc
+{
+  "providers": {
+    "anthropic":  { "baseUrl": "https://gateway.amar-company.com" },
+    "openai":     { "baseUrl": "https://api.openai.com/v1" },
+    "openrouter": { "baseUrl": "https://openrouter.ai/api" }
+  }
+}
+```
+
+ফাইল সম্পাদনা করে অ্যাপ restart করুন। ব্যবহার: কর্পোরেট gateway, caching proxy,
+self-hosted বা region-pinned endpoint, অথবা টেস্টে local mock।
+
+**কেন নতুন FFI প্যারামিটার নয়:** (১) ফাইলটা আগে থেকেই আছে, (২) এটা এজেন্টের
+sandbox-এর **বাইরে**, তাই এজেন্ট নিজের endpoint বদলাতে পারে না, (৩)
+`write_if_missing` — আপগ্রেডে আপনার সম্পাদনা টেকে, (৪) FFI surface অপরিবর্তিত।
+
+**নিরাপত্তা:** শুধু `http`/`https` গ্রহণযোগ্য (`file://` দিলে এটা যেকোনো লোকাল
+ফাইল পড়ার পথ হয়ে যেত), trailing `/` কেটে দেওয়া হয়, আর ভাঙা config হলে নীরবে
+ডিফল্টে ফিরে যায় — কখনোই এজেন্ট আটকায় না।
 
 ---
 
@@ -211,12 +237,40 @@ signature বদলায় (এখন CI দুই প্ল্যাটফর
 
 ---
 
+## ৪.৫ Long context — খুব লম্বা কথোপকথনে কী হয়
+
+**আগে যা হতো (গুরুতর বাগ):** প্রতিটি turn-এ **পুরো history** আবার পাঠানো হতো,
+কোনো সীমা ছাড়া। কথোপকথন বড় হতে হতে provider একসময় `400 prompt is too long`
+দিত — আর যেহেতু সংরক্ষিত transcript শুধু **বাড়েই**, তারপর **প্রতিটি turn একই
+ভাবে ব্যর্থ** হতো। Session স্থায়ীভাবে অব্যবহার্য, ফেরার কোনো পথ নেই।
+
+**এখন:** `CONTEXT_CHAR_BUDGET` (১,৫০,০০০ অক্ষর) ছাড়ালে সবচেয়ে **পুরোনো** বার্তা
+বাদ দেওয়া হয়, দুটি শর্ত মেনে:
+
+1. ফলাফল কখনো এমন বার্তা দিয়ে শুরু হয় না যেখানে শুধু `tool_result` আছে —
+   তার `tool_use` বাদ পড়ে গেলে API প্রত্যাখ্যান করত
+2. সবচেয়ে **নতুন** বার্তাগুলো সবসময় থাকে (চলমান কাজ ওখানেই)
+
+ট্রিম হলে `context.trimmed` event emit হয় — **নীরবে হয় না**, ব্যবহারকারী জানতে
+পারেন কথোপকথনের শুরুর অংশ আর context-এ নেই।
+
+> **কেন token নয়, character:** সঠিক token গুনতে প্রতিটি provider-এর tokenizer
+> লাগত। আর English সবচেয়ে খারাপ কেস **নয়** — বাংলা/হিন্দি/থাই প্রতি token-এ
+> ~১.৫–২ অক্ষর, English-এ ~৪। অর্থাৎ **একই লেখা বাংলায় ২-৩ গুণ বেশি token
+> খরচ করে**, আর budget সেই ব্যয়বহুল কেস ধরেই বাছা। গণনা **অক্ষরে**, byte-এ নয় —
+> byte-এ গুনলে বাংলা ৩ গুণ বেশি কাটা পড়ত।
+
+**এখনো সীমা নেই:** `messages` টেবিল ডিস্কে বাড়তেই থাকে (শুধু *পাঠানো* অংশ
+সীমিত)।
+
+---
+
 ## ৫. এক নজরে সীমাবদ্ধতা
 
 1. **iOS-এ `execute_command` কাজ করে না** — OS নিষেধ, workaround নেই
 2. **Android-এ শুধু toybox** — git/python/node নেই
 3. **memory "semantic" নয়** — lexical matching
-4. **`temperature` বদলানো যায় না**
+4. **`temperature` বদলানো যায় না** (base URL এখন যায় — §৩.৩)
 5. **MCP client আলাদা** — `connectMcp` ব্যবহার করুন (plugin নিজে MCP client নয়)
 6. **auth plaintext** — OS-স্তরের encryption-এর উপর নির্ভরশীল
 7. **`messages` টেবিলের retention নেই** — দীর্ঘ কথোপকথন বাড়তেই থাকবে
