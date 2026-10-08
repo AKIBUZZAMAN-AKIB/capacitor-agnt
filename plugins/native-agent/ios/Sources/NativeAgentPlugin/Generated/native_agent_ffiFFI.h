@@ -253,49 +253,49 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureStr
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_MEMORY_PROVIDER_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_MEMORY_PROVIDER_METHOD0
-typedef void (*UniffiCallbackInterfaceMemoryProviderMethod0)(uint64_t, RustBuffer, RustBuffer, RustBuffer, RustBuffer* _Nonnull,
+typedef void (*UniffiCallbackInterfaceMemoryProviderMethod0)(uint64_t, RustBuffer, RustBuffer, RustBuffer, RustBuffer* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_MEMORY_PROVIDER_METHOD1
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_MEMORY_PROVIDER_METHOD1
-typedef void (*UniffiCallbackInterfaceMemoryProviderMethod1)(uint64_t, RustBuffer, uint32_t, RustBuffer* _Nonnull,
+typedef void (*UniffiCallbackInterfaceMemoryProviderMethod1)(uint64_t, RustBuffer, uint32_t, RustBuffer* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_MEMORY_PROVIDER_METHOD2
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_MEMORY_PROVIDER_METHOD2
-typedef void (*UniffiCallbackInterfaceMemoryProviderMethod2)(uint64_t, RustBuffer, RustBuffer* _Nonnull,
+typedef void (*UniffiCallbackInterfaceMemoryProviderMethod2)(uint64_t, RustBuffer, RustBuffer* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_MEMORY_PROVIDER_METHOD3
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_MEMORY_PROVIDER_METHOD3
-typedef void (*UniffiCallbackInterfaceMemoryProviderMethod3)(uint64_t, RustBuffer, uint32_t, RustBuffer* _Nonnull,
+typedef void (*UniffiCallbackInterfaceMemoryProviderMethod3)(uint64_t, RustBuffer, uint32_t, RustBuffer* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_MEMORY_PROVIDER_METHOD4
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_MEMORY_PROVIDER_METHOD4
-typedef void (*UniffiCallbackInterfaceMemoryProviderMethod4)(uint64_t, RustBuffer, RustBuffer, RustBuffer* _Nonnull,
+typedef void (*UniffiCallbackInterfaceMemoryProviderMethod4)(uint64_t, RustBuffer, RustBuffer, RustBuffer* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_NATIVE_EVENT_CALLBACK_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_NATIVE_EVENT_CALLBACK_METHOD0
-typedef void (*UniffiCallbackInterfaceNativeEventCallbackMethod0)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull,
+typedef void (*UniffiCallbackInterfaceNativeEventCallbackMethod0)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_NATIVE_NOTIFIER_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_NATIVE_NOTIFIER_METHOD0
-typedef void (*UniffiCallbackInterfaceNativeNotifierMethod0)(uint64_t, RustBuffer, RustBuffer, RustBuffer, RustBuffer* _Nonnull,
+typedef void (*UniffiCallbackInterfaceNativeNotifierMethod0)(uint64_t, RustBuffer, RustBuffer, RustBuffer, RustBuffer* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
@@ -886,349 +886,349 @@ void ffi_native_agent_ffi_rust_future_complete_void(uint64_t handle, RustCallSta
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_FUNC_CREATE_HANDLE_FROM_PERSISTED_CONFIG
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_FUNC_CREATE_HANDLE_FROM_PERSISTED_CONFIG
 uint16_t uniffi_native_agent_ffi_checksum_func_create_handle_from_persisted_config(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_FUNC_INIT_WORKSPACE
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_FUNC_INIT_WORKSPACE
 uint16_t uniffi_native_agent_ffi_checksum_func_init_workspace(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_ABORT
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_ABORT
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_abort(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_ADD_CRON_JOB
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_ADD_CRON_JOB
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_add_cron_job(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_ADD_SKILL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_ADD_SKILL
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_add_skill(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_CLEAR_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_CLEAR_SESSION
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_clear_session(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_DELETE_AUTH
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_DELETE_AUTH
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_delete_auth(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_END_SKILL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_END_SKILL
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_end_skill(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_EXCHANGE_OAUTH_CODE
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_EXCHANGE_OAUTH_CODE
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_exchange_oauth_code(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_FOLLOW_UP
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_FOLLOW_UP
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_follow_up(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_GET_AUTH_STATUS
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_GET_AUTH_STATUS
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_get_auth_status(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_GET_AUTH_TOKEN
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_GET_AUTH_TOKEN
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_get_auth_token(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_GET_HEARTBEAT_CONFIG
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_GET_HEARTBEAT_CONFIG
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_get_heartbeat_config(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_GET_MODELS
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_GET_MODELS
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_get_models(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_GET_SCHEDULER_CONFIG
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_GET_SCHEDULER_CONFIG
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_get_scheduler_config(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_HANDLE_WAKE
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_HANDLE_WAKE
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_handle_wake(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_INVOKE_TOOL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_INVOKE_TOOL
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_invoke_tool(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LIST_CRON_JOBS
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LIST_CRON_JOBS
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_cron_jobs(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LIST_CRON_RUNS
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LIST_CRON_RUNS
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_cron_runs(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LIST_SESSIONS
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LIST_SESSIONS
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_sessions(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LIST_SKILLS
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LIST_SKILLS
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_skills(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LIST_TOOL_PERMISSIONS
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LIST_TOOL_PERMISSIONS
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_list_tool_permissions(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LOAD_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_LOAD_SESSION
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_load_session(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_PERSIST_CONFIG
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_PERSIST_CONFIG
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_persist_config(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_REFRESH_TOKEN
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_REFRESH_TOKEN
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_refresh_token(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_REMOVE_CRON_JOB
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_REMOVE_CRON_JOB
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_remove_cron_job(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_REMOVE_SKILL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_REMOVE_SKILL
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_remove_skill(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_RESET_TOOL_PERMISSIONS
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_RESET_TOOL_PERMISSIONS
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_reset_tool_permissions(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_RESPOND_TO_APPROVAL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_RESPOND_TO_APPROVAL
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_respond_to_approval(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_RESPOND_TO_CRON_APPROVAL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_RESPOND_TO_CRON_APPROVAL
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_respond_to_cron_approval(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_RESPOND_TO_MCP_TOOL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_RESPOND_TO_MCP_TOOL
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_respond_to_mcp_tool(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_RESPOND_TO_PROVIDER_REQUEST
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_RESPOND_TO_PROVIDER_REQUEST
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_respond_to_provider_request(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_RESTART_MCP
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_RESTART_MCP
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_restart_mcp(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_RESUME_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_RESUME_SESSION
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_resume_session(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_RUN_CRON_JOB
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_RUN_CRON_JOB
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_run_cron_job(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SEED_TOOL_PERMISSIONS
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SEED_TOOL_PERMISSIONS
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_seed_tool_permissions(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SEND_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SEND_MESSAGE
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_send_message(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_AUTH_KEY
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_AUTH_KEY
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_auth_key(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_EVENT_CALLBACK
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_EVENT_CALLBACK
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_event_callback(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_HEARTBEAT_CONFIG
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_HEARTBEAT_CONFIG
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_heartbeat_config(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_MEMORY_PROVIDER
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_MEMORY_PROVIDER
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_memory_provider(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_NOTIFIER
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_NOTIFIER
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_notifier(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_SCHEDULER_CONFIG
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_SCHEDULER_CONFIG
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_scheduler_config(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_TOOL_PERMISSION
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_SET_TOOL_PERMISSION
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_set_tool_permission(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_START_MCP
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_START_MCP
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_start_mcp(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_START_SKILL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_START_SKILL
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_start_skill(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_STEER
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_STEER
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_steer(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_UPDATE_CRON_JOB
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_UPDATE_CRON_JOB
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_update_cron_job(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_UPDATE_SKILL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEAGENTHANDLE_UPDATE_SKILL
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeagenthandle_update_skill(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_CONSTRUCTOR_NATIVEAGENTHANDLE_NEW
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_CONSTRUCTOR_NATIVEAGENTHANDLE_NEW
 uint16_t uniffi_native_agent_ffi_checksum_constructor_nativeagenthandle_new(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_MEMORYPROVIDER_STORE
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_MEMORYPROVIDER_STORE
 uint16_t uniffi_native_agent_ffi_checksum_method_memoryprovider_store(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_MEMORYPROVIDER_RECALL
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_MEMORYPROVIDER_RECALL
 uint16_t uniffi_native_agent_ffi_checksum_method_memoryprovider_recall(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_MEMORYPROVIDER_FORGET
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_MEMORYPROVIDER_FORGET
 uint16_t uniffi_native_agent_ffi_checksum_method_memoryprovider_forget(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_MEMORYPROVIDER_SEARCH
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_MEMORYPROVIDER_SEARCH
 uint16_t uniffi_native_agent_ffi_checksum_method_memoryprovider_search(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_MEMORYPROVIDER_LIST
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_MEMORYPROVIDER_LIST
 uint16_t uniffi_native_agent_ffi_checksum_method_memoryprovider_list(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEEVENTCALLBACK_ON_EVENT
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVEEVENTCALLBACK_ON_EVENT
 uint16_t uniffi_native_agent_ffi_checksum_method_nativeeventcallback_on_event(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVENOTIFIER_SEND_NOTIFICATION
 #define UNIFFI_FFIDEF_UNIFFI_NATIVE_AGENT_FFI_CHECKSUM_METHOD_NATIVENOTIFIER_SEND_NOTIFICATION
 uint16_t uniffi_native_agent_ffi_checksum_method_nativenotifier_send_notification(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_NATIVE_AGENT_FFI_UNIFFI_CONTRACT_VERSION
 #define UNIFFI_FFIDEF_FFI_NATIVE_AGENT_FFI_UNIFFI_CONTRACT_VERSION
 uint32_t ffi_native_agent_ffi_uniffi_contract_version(void
-
+    
 );
 #endif
 
