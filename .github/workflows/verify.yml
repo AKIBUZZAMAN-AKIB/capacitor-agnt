@@ -8,9 +8,11 @@ name: Verify — Rust tests, TS types, web tests, binding identity
 #      code and nobody noticed.
 #   2. `plugins/native-agent/dist/` was committed but stale relative to `src/`,
 #      so consumers got type definitions that did not match the implementation.
-#   3. The generated UniFFI bindings must stay byte-identical to the committed
-#      ones, because the prebuilt `.so`/`.xcframework` slices in this repo were
-#      built against them. A drift means the app throws
+#   3. The generated UniFFI bindings must match the committed canonical files,
+#      because the prebuilt `.so`/`.xcframework` slices in this repo were built
+#      against them. UniFFI 0.28 emits trailing whitespace in Kotlin output, so
+#      the check strips only end-of-line whitespace before the exact comparison;
+#      API drift still fails. A drift means the app throws
 #      "UniFFI contract/API checksum mismatch" at runtime.
 #
 # Each job below guards one of those.
@@ -74,9 +76,15 @@ jobs:
             --library target/release/libnative_agent_ffi.so \
             --language swift --out-dir /tmp/gen-swift
 
-      - name: Kotlin bindings must be byte-identical
+      - name: Kotlin bindings must match canonical output
         run: |
-          diff /tmp/gen-kt/uniffi/native_agent_ffi/native_agent_ffi.kt \
+          set -euo pipefail
+          generated=/tmp/gen-kt/uniffi/native_agent_ffi/native_agent_ffi.kt
+          canonical=/tmp/gen-kt/native_agent_ffi.canonical.kt
+          # Keep the committed generated file clean for `git diff --check` while
+          # comparing every non-whitespace byte (including all FFI declarations).
+          sed -E 's/[[:space:]]+$//' "$generated" > "$canonical"
+          diff -u "$canonical" \
                ../../android/src/main/java/uniffi/native_agent_ffi/native_agent_ffi.kt
 
       - name: C header must be byte-identical

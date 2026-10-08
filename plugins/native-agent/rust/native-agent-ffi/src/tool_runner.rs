@@ -1951,6 +1951,7 @@ fn is_private_ip(ip: &std::net::IpAddr) -> bool {
     }
 }
 
+#[cfg(test)]
 async fn ensure_url_is_fetchable(raw_url: &str) -> Result<(), NativeAgentError> {
     let url = reqwest::Url::parse(raw_url).map_err(|e| NativeAgentError::Tool {
         msg: format!("Invalid URL: {}", e),
