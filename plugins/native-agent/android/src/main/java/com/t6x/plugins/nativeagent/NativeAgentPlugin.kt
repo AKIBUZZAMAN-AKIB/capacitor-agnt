@@ -181,6 +181,39 @@ private fun withHandle(call: PluginCall, block: (NativeAgentHandle) -> Unit) {
         }
     }
 
+    // ── Runtime configuration (shared with cold-start background workers) ──
+
+    @PluginMethod
+    fun getRuntimeConfig(call: PluginCall) {
+        scope.launch {
+            try {
+                val ret = JSObject()
+                ret.put("configJson", AgentRuntimeConfigStore.get(context.applicationContext).toString())
+                call.resolve(ret)
+            } catch (t: Throwable) {
+                if (t is OutOfMemoryError) throw t
+                call.reject("getRuntimeConfig failed: ${t.message ?: t::class.java.simpleName}", asException(t))
+            }
+        }
+    }
+
+    @PluginMethod
+    fun setRuntimeConfig(call: PluginCall) {
+        val configJson = call.getString("configJson")
+            ?: return call.reject("configJson is required")
+        scope.launch {
+            try {
+                val updated = AgentRuntimeConfigStore.update(context.applicationContext, configJson)
+                val ret = JSObject()
+                ret.put("configJson", updated.toString())
+                call.resolve(ret)
+            } catch (t: Throwable) {
+                if (t is OutOfMemoryError) throw t
+                call.reject("setRuntimeConfig failed: ${t.message ?: t::class.java.simpleName}", asException(t))
+            }
+        }
+    }
+
     // ── Agent ──────────────────────────────────────────────────────────
 
     @PluginMethod
@@ -227,6 +260,17 @@ private fun withHandle(call: PluginCall, block: (NativeAgentHandle) -> Unit) {
             call.getString("toolCallId") ?: return@withHandle call.reject("toolCallId is required"),
             call.getBoolean("approved") ?: true,
             call.getString("reason"),
+        )
+        call.resolve()
+    }
+
+    @PluginMethod
+    fun respondToProviderRequest(call: PluginCall) = withHandle(call) { h ->
+        h.respondToProviderRequest(
+            call.getString("requestId") ?: return@withHandle call.reject("requestId is required"),
+            call.getString("responseJson") ?: return@withHandle call.reject("responseJson is required"),
+            call.getBoolean("isFinal") ?: false,
+            call.getBoolean("isError") ?: false,
         )
         call.resolve()
     }

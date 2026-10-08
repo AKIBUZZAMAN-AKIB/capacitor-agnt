@@ -18,7 +18,7 @@ import { Widget } from '@nativekit/widget';
 import { NativeAgent } from 'capacitor-native-agent';
 import { InAppBrowser } from '@capgo/capacitor-inappbrowser';
 import { createAppBrowser } from './app-browser';
-import { connectMcpServers, type McpConnection, type McpServerConfig } from './mcp-client';
+import { connectMcpServers, type McpConnection, type McpServerConfig, type McpToolDefinition } from './mcp-client';
 
 interface NativeKitBuildConfig {
   app: { name: string; id: string; versionName: string; versionCode: number; buildNumber: string };
@@ -69,6 +69,10 @@ interface NativeKitBuildConfig {
 declare const __NATIVEKIT_CONFIG__: NativeKitBuildConfig;
 
 type JsonObject = Record<string, unknown>;
+type AgentMcpToolDefinition = McpToolDefinition & {
+  approvalPolicy?: 'always_allow' | 'always_ask' | 'always_ask_biometric';
+  webviewOnly?: boolean;
+};
 type Remove = { remove: () => Promise<void> | void };
 type StreamHandlers = {
   onMessage?: (message: { data: string; event?: string; id?: string; format: string }) => void;
@@ -126,6 +130,32 @@ function agentInterval(requested?: number): number {
 /** The documented way to run agent work when the OS scheduler is unavailable. */
 const WAKE_ALTERNATIVE =
   'addCronJob({...}) + handleWake() driven by a wake source your app owns (@capacitor/background-runner, or a JobService/BGTask of your own).';
+
+function serializeAgentJson(value: unknown, label: string): string {
+  if (typeof value === 'string') return value; // legacy JSON-string API remains supported
+  try {
+    const encoded = JSON.stringify(value);
+    if (encoded === undefined) throw new Error('value is not JSON-serializable');
+    return encoded;
+  } catch (error) {
+    throw new Error(`${label}: ${failureMessage(error)}`);
+  }
+}
+
+function parseAgentJson<T>(raw: string, label: string): T {
+  try {
+    return JSON.parse(raw) as T;
+  } catch (error) {
+    throw new Error(`${label}: native agent returned invalid JSON: ${failureMessage(error)}`);
+  }
+}
+
+async function invokeAgentMemoryTool<T>(toolName: string, args: Record<string, unknown>): Promise<T> {
+  feature('agent');
+  requireNative();
+  const { resultJson } = await NativeAgent.invokeTool({ toolName, argsJson: JSON.stringify(args) });
+  return parseAgentJson<T>(resultJson, `memory.${toolName}`);
+}
 
 function encodeBase64Utf8(text: string): string {
   const bytes = new TextEncoder().encode(text);
@@ -732,6 +762,19 @@ const NativeKit: any = {
     initWorkspace: async (options: Record<string, unknown>) => { feature('agent'); requireNative(); return NativeAgent.initWorkspace(options as any); },
     initialize: async (options: Record<string, unknown>) => { feature('agent'); requireNative(); return NativeAgent.initialize(options as any); },
 
+    // Runtime settings are stored atomically outside the agent workspace, so
+    // the foreground handle and cold-start background runner use the same values.
+    getRuntimeConfig: async () => {
+      feature('agent'); requireNative();
+      const native = await NativeAgent.getRuntimeConfig();
+      return parseAgentJson(native.configJson, 'getRuntimeConfig');
+    },
+    setRuntimeConfig: async (patch: Record<string, unknown>) => {
+      feature('agent'); requireNative();
+      const native = await NativeAgent.setRuntimeConfig({ configJson: serializeAgentJson(patch, 'setRuntimeConfig') });
+      return parseAgentJson(native.configJson, 'setRuntimeConfig');
+    },
+
     // ── Background wakes (real OS scheduling) ───────────────────────────────
     // Android: a periodic WorkManager job. iOS: a BGProcessingTask registered by
     // the app at launch. Both rebuild the engine from its persisted config in a
@@ -795,7 +838,28 @@ const NativeKit: any = {
     },
 
     // ── Agent turns ──
-    sendMessage: async (options: Record<string, unknown>) => { feature('agent'); requireNative(); return NativeAgent.sendMessage(options as any); },
+    sendMessage: async (options: Record<string, any>) => {
+      feature('agent'); requireNative();
+      const { allowedTools, priorMessages, ...params } = options;
+      if (allowedTools !== undefined && params.allowedToolsJson !== undefined) {
+        throw new Error('sendMessage: pass allowedTools or allowedToolsJson, not both');
+      }
+      if (priorMessages !== undefined && params.priorMessagesJson !== undefined) {
+        throw new Error('sendMessage: pass priorMessages or priorMessagesJson, not both');
+      }
+      if (allowedTools !== undefined && !Array.isArray(allowedTools)) {
+        throw new Error('sendMessage: allowedTools must be an array of tool names');
+      }
+      if (params.maxTurns !== undefined && (!Number.isInteger(params.maxTurns) || params.maxTurns < 1 || params.maxTurns > 100)) {
+        throw new Error('sendMessage: maxTurns must be an integer between 1 and 100');
+      }
+      return NativeAgent.sendMessage({
+        ...params,
+        systemPrompt: params.systemPrompt ?? '',
+        ...(allowedTools === undefined ? {} : { allowedToolsJson: JSON.stringify(allowedTools) }),
+        ...(priorMessages === undefined ? {} : { priorMessagesJson: serializeAgentJson(priorMessages, 'sendMessage.priorMessages') }),
+      } as any);
+    },
     followUp: async (prompt: string) => { feature('agent'); requireNative(); return NativeAgent.followUp({ prompt }); },
     abort: async () => { feature('agent'); requireNative(); return NativeAgent.abort(); },
     steer: async (text: string) => { feature('agent'); requireNative(); return NativeAgent.steer({ text }); },
@@ -809,6 +873,10 @@ const NativeKit: any = {
       feature('agent'); requireNative();
       return NativeAgent.respondToMcpTool({ toolCallId, resultJson, isError });
     },
+    respondToProviderRequest: async (requestId: string, responseJson: string, isFinal = false, isError = false) => {
+      feature('agent'); requireNative();
+      return NativeAgent.respondToProviderRequest({ requestId, responseJson, isFinal, isError });
+    },
     respondToCronApproval: async (requestId: string, approved: boolean) => {
       feature('agent'); requireNative();
       return NativeAgent.respondToCronApproval({ requestId, approved });
@@ -818,8 +886,11 @@ const NativeKit: any = {
     getAuthToken: async (provider = 'anthropic') => { feature('agent'); requireNative(); return NativeAgent.getAuthToken({ provider }); },
     setAuthKey: async (key: string, provider = 'anthropic', authType = 'api_key', refresh?: string, expiresAt?: number) => {
       feature('agent'); requireNative();
-      // `refresh`/`expiresAt` are newer-engine fields; the 0.5.2 binding accepts
-      // key/provider/authType only (OAuth tokens go through exchangeOAuthCode()).
+      // The pinned 0.5.2 API stores key/provider/authType only. Never silently
+      // discard newer refresh-token fields; use exchangeOAuthCode for OAuth.
+      if (refresh !== undefined || expiresAt !== undefined) {
+        throw new Error('setAuthKey: refresh/expiresAt are not supported by engine 0.5.2; use exchangeOAuthCode() for OAuth tokens.');
+      }
       return NativeAgent.setAuthKey({ key, provider, authType });
     },
     deleteAuth: async (provider = 'anthropic') => { feature('agent'); requireNative(); return NativeAgent.deleteAuth({ provider }); },
@@ -837,8 +908,8 @@ const NativeKit: any = {
     clearSession: async () => { feature('agent'); requireNative(); return NativeAgent.clearSession(); },
 
     // ── Cron / heartbeat ──
-    addCronJob: async (inputJson: string) => { feature('agent'); requireNative(); return NativeAgent.addCronJob({ inputJson }); },
-    updateCronJob: async (id: string, patchJson: string) => { feature('agent'); requireNative(); return NativeAgent.updateCronJob({ id, patchJson }); },
+    addCronJob: async (input: string | Record<string, unknown>) => { feature('agent'); requireNative(); return NativeAgent.addCronJob({ inputJson: serializeAgentJson(input, 'addCronJob') }); },
+    updateCronJob: async (id: string, patch: string | Record<string, unknown>) => { feature('agent'); requireNative(); return NativeAgent.updateCronJob({ id, patchJson: serializeAgentJson(patch, 'updateCronJob') }); },
     removeCronJob: async (id: string) => { feature('agent'); requireNative(); return NativeAgent.removeCronJob({ id }); },
     listCronJobs: async () => { feature('agent'); requireNative(); return NativeAgent.listCronJobs(); },
     runCronJob: async (jobId: string) => { feature('agent'); requireNative(); return NativeAgent.runCronJob({ jobId }); },
@@ -884,27 +955,35 @@ const NativeKit: any = {
     },
 
     handleWake: async (source?: string) => { feature('agent'); requireNative(); return NativeAgent.handleWake({ source: source ?? 'manual' }); },
-    getSchedulerConfig: async () => { feature('agent'); requireNative(); return NativeAgent.getSchedulerConfig(); },
-    setSchedulerConfig: async (configJson: string) => { feature('agent'); requireNative(); return NativeAgent.setSchedulerConfig({ configJson }); },
-    setHeartbeatConfig: async (configJson: string) => { feature('agent'); requireNative(); return NativeAgent.setHeartbeatConfig({ configJson }); },
+    getSchedulerConfig: async () => {
+      feature('agent'); requireNative();
+      const native = await NativeAgent.getSchedulerConfig();
+      return {
+        ...native,
+        scheduler: parseAgentJson(native.schedulerJson, 'getSchedulerConfig.scheduler'),
+        heartbeat: parseAgentJson(native.heartbeatJson, 'getSchedulerConfig.heartbeat'),
+      };
+    },
+    setSchedulerConfig: async (config: string | Record<string, unknown>) => { feature('agent'); requireNative(); return NativeAgent.setSchedulerConfig({ configJson: serializeAgentJson(config, 'setSchedulerConfig') }); },
+    setHeartbeatConfig: async (config: string | Record<string, unknown>) => { feature('agent'); requireNative(); return NativeAgent.setHeartbeatConfig({ configJson: serializeAgentJson(config, 'setHeartbeatConfig') }); },
 
     // ── Skills ──
-    addSkill: async (inputJson: string) => { feature('agent'); requireNative(); return NativeAgent.addSkill({ inputJson }); },
-    updateSkill: async (id: string, patchJson: string) => { feature('agent'); requireNative(); return NativeAgent.updateSkill({ id, patchJson }); },
+    addSkill: async (input: string | Record<string, unknown>) => { feature('agent'); requireNative(); return NativeAgent.addSkill({ inputJson: serializeAgentJson(input, 'addSkill') }); },
+    updateSkill: async (id: string, patch: string | Record<string, unknown>) => { feature('agent'); requireNative(); return NativeAgent.updateSkill({ id, patchJson: serializeAgentJson(patch, 'updateSkill') }); },
     removeSkill: async (skillId: string) => { feature('agent'); requireNative(); return NativeAgent.removeSkill({ id: skillId }); },
     listSkills: async () => { feature('agent'); requireNative(); return NativeAgent.listSkills(); },
-    startSkill: async (skillId: string, configJson?: string, provider?: string) => {
+    startSkill: async (skillId: string, config: string | Record<string, unknown> = {}, provider?: string) => {
       feature('agent'); requireNative();
       return NativeAgent.startSkill({
         skillId,
-        configJson: configJson ?? '{}',
+        configJson: serializeAgentJson(config, 'startSkill'),
         ...(provider === undefined ? {} : { provider }),
       });
     },
     endSkill: async (skillId: string) => { feature('agent'); requireNative(); return NativeAgent.endSkill({ skillId }); },
 
     // ── Tool permissions ──
-    seedToolPermissions: async (defaultsJson: string) => { feature('agent'); requireNative(); return NativeAgent.seedToolPermissions({ defaultsJson }); },
+    seedToolPermissions: async (defaults: string | unknown[]) => { feature('agent'); requireNative(); return NativeAgent.seedToolPermissions({ defaultsJson: serializeAgentJson(defaults, 'seedToolPermissions') }); },
     setToolPermission: async (toolName: string, permission: string, enabled?: boolean) => {
       feature('agent'); requireNative();
       // The engine only recognises these three spellings and treats anything
@@ -992,19 +1071,33 @@ const NativeKit: any = {
         { fetchImpl: isNative ? nativeFetch : undefined },
       );
     },
-    startMcp: async (toolsJson: string) => { feature('agent'); requireNative(); return NativeAgent.startMcp({ toolsJson }); },
-    restartMcp: async (toolsJson: string) => { feature('agent'); requireNative(); return NativeAgent.restartMcp({ toolsJson }); },
-    setMcpTools: async (toolsJson: string) => {
+    startMcp: async (tools: string | AgentMcpToolDefinition[]) => { feature('agent'); requireNative(); return NativeAgent.startMcp({ toolsJson: serializeAgentJson(tools, 'startMcp') }); },
+    restartMcp: async (tools: string | AgentMcpToolDefinition[]) => { feature('agent'); requireNative(); return NativeAgent.restartMcp({ toolsJson: serializeAgentJson(tools, 'restartMcp') }); },
+    setMcpTools: async (tools: string | AgentMcpToolDefinition[]) => {
       feature('agent'); requireNative();
       // `restartMcp` is the replace-the-catalogue operation (`startMcp` is
       // additive and will not clear it), so it is the correct primitive here.
-      const result = await NativeAgent.restartMcp({ toolsJson });
+      const result = await NativeAgent.restartMcp({ toolsJson: serializeAgentJson(tools, 'setMcpTools') });
       return { ...(result as Record<string, unknown>), engineGeneration: '0.5.2-public', viaCompat: 'setMcpTools→restartMcp' };
     },
 
     // ── Models & tools ──
     getModels: async (provider = 'anthropic') => { feature('agent'); requireNative(); return NativeAgent.getModels({ provider }); },
-    invokeTool: async (toolName: string, argsJson = '{}') => { feature('agent'); requireNative(); return NativeAgent.invokeTool({ toolName, argsJson }); },
+    invokeTool: async (toolName: string, args: string | Record<string, unknown> = {}) => {
+      feature('agent'); requireNative();
+      return NativeAgent.invokeTool({ toolName, argsJson: serializeAgentJson(args, 'invokeTool') });
+    },
+
+    // First-class long-term-memory operations. These are deliberately wrappers
+    // over invokeTool, so the persisted enabled/approval policy is still enforced.
+    // memory.store and memory.forget ask for approval by default.
+    memory: {
+      store: (options: Record<string, unknown>) => invokeAgentMemoryTool('memory_store', options),
+      recall: (options: Record<string, unknown>) => invokeAgentMemoryTool('memory_recall', options),
+      search: (options: Record<string, unknown>) => invokeAgentMemoryTool('memory_search', options),
+      forget: (options: Record<string, unknown>) => invokeAgentMemoryTool('memory_forget', options),
+      list: (options: Record<string, unknown> = {}) => invokeAgentMemoryTool('memory_list', options),
+    },
 
     // ── Events (streaming text, tool calls, approvals, cron results) ──
     onEvent: (callback: (event: any) => void): Promise<Remove> => {

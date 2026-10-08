@@ -12,12 +12,15 @@ class NativeAgentWeb extends WebPlugin implements NativeAgentPlugin {
   }
   async initWorkspace(): Promise<void> { throw this.unavailable(ERR) }
   async initialize(): Promise<void> { throw this.unavailable(ERR) }
+  async getRuntimeConfig(): Promise<any> { throw this.unavailable(ERR) }
+  async setRuntimeConfig(): Promise<any> { throw this.unavailable(ERR) }
   async sendMessage(): Promise<any> { throw this.unavailable(ERR) }
   async followUp(): Promise<void> { throw this.unavailable(ERR) }
   async abort(): Promise<void> { throw this.unavailable(ERR) }
   async steer(): Promise<void> { throw this.unavailable(ERR) }
   async respondToApproval(): Promise<void> { throw this.unavailable(ERR) }
   async respondToMcpTool(): Promise<void> { throw this.unavailable(ERR) }
+  async respondToProviderRequest(): Promise<void> { throw this.unavailable(ERR) }
   async getAuthToken(): Promise<any> { throw this.unavailable(ERR) }
   async setAuthKey(): Promise<void> { throw this.unavailable(ERR) }
   async deleteAuth(): Promise<void> { throw this.unavailable(ERR) }

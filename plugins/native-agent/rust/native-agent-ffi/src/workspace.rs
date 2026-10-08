@@ -1,3 +1,4 @@
+use crate::runtime_config::{load_agent_runtime_config, normalize_provider_base_url};
 use crate::tool_runner;
 use crate::types::{InitConfig, ToolDefinition};
 use crate::NativeAgentError;
@@ -282,48 +283,38 @@ pub fn init_default_files(config: &InitConfig) -> Result<(), NativeAgentError> {
     Ok(())
 }
 
-/// Read a provider's base URL from `openclaw.json` (the workspace's parent).
+/// Read a provider's base URL from the public runtime API first, then fall
+/// back to `openclaw.json` (the workspace's parent).
 ///
-/// That file was written on first run and then never read by anything — a
-/// config surface that looked real and did nothing. It is now the supported
-/// way to point a provider somewhere else: a corporate gateway, a caching
-/// proxy, a self-hosted or region-pinned endpoint, or a local mock in tests.
-///
-/// Chosen over a new FFI parameter deliberately. The file already exists, it
-/// lives outside the agent's own sandbox so the agent cannot rewrite its own
-/// endpoint, it is `write_if_missing` so a user's edit survives every upgrade,
-/// and it needs no change to the UniFFI surface — which would otherwise
-/// invalidate the prebuilt `.so` and `.xcframework` slices.
-///
-/// Any problem — missing file, bad JSON, absent key — returns `None`, and the
-/// caller falls back to the built-in default. A malformed config must never
-/// stop the agent from reaching its provider.
+/// Both configuration paths live outside the agent workspace sandbox. The
+/// NativeKit API writes the runtime override atomically; editing openclaw.json
+/// remains supported for native integrators and existing installations.
+/// Missing, malformed, credential-bearing, or non-HTTP(S) URLs are ignored and
+/// the driver falls back to its built-in endpoint.
 pub fn provider_base_url(workspace_path: &str, provider: &str) -> Option<String> {
+    let runtime = load_agent_runtime_config(workspace_path);
+    if let Some(url) = runtime.provider_base_urls.get(provider) {
+        if let Some(url) = normalize_provider_base_url(url) {
+            return Some(url);
+        }
+        tracing::warn!(provider, "ignoring invalid runtime provider base URL");
+    }
+
     let path = openclaw_root(workspace_path).ok()?.join("openclaw.json");
     let raw = fs::read_to_string(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let url = value
+    let raw_url = value
         .get("providers")?
         .get(provider)?
         .get("baseUrl")?
-        .as_str()?
-        .trim()
-        .to_string();
-    if url.is_empty() {
-        return None;
+        .as_str()?;
+    match normalize_provider_base_url(raw_url) {
+        Some(url) => Some(url),
+        None => {
+            tracing::warn!(provider, "ignoring invalid openclaw provider base URL");
+            None
+        }
     }
-    // Only http(s) — a file:// or similar here would be a way to make the
-    // engine read arbitrary local paths.
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        tracing::warn!(
-            provider,
-            url = %url,
-            "ignoring a provider baseUrl that is not http(s)"
-        );
-        return None;
-    }
-    // A trailing slash would produce `//v1/messages`.
-    Some(url.trim_end_matches('/').to_string())
 }
 
 /// Generate the "Available Tools" section of the system prompt dynamically

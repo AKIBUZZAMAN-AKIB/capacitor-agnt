@@ -84,20 +84,43 @@ scheduler_config  heartbeat_config   system_events ⚠
 
 ---
 
-## ২. ২০টি tool — কোনটা সত্যিই কাজ করে
+## ২. ২১টি tool — কোনটা সত্যিই কাজ করে
 
-### ২.১ ফাইল tools (৬) — ✅ দুই প্ল্যাটফর্মেই নির্ভরযোগ্য
+### ২.১ ফাইল tools (৭) — ✅ দুই প্ল্যাটফর্মেই নির্ভরযোগ্য
 
-`read_file` `write_file` `edit_file` `list_files` `find_files` `grep_files`
+`read_file` `write_file` `edit_file` `delete_file` `list_files` `find_files` `grep_files`
 
 সবগুলো **native Rust**, কোনো shell লাগে না। সীমা:
 
 - সব path **workspace-এর ভিতরে বাধ্যতামূলক** — absolute path, `..`,
   Windows drive (`C:`), UNC — সব প্রত্যাখ্যাত; **symlink দিয়ে পালানোও ব্লকড**
   (canonicalize করে যাচাই, এবং workspace অ্যাক্সেস না করা গেলে **fail-closed**)
-- `MAX_FILE_SIZE` = ১০ MB, `MAX_MATCHES` = ২০০, output ৫০ KB-তে কাটা
-- `write_file`/`edit_file` **atomic** (temp + rename) — crash-এ ফাইল খালি হয় না
-- সব truncation **char-safe** — বাংলা/ইমোজি ভাঙে না
+- `MAX_FILE_SIZE` = ১০ MB, প্রতি directory/search-এ `MAX_MATCHES` = ১০০,
+  read/search output সর্বোচ্চ ৫০ KB chunk-এ ফেরে; বড় file `nextOffsetBytes` দিয়ে seek করে পড়া যায়
+- `write_file`/`edit_file` **atomic** (same-directory temp + rename); UI-র নতুন file
+  `create_only` দিয়ে existing path overwrite না করে বানায়
+- `delete_file` কেবল regular file মুছে; directory, symlink, absolute/traversal path
+  প্রত্যাখ্যাত। ডিফল্টে human approval লাগে; UI-তে আলাদা confirmation-ও আছে
+- `.git`, `.openclaw`, `node_modules` directory তালিকা/recursive search-এ ডিফল্টে
+  বাদ; `include_skipped: true` দিয়ে explicit browse/search করা যায়
+- সব output UTF-8 boundary মানে — বাংলা/ইমোজি ভাঙে না
+
+### ২.১.১ Agent Lab-এর Workspace file manager
+
+`www/index.html`-এর Workspace files panel শুধু `initialize()`-এর `workspacePath`
+দেখে—Android-এর app-private `files://agent/workspace` বা iOS-এর app-private
+workspace। ফোনের OS/shared files-এ access নেই। Folder navigation + recursive
+filename search, UTF-8 text edit/create (১০ MB), disk-conflict check, atomic save,
+আর regular-file delete আছে। Non-UTF-8/১০ MB-এর বড় entry edit হয় না, তবে regular
+file হিসেবে delete করা যায়; directory ও symlink UI থেকে খোলা/মোছা যায় না।
+
+Save/Delete-এর direct `invokeTool` call-ও persisted `enabled` ও approval policy
+মান্য করে; file UI-তে pending approval-ও দেখা যায়। Delete-এর জন্য UI confirmation
+এবং default native approval—দুটোই প্রয়োজন।
+
+Agent Lab-এর shared event log-এ provider request body, tool-call arguments ও
+file-tool output raw অবস্থায় লেখা হয় না; file content-এর বদলে byte/count metadata
+দেখায়। Approval card-এও content, command, key/token ও secret-ধরনের field redact করা হয়।
 
 ### ২.2 git tools (৬) — ✅ সব slice-এ কাজ করে
 

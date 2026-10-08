@@ -10,7 +10,10 @@ pub mod config_store;
 pub mod db;
 pub mod event_bus;
 pub mod llm_driver;
+pub mod provider_catalog;
+pub mod protocol_drivers;
 pub mod tool_runner;
+pub mod runtime_config;
 pub mod types;
 pub mod workspace;
 
@@ -70,8 +73,11 @@ pub trait NativeNotifier: Send + Sync {
     fn send_notification(&self, title: String, body: String, data_json: String) -> String;
 }
 
-/// Callback interface for memory operations (LanceDB or any vector store).
-/// Implemented by Kotlin/Swift, which bridges to the actual memory backend.
+/// Callback interface for long-term memory operations.
+/// Implemented by the platform host, which owns durable storage and returns
+/// each result as a JSON string; Rust validates and bounds it before the model
+/// sees the data. The built-in Android/iOS providers use local lexical storage,
+/// not embeddings, while other hosts may supply a different backend.
 #[uniffi::export(callback_interface)]
 pub trait MemoryProvider: Send + Sync {
     fn store(&self, key: String, text: String, metadata_json: Option<String>) -> String;
@@ -105,38 +111,36 @@ pub fn create_handle_from_persisted_config(
 fn normalize_allowed_tools(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::Array(items) => {
-            let names: Vec<&str> = items.iter().filter_map(|item| item.as_str()).collect();
-            if names.is_empty() {
-                // An explicit empty array means "no tools at all"; preserve it
-                // rather than falling through to unrestricted.
-                Some("[]".to_string())
-            } else {
-                serde_json::to_string(&names).ok()
+            if items.iter().any(|item| !item.is_string()) {
+                return Some("[]".to_string());
             }
+            let names: Vec<&str> = items.iter().filter_map(|item| item.as_str()).collect();
+            serde_json::to_string(&names).ok().or_else(|| Some("[]".to_string()))
         }
         serde_json::Value::String(raw) => {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
                 return None;
             }
-            // Already-encoded JSON array.
+            // Validate already-encoded arrays; malformed strings fail closed.
             if trimmed.starts_with('[') {
-                return Some(trimmed.to_string());
+                return Some(match serde_json::from_str::<Vec<String>>(trimmed) {
+                    Ok(names) => serde_json::to_string(&names).unwrap_or_else(|_| "[]".into()),
+                    Err(_) => "[]".into(),
+                });
             }
             // Comma-separated shorthand ("read_file, grep_files").
             let names: Vec<&str> = trimmed
                 .split(',')
-                .map(|part| part.trim())
+                .map(str::trim)
                 .filter(|part| !part.is_empty())
                 .collect();
-            if names.is_empty() {
-                None
-            } else {
-                serde_json::to_string(&names).ok()
-            }
+            Some(serde_json::to_string(&names).unwrap_or_else(|_| "[]".into()))
         }
         serde_json::Value::Null => None,
-        _ => None,
+        // A supplied value of the wrong shape is an explicit malformed
+        // restriction, not permission to expose every tool.
+        _ => Some("[]".to_string()),
     }
 }
 
@@ -283,6 +287,7 @@ pub struct NativeAgentHandle {
     steer_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<String>>>>,
     mcp_tools: Arc<Mutex<Vec<types::ToolDefinition>>>,
     mcp_pending: Arc<Mutex<HashMap<String, oneshot::Sender<types::McpToolResult>>>>,
+    webllm_pending: protocol_drivers::WebLlmPending,
     active_skills: Arc<Mutex<types::SkillSessions>>,
     /// Set while a foreground turn is in flight.
     ///
@@ -442,6 +447,38 @@ impl NativeAgentHandle {
         Ok(())
     }
 
+    /// Deliver one WebLLM browser-runtime stream event or final OpenAI-shaped
+    /// completion. Prompt/model execution remains in the WebView because the
+    /// WebGPU runtime cannot be called from native Rust.
+    pub fn respond_to_provider_request(
+        &self,
+        request_id: String,
+        response_json: String,
+        is_final: bool,
+        is_error: bool,
+    ) -> Result<(), NativeAgentError> {
+        if request_id.trim().is_empty() || request_id.len() > 128 {
+            return Err(NativeAgentError::Agent { msg: "provider request id is invalid".into() });
+        }
+        if response_json.len() > 2 * 1024 * 1024 {
+            return Err(NativeAgentError::Agent { msg: "provider response exceeds the 2 MiB limit".into() });
+        }
+        let sender = {
+            let mut pending = self.webllm_pending.lock()
+                .map_err(|_| NativeAgentError::Agent { msg: "WebLLM bridge registry is unavailable".into() })?;
+            if is_final || is_error {
+                pending.remove(&request_id)
+            } else {
+                pending.get(&request_id).cloned()
+            }
+        };
+        let sender = sender.ok_or_else(|| NativeAgentError::Agent {
+            msg: "No active provider request matches this id (already finished, cancelled, or timed out)".into(),
+        })?;
+        sender.send(protocol_drivers::WebLlmBridgeMessage { response_json, is_final, is_error })
+            .map_err(|_| NativeAgentError::Agent { msg: "The native provider request is no longer listening".into() })
+    }
+
     /// Respond to a pending MCP tool call.
     pub fn respond_to_mcp_tool(
         &self,
@@ -567,11 +604,18 @@ impl NativeAgentHandle {
         provider: Option<String>,
         model: Option<String>,
     ) -> Result<(), NativeAgentError> {
+        let conn = db::open_db(&self.config.db_path)?;
         let messages: Vec<types::Message> = if let Some(json) = messages_json {
             serde_json::from_str(&json)?
         } else {
-            let conn = db::open_db(&self.config.db_path)?;
             db::load_session_messages_raw(&conn, &session_key)?
+        };
+        let (stored_provider, stored_model) = db::load_session_route(&conn, &session_key)?;
+        let effective_provider = provider.clone().or(stored_provider);
+        let effective_model = if provider.as_deref() == Some("auto") {
+            model.clone()
+        } else {
+            model.clone().or(stored_model)
         };
         let system_prompt = workspace::load_system_prompt(
             &self.config.workspace_path,
@@ -593,8 +637,8 @@ impl NativeAgentHandle {
             *current = Some(types::SessionState {
                 session_key,
                 agent_id,
-                provider,
-                model,
+                provider: effective_provider,
+                model: effective_model,
                 system_prompt,
                 max_turns: stored_max_turns.or(Some(25)),
                 allowed_tools_json: stored_allowed_tools,
@@ -878,6 +922,7 @@ impl NativeAgentHandle {
         let steer_rx = detached_steer_rx();
         let mcp_tools = self.mcp_tools.clone();
         let mcp_pending = self.mcp_pending.clone();
+        let webllm_pending = self.webllm_pending.clone();
         let memory_provider = self.memory_provider_clone();
         let active_skills = self.active_skills.clone();
         let current_session = self.current_session.clone();
@@ -898,6 +943,7 @@ impl NativeAgentHandle {
                 steer_rx,
                 mcp_tools,
                 mcp_pending,
+                webllm_pending,
                 memory_provider: memory_provider.clone(),
                 skip_user_echo: true, // Skill kickoff — hide internal instruction from chat
                 session_key: params_for_task.session_key.clone(),
@@ -913,6 +959,7 @@ impl NativeAgentHandle {
                             &skill_id_for_task,
                             &turn_result.messages_json,
                             Some(&turn_result.model),
+                            Some(&turn_result.provider),
                             start_time,
                             Some(&turn_result.usage),
                         );
@@ -932,7 +979,10 @@ impl NativeAgentHandle {
                     let next_session = types::SessionState {
                         session_key: params_for_task.session_key.clone(),
                         agent_id: skill_id_for_task.clone(),
-                        provider: params_for_task.provider.clone(),
+                        // Persist the actual selected route so a skill follow-up
+                        // continues on the same provider/model rather than losing
+                        // the auto-router's first successful choice.
+                        provider: Some(turn_result.provider.clone()),
                         model: Some(turn_result.model.clone()),
                         system_prompt: params_for_task.system_prompt.clone(),
                         max_turns: params_for_task.max_turns,
@@ -958,6 +1008,8 @@ impl NativeAgentHandle {
                             "runId": run_id_for_task,
                             "skillId": skill_id_for_task,
                             "sessionKey": params_for_task.session_key,
+                            "provider": turn_result.provider,
+                            "model": turn_result.model,
                             "usage": turn_result.usage,
                             "messagesJson": turn_result.messages_json,
                             "displayMessagesJson": display_json,
@@ -981,6 +1033,7 @@ impl NativeAgentHandle {
                                 &skill_id_for_task,
                                 "[]",
                                 None,
+                                params_for_task.provider.as_deref(),
                                 start_time,
                                 None,
                             );
@@ -1065,23 +1118,70 @@ impl NativeAgentHandle {
 
     // ── Models ─────────────────────────────────────────────────────────────
 
-    /// Get available models for a provider.
+    /// Fetch the provider's live text-model catalog, including model-specific
+    /// protocol/tool metadata. WebLLM is returned from its local model catalog.
     pub fn get_models(&self, provider: String) -> Result<String, NativeAgentError> {
-        Ok(workspace::get_models_json(&provider))
+        let auth = auth::get_auth_token(&self.config.auth_profiles_path, &provider)?;
+        let runtime = runtime_config::load_agent_runtime_config(&self.config.workspace_path);
+        let workspace = self.config.workspace_path.clone();
+        let models = self.runtime.block_on(async {
+            provider_catalog::list_models(&provider, auth.api_key.as_deref(), &runtime, &workspace).await
+        })?;
+        Ok(provider_catalog::list_models_json(&models))
     }
 
     // ── Tools ──────────────────────────────────────────────────────────────
 
-    /// Invoke a tool directly.
+    /// Invoke a built-in tool directly, still respecting the persisted
+    /// enabled/approval policy. A direct FFI call must not become an alternate
+    /// route around the agent loop's authorization gate.
     pub fn invoke_tool(
         &self,
         tool_name: String,
         args_json: String,
     ) -> Result<String, NativeAgentError> {
         let args: serde_json::Value = serde_json::from_str(&args_json)?;
+        if !tool_runner::is_builtin_tool(&tool_name) {
+            return Err(NativeAgentError::Tool { msg: format!("Unknown built-in tool: {}", tool_name) });
+        }
         let workspace = self.config.workspace_path.clone();
         let db_path = self.config.db_path.clone();
         let memory_provider = self.memory_provider_clone();
+        let permissions = db::open_db(&db_path)
+            .and_then(|conn| db::load_tool_permissions_map(&conn))
+            .unwrap_or_default();
+        if let Some((_, false)) = permissions.get(&tool_name) {
+            return Err(NativeAgentError::Tool { msg: format!("Tool '{}' is disabled in tool settings", tool_name) });
+        }
+
+        if agent_loop::requires_approval(&tool_name, &permissions, None) {
+            let callback = self.callback_clone().ok_or_else(|| NativeAgentError::Tool {
+                msg: format!("Tool '{}' requires approval, but no event callback is attached", tool_name),
+            })?;
+            let approval_id = format!("direct-tool-{}", uuid::Uuid::new_v4());
+            let session_key = approval_id.clone();
+            let abort_flag = Arc::new(Mutex::new(false));
+            let require_biometric = permissions
+                .get(&tool_name)
+                .map(|(policy, _)| agent_loop::canonical_permission(policy) == "always_ask_biometric")
+                .unwrap_or(false);
+            let approval = self.runtime.block_on(agent_loop::wait_for_approval(
+                Some(callback.as_ref()),
+                &tool_name,
+                &approval_id,
+                &args,
+                &self.approval_senders,
+                &abort_flag,
+                require_biometric,
+                &session_key,
+            ))?;
+            if !approval.approved {
+                return Err(NativeAgentError::Tool {
+                    msg: approval.reason.unwrap_or_else(|| "Tool execution denied by user".into()),
+                });
+            }
+        }
+
         self.runtime.block_on(async {
             let result = tool_runner::execute_tool(
                 &tool_name,
@@ -1133,6 +1233,7 @@ impl NativeAgentHandle {
             steer_rx: Arc::new(Mutex::new(Some(steer_rx))),
             mcp_tools: Arc::new(Mutex::new(vec![])),
             mcp_pending: Arc::new(Mutex::new(HashMap::new())),
+            webllm_pending: protocol_drivers::new_webllm_pending(),
             active_skills: Arc::new(Mutex::new(HashMap::new())),
             turn_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }))
@@ -1160,16 +1261,45 @@ impl NativeAgentHandle {
         });
     }
 
-    /// Build the full tool list (builtin + MCP, deduplicated) for system prompt generation.
+    /// Build the currently usable tool list (builtin + MCP, deduplicated) for
+    /// system prompt generation. Disabled/unavailable tools and MCP tools
+    /// without their event callback should not be described to the model; the
+    /// agent loop repeats these checks at dispatch time as the real gate.
     fn merged_tools_for_prompt(&self) -> Vec<types::ToolDefinition> {
         let mcp = self.runtime.block_on(async {
             self.mcp_tools.lock().await.clone()
         });
-        let mut all = tool_runner::get_tool_definitions(&self.config.workspace_path, None);
+        let permissions = db::open_db(&self.config.db_path)
+            .and_then(|conn| db::load_tool_permissions_map(&conn))
+            .unwrap_or_default();
+        let memory_available = self.memory_provider_clone().is_some();
+        let callback_attached = self.callback_clone().is_some();
+
+        let mut builtins = tool_runner::get_tool_definitions(&self.config.workspace_path, None);
         let builtin_names: std::collections::HashSet<String> =
-            all.iter().map(|t| t.name.clone()).collect();
-        all.extend(mcp.into_iter().filter(|t| !builtin_names.contains(&t.name)));
-        all
+            builtins.iter().map(|tool| tool.name.clone()).collect();
+        builtins.retain(|tool| {
+            let enabled = permissions
+                .get(&tool.name)
+                .map(|(_, enabled)| *enabled)
+                .unwrap_or(true);
+            let memory_ready = memory_available || !tool.name.starts_with("memory_");
+            let approval_ready = callback_attached
+                || !agent_loop::requires_approval(&tool.name, &permissions, None);
+            enabled && memory_ready && approval_ready
+        });
+
+        let mut tools = builtins;
+        tools.extend(mcp.into_iter().filter(|tool| {
+            let enabled = permissions
+                .get(&tool.name)
+                .map(|(_, enabled)| *enabled)
+                .unwrap_or(true);
+            // Every registered MCP tool is executed through the event bridge,
+            // even when its catalog flag is not explicitly `webview_only`.
+            !builtin_names.contains(&tool.name) && enabled && callback_attached
+        }));
+        tools
     }
 
     fn prepare_params(
@@ -1239,6 +1369,7 @@ impl NativeAgentHandle {
         let steer_rx = self.steer_rx.clone();
         let mcp_tools = self.mcp_tools.clone();
         let mcp_pending = self.mcp_pending.clone();
+        let webllm_pending = self.webllm_pending.clone();
         let memory_provider = self.memory_provider_clone();
         let current_session = self.current_session.clone();
         let params_for_task = params.clone();
@@ -1261,6 +1392,7 @@ impl NativeAgentHandle {
                 steer_rx,
                 mcp_tools,
                 mcp_pending,
+                webllm_pending,
                 memory_provider: memory_provider.clone(),
                 skip_user_echo: false,
                 session_key: params_for_task.session_key.clone(),
@@ -1276,6 +1408,7 @@ impl NativeAgentHandle {
                             "main",
                             &turn_result.messages_json,
                             Some(&turn_result.model),
+                            Some(&turn_result.provider),
                             start_time,
                             Some(&turn_result.usage),
                         );
@@ -1290,6 +1423,8 @@ impl NativeAgentHandle {
                     }
 
                     let mut next_session = session_state;
+                    next_session.provider = Some(turn_result.provider.clone());
+                    next_session.model = Some(turn_result.model.clone());
                     next_session.messages = turn_result.messages;
 
                     // Build display JSON before moving session state
@@ -1307,6 +1442,8 @@ impl NativeAgentHandle {
                         let payload = serde_json::json!({
                             "runId": run_id_for_task,
                             "sessionKey": params_for_task.session_key,
+                            "provider": turn_result.provider,
+                            "model": turn_result.model,
                             "usage": turn_result.usage,
                             "messagesJson": turn_result.messages_json,
                             "displayMessagesJson": display_json,
@@ -1339,6 +1476,7 @@ impl NativeAgentHandle {
                                 "main",
                                 "[]",
                                 None,
+                                params_for_task.provider.as_deref(),
                                 start_time,
                                 None,
                             );

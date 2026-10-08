@@ -34,6 +34,8 @@ const unique = <T,>(arr: T[]) => [...new Set(arr)];
 const KOTLIN = 'plugins/native-agent/android/src/main/java/com/t6x/plugins/nativeagent/NativeAgentPlugin.kt';
 const SWIFT = 'plugins/native-agent/ios/Sources/NativeAgentPlugin/NativeAgentPlugin.swift';
 const DEFS = 'plugins/native-agent/src/definitions.ts';
+const WEB = 'plugins/native-agent/src/plugin.ts';
+const NATIVEKIT_TYPES = 'types/nativekit.d.ts.template';
 const PLUGIN_GRADLE = 'plugins/native-agent/android/build.gradle';
 const PACKAGE_SWIFT = 'plugins/native-agent/Package.swift';
 const CRATE = 'plugins/native-agent/rust/native-agent-ffi';
@@ -105,6 +107,85 @@ describe('agent plugin — cross-platform contract', () => {
     expect(kotlinMethods()).toContain('checkAvailability');
     expect(swiftExportedMethods()).toContain('checkAvailability');
     expect(read(DEFS)).toMatch(/checkAvailability\(\): Promise<AgentAvailabilityResult>/);
+  });
+
+  it('provides explicit web stubs for every native plugin method', () => {
+    const web = read(WEB);
+    for (const method of kotlinMethods()) {
+      expect(web, `web implementation is missing ${method}`).toMatch(new RegExp(`async\\s+${method}\\s*\\(`));
+    }
+  });
+
+  it('keeps runtime provider/model defaults and public types in parity', () => {
+    const rust = read(`${CRATE}/src/runtime_config.rs`);
+    const loop = read(`${CRATE}/src/agent_loop.rs`);
+    const android = read('plugins/native-agent/android/src/main/java/com/t6x/plugins/nativeagent/AgentRuntimeConfigStore.kt');
+    const ios = read('plugins/native-agent/ios/Sources/NativeAgentPlugin/AgentRuntimeConfigStore.swift');
+    const defs = read(DEFS);
+    const template = read(NATIVEKIT_TYPES);
+
+    expect(rust).toContain('default_provider: "anthropic".into()');
+    expect(rust).toContain('default_models: HashMap::new()');
+    expect(rust).toContain('self.default_models.len() > providers.len()');
+    expect(loop).toContain('.unwrap_or(runtime_config.default_provider.as_str())');
+    expect(loop).toContain('runtime.default_models.get(&provider)');
+
+    expect(android).toContain('.put("defaultProvider", "anthropic")');
+    expect(android).toContain('.put("defaultModels", JSONObject())');
+    expect(android).toContain('validateStringMap(value, "defaultModels")');
+    expect(android).toContain('$field.$provider');
+    expect(ios).toContain('"defaultProvider": "anthropic"');
+    expect(ios).toContain('"defaultModels": [String: String]()');
+    expect(ios).toContain('validateStringMap(value, field: "defaultModels")');
+    expect(ios).toContain('\\(field).\\(provider)');
+
+    for (const source of [defs, template]) {
+      expect(source).toMatch(/defaultProvider:\s*(AgentProvider|NativeKitAgentProvider)/);
+      expect(source).toMatch(/defaultModels:\s*Partial<Record<(AgentProvider|NativeKitAgentProvider), string>>/);
+    }
+    expect(defs).toMatch(/getRuntimeConfig\(\): Promise<\{ configJson: string \}>/);
+    expect(template).toMatch(/getRuntimeConfig\(\): Promise<NativeKitAgentRuntimeConfig>/);
+    expect(template).toMatch(/setRuntimeConfig\(patch: NativeKitAgentRuntimeConfigPatch\): Promise<NativeKitAgentRuntimeConfig>/);
+  });
+
+  it('keeps WebLLM provider callbacks synchronized across Rust, generated bindings, and platforms', () => {
+    const rust = read(`${CRATE}/src/lib.rs`);
+    const kotlin = read('plugins/native-agent/android/src/main/java/uniffi/native_agent_ffi/native_agent_ffi.kt');
+    const swift = read('plugins/native-agent/ios/Sources/NativeAgentPlugin/Generated/native_agent_ffi.swift');
+    const header = read('plugins/native-agent/ios/Sources/NativeAgentPlugin/Generated/native_agent_ffiFFI.h');
+    expect(rust).toContain('pub fn respond_to_provider_request');
+    expect(kotlin).toContain('respondToProviderRequest');
+    expect(swift).toContain('respondToProviderRequest');
+    expect(header).toContain('uniffi_native_agent_ffi_fn_method_nativeagenthandle_respond_to_provider_request');
+    for (const slice of ['ios-arm64', 'ios-arm64-simulator']) {
+      const prefix = `plugins/native-agent/ios/Frameworks/NativeAgentFFI.xcframework/${slice}/Headers/native_agent_ffi`;
+      expect(read(`${prefix}/native_agent_ffi.swift`)).toContain('respondToProviderRequest');
+      expect(read(`${prefix}/native_agent_ffiFFI.h`)).toContain('respond_to_provider_request');
+    }
+  });
+
+  it('keeps provider defaults and base URLs separate from per-turn Auto routing overrides', () => {
+    const lab = read(LAB);
+    const html = read(HTML);
+    expect(html).toContain('id="agent-provider-default-model"');
+    expect(html).toContain('id="agent-provider-base-url"');
+    expect(lab).toContain("patch.defaultModels = { [selectedCatalogProvider]: model || null }");
+    expect(lab).toContain("patch.providerBaseUrls = { [selectedCatalogProvider]: baseUrl || null }");
+    expect(lab).toContain("if (el('agent-model')) el('agent-model').value = ''");
+    expect(lab).toContain("const chosenModel = val('agent-model') || undefined");
+    expect(lab).toContain("chosenProvider === 'auto' && chosenModel");
+  });
+
+  it('allows WebLLM CDN/WASM under a narrow CSP instead of blanket remote scripts', () => {
+    const config = JSON.parse(read('app.config.json'));
+    const csp = config.security.contentSecurityPolicy;
+    const scriptSrc = csp.match(/(?:^|;)\s*script-src\s+([^;]+)/)?.[1] ?? '';
+    expect(read(LAB)).toContain("https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm/+esm");
+    expect(scriptSrc).toContain('https://cdn.jsdelivr.net');
+    expect(scriptSrc).toContain("'wasm-unsafe-eval'");
+    expect(scriptSrc.split(/\s+/)).not.toContain('https:');
+    expect(scriptSrc).not.toContain("'unsafe-eval'");
+    expect(csp).toContain("worker-src 'self' blob:");
   });
 });
 
@@ -358,7 +439,7 @@ describe('agent plugin — pinned generation (0.5.2) integrity', () => {
       expect(header, `${slice} carries a different API than the generated bindings`).toBe(generated);
     }
     expect(generated).toContain('func setMemoryProvider(provider: MemoryProvider)');
-    expect(generated).toContain('public protocol MemoryProvider: AnyObject');
+    expect(generated).toMatch(/public protocol MemoryProvider\s*:\s*AnyObject/);
   });
 
   it('keeps the ABI tooling and CI wiring that makes armeabi-v7a builds possible', () => {
@@ -452,8 +533,41 @@ describe('agent — bridge and demo wiring', () => {
       expect(read(file).toLowerCase(), `${file} still mentions phonebuddy`).not.toContain('phonebuddy');
     }
     // The lab's long-term-memory buttons replace the removed engine's panel.
-    expect(read('www/agent-lab.js')).toContain("invokeTool('memory_store'");
+    expect(read('www/agent-lab.js')).toContain("invokeNativeTool('memory_store'");
     expect(read('www/index.html')).toContain('data-agent-action="agentmemrecall"');
+  });
+
+  it('ships a workspace-bounded file manager with native approval and safe deletion', () => {
+    const ui = read('www/agent-lab.js');
+    const html = read('www/index.html');
+    const runner = read('plugins/native-agent/rust/native-agent-ffi/src/tool_runner.rs');
+    const loop = read('plugins/native-agent/rust/native-agent-ffi/src/agent_loop.rs');
+    const ffi = read('plugins/native-agent/rust/native-agent-ffi/src/lib.rs');
+
+    for (const id of ['agent-file-manager', 'agent-files-dir', 'agent-files-search', 'agent-file-content', 'agent-file-delete-confirm']) {
+      expect(html).toContain(`id="${id}"`);
+    }
+    for (const action of ['open-dir', 'find', 'new-file', 'save', 'delete', 'confirm-delete']) {
+      expect(html).toContain(`data-agent-file-action="${action}"`);
+    }
+    expect(ui).toContain("invokeNativeTool('write_file'");
+    expect(ui).toContain('create_only: true');
+    expect(ui).toContain("invokeNativeTool('delete_file'");
+    expect(ui).toContain('confirmWorkspaceFileDelete');
+    expect(ui).toContain('safeApprovalArgs');
+    expect(ui).toContain('content not logged');
+    expect(ui).toContain("case 'tool_use':");
+    expect(ui).toContain("case 'tool_result':");
+    expect(ui).toContain('summarizeFileToolResult');
+    expect(ui).toContain('file content not logged');
+    expect(ui).toContain('messageCount: Array.isArray(payload?.request?.messages)');
+    expect(ui).toContain('include_skipped');
+    expect(runner).toContain('"delete_file"');
+    expect(runner).toContain('Refusing to delete a symbolic link');
+    expect(runner).toContain('Only regular files can be deleted');
+    expect(runner).toContain('destination already exists; refusing to overwrite');
+    expect(loop).toContain('| "delete_file"');
+    expect(ffi).toContain('requires_approval(&tool_name, &permissions, None)');
   });
 
   it('gates every agent call behind the feature flag and a native check', () => {
@@ -546,7 +660,7 @@ describe('agent — Android Gradle toolchain', () => {
 describe('agent — native build-file correctness', () => {
   it('every non-system Swift import is guarded by canImport', () => {
     const dir = 'plugins/native-agent/ios/Sources/NativeAgentPlugin';
-    const system = new Set(['Foundation', 'Capacitor', 'BackgroundTasks', 'UserNotifications', 'UIKit', 'Combine']);
+    const system = new Set(['Foundation', 'CoreFoundation', 'Capacitor', 'BackgroundTasks', 'UserNotifications', 'UIKit', 'Combine']);
     for (const file of readdirSync(dir).filter((f) => f.endsWith('.swift'))) {
       const src = read(path.join(dir, file));
       for (const m of src.matchAll(/^import (\w+)$/gm)) {

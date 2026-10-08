@@ -15,6 +15,10 @@ use serde::{Deserialize, Serialize};
 pub enum LlmError {
     #[error("HTTP error: {0}")]
     Http(String),
+    #[error("Network connection error: {0}")]
+    Network(String),
+    #[error("HTTP request timed out: {0}")]
+    Timeout(String),
     #[error("API error ({status}): {message}")]
     Api { status: u16, message: String },
     #[error("Rate limited, retry after {retry_after_ms}ms")]
@@ -29,12 +33,15 @@ pub enum LlmError {
 
 impl LlmError {
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            LlmError::RateLimited { .. } | LlmError::Overloaded { .. }
-        ) || self.to_string().to_lowercase().contains("rate limit")
-            || self.to_string().to_lowercase().contains("overloaded")
-            || self.to_string().to_lowercase().contains("timeout")
+        match self {
+            LlmError::RateLimited { .. } | LlmError::Overloaded { .. } | LlmError::Network(_) | LlmError::Timeout(_) => true,
+            LlmError::Api { status, .. } => matches!(*status, 408 | 425 | 500 | 502 | 503 | 504 | 520..=599),
+            LlmError::Http(message) => {
+                let message = message.to_lowercase();
+                message.contains("timeout") || message.contains("temporarily unavailable") || message.contains("connection reset")
+            }
+            _ => false,
+        }
     }
 
     pub fn status_code(&self) -> Option<u16> {
@@ -117,6 +124,20 @@ pub trait LlmDriver: Send + Sync {
     ) -> Result<CompletionResponse, LlmError>;
 }
 
+pub(crate) fn emit_buffered_response(
+    response: &CompletionResponse,
+    on_event: &(dyn Fn(StreamEvent) + Send + Sync),
+) {
+    let text = response.text();
+    if !text.is_empty() { on_event(StreamEvent::TextDelta(text)); }
+    for call in &response.tool_calls {
+        on_event(StreamEvent::ToolUseStart { id: call.id.clone(), name: call.name.clone() });
+        on_event(StreamEvent::ToolUseEnd {
+            id: call.id.clone(), name: call.name.clone(), input: call.input.clone(),
+        });
+    }
+    on_event(StreamEvent::MessageDone(response.clone()));
+}
 
 /// Take at most `max_bytes` from `s` without splitting a UTF-8 character.
 /// `&s[..n]` panics when the cut lands mid-character, which any non-ASCII
@@ -132,8 +153,27 @@ pub(crate) fn safe_excerpt(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+pub(crate) fn map_transport_error(error: reqwest::Error) -> LlmError {
+    let message = error.to_string();
+    let lowered = message.to_ascii_lowercase();
+    if error.is_timeout() {
+        LlmError::Timeout(message)
+    } else if error.is_connect()
+        && !lowered.contains("certificate")
+        && !lowered.contains("tls")
+        && !lowered.contains("invalid peer")
+    {
+        // DNS/connect/reset failures are transient network failures. Do not
+        // classify TLS certificate errors as retryable; that would conceal a
+        // permanent trust/configuration error behind provider failover.
+        LlmError::Network(message)
+    } else {
+        LlmError::Http(message)
+    }
+}
+
 /// Parse a `Retry-After` header: either delta-seconds or an HTTP date.
-fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+pub(crate) fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
     if let Ok(seconds) = raw.trim().parse::<u64>() {
         return Some(seconds.saturating_mul(1000).min(300_000));
@@ -147,17 +187,57 @@ fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     }
 }
 
+
+fn llm_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 // ── Anthropic Driver ────────────────────────────────────────────────────────
 
 pub struct AnthropicDriver {
     api_key: String,
     is_oauth: bool,
+    bearer_auth: bool,
     base_url: String,
     client: reqwest::Client,
+    streaming_supported: bool,
+}
+
+fn collect_system_prompt(req: &CompletionRequest) -> (String, bool) {
+    let mut system = req.system.clone().unwrap_or_default();
+    let mut present = req.system.is_some();
+    for message in req.messages.iter().filter(|message| message.role == Role::System) {
+        let extra = match &message.content {
+            MessageContent::Text(text) => text.clone(),
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>(),
+        };
+        if !extra.is_empty() {
+            if !system.is_empty() {
+                system.push('\n');
+            }
+            system.push_str(&extra);
+            present = true;
+        }
+    }
+    (system, present)
 }
 
 impl AnthropicDriver {
     pub fn new(api_key: String, base_url: Option<String>) -> Self {
+        Self::with_bearer_auth(api_key, base_url, false)
+    }
+
+    pub fn with_bearer_auth(api_key: String, base_url: Option<String>, bearer_auth: bool) -> Self {
         let base_url = base_url.unwrap_or_else(|| "https://api.anthropic.com".to_string());
         // The Claude-Code identity headers, the `anthropic-beta` flags and the
         // `web_search_20250305` *server* tool are Anthropic-first-party only.
@@ -170,13 +250,24 @@ impl AnthropicDriver {
         Self {
             api_key,
             is_oauth,
+            bearer_auth,
             base_url,
-            client: reqwest::Client::new(),
+            client: llm_client(),
+            streaming_supported: true,
         }
     }
 
+    pub fn with_streaming_support(mut self, supported: bool) -> Self {
+        self.streaming_supported = supported;
+        self
+    }
+
     fn build_request(&self, req: &CompletionRequest, stream: bool) -> reqwest::RequestBuilder {
-        let url = format!("{}/v1/messages", self.base_url);
+        let url = if self.base_url.trim_end_matches('/').ends_with("/v1") {
+            format!("{}/messages", self.base_url.trim_end_matches('/'))
+        } else {
+            format!("{}/v1/messages", self.base_url.trim_end_matches('/'))
+        };
         let mut builder = self.client.post(&url);
 
         // OAuth: full Claude Code identity (must match pi-ai/anthropic.ts exactly)
@@ -188,7 +279,11 @@ impl AnthropicDriver {
                 .header("x-app", "cli")
                 .header("accept", "application/json")
                 .header("anthropic-dangerous-direct-browser-access", "true");
-        } else {
+        } else if self.bearer_auth {
+            if !self.api_key.trim().is_empty() {
+                builder = builder.header("Authorization", format!("Bearer {}", self.api_key));
+            }
+        } else if !self.api_key.trim().is_empty() {
             builder = builder.header("x-api-key", &self.api_key);
         }
 
@@ -222,20 +317,24 @@ impl AnthropicDriver {
             })));
         }
 
-        // OAuth: system prompt must be array of {type:"text",text:...} objects
-        // with Claude Code identity as first element (matches pi-ai/anthropic.ts)
+        // Role::System transcript items are also folded into Anthropic's
+        // dedicated `system` field. This is required for persisted rolling
+        // context summaries; Messages API has no system role in `messages`.
+        let (system_text, has_system) = collect_system_prompt(req);
+        // OAuth: system prompt must be an array of {type:"text",text:...}
+        // objects with Claude Code identity first (matches pi-ai/anthropic.ts).
         let system_value = if self.is_oauth {
             let mut blocks = vec![
                 serde_json::json!({"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."}),
             ];
-            if let Some(s) = &req.system {
-                if !s.is_empty() {
-                    blocks.push(serde_json::json!({"type": "text", "text": s}));
-                }
+            if !system_text.is_empty() {
+                blocks.push(serde_json::json!({"type": "text", "text": system_text}));
             }
             Some(serde_json::json!(blocks))
+        } else if has_system {
+            Some(serde_json::json!(system_text))
         } else {
-            req.system.as_ref().map(|s| serde_json::json!(s))
+            None
         };
 
         let body = ApiRequest {
@@ -295,14 +394,14 @@ impl LlmDriver for AnthropicDriver {
             .build_request(req, false)
             .send()
             .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+            .map_err(map_transport_error)?;
 
         let status = resp.status().as_u16();
         let retry_after = parse_retry_after_ms(resp.headers());
         let body = resp
             .text()
             .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+            .map_err(map_transport_error)?;
 
         if status != 200 {
             return Err(self.handle_error_response_with_retry_after(status, &body, retry_after));
@@ -311,7 +410,7 @@ impl LlmDriver for AnthropicDriver {
         let api_resp: ApiResponse = serde_json::from_str(&body)
             .map_err(|e| LlmError::Parse(format!("{}: {}", e, safe_excerpt(&body, 200))))?;
 
-        Ok(parse_api_response(api_resp))
+        parse_api_response(api_resp)
     }
 
     async fn stream(
@@ -319,11 +418,16 @@ impl LlmDriver for AnthropicDriver {
         req: &CompletionRequest,
         on_event: &(dyn Fn(StreamEvent) + Send + Sync),
     ) -> Result<CompletionResponse, LlmError> {
+        if !self.streaming_supported {
+            let response = self.complete(req).await?;
+            emit_buffered_response(&response, on_event);
+            return Ok(response);
+        }
         let resp = self
             .build_request(req, true)
             .send()
             .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+            .map_err(map_transport_error)?;
 
         let status = resp.status().as_u16();
         if status != 200 {
@@ -331,7 +435,7 @@ impl LlmDriver for AnthropicDriver {
             let body = resp
                 .text()
                 .await
-                .map_err(|e| LlmError::Http(e.to_string()))?;
+                .map_err(map_transport_error)?;
             return Err(self.handle_error_response_with_retry_after(status, &body, retry_after));
         }
 
@@ -342,7 +446,7 @@ impl LlmDriver for AnthropicDriver {
         let mut accum = StreamAccumulator::new();
 
         while let Some(chunk) = stream.next().await {
-            let bytes = chunk.map_err(|e| LlmError::Http(e.to_string()))?;
+            let bytes = chunk.map_err(map_transport_error)?;
             buf.extend_from_slice(&bytes);
 
             // Process complete SSE frames.
@@ -371,7 +475,7 @@ impl LlmDriver for AnthropicDriver {
                         continue;
                     }
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                        accum.process_sse(&json, on_event);
+                        accum.process_sse(&json, on_event)?;
                     }
                 }
             }
@@ -386,7 +490,7 @@ impl LlmDriver for AnthropicDriver {
             }
         }
 
-        let response = accum.finish();
+        let response = accum.finish()?;
         on_event(StreamEvent::MessageDone(response.clone()));
         Ok(response)
     }
@@ -394,7 +498,7 @@ impl LlmDriver for AnthropicDriver {
 
 
 /// Largest amount of un-parsed SSE text we are willing to hold.
-const MAX_SSE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_SSE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
 /// Locate the end of the first complete SSE frame in a RAW BYTE buffer.
 ///
@@ -409,7 +513,7 @@ const MAX_SSE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 ///
 /// Returns the byte offset of the separator plus its length, handling both
 /// "\n\n" (LF) and "\r\n\r\n" (CRLF) terminators.
-fn find_frame_end_bytes(buf: &[u8]) -> Option<(usize, usize)> {
+pub(crate) fn find_frame_end_bytes(buf: &[u8]) -> Option<(usize, usize)> {
     let lf = buf.windows(2).position(|w| w == b"\n\n");
     let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n");
     match (lf, crlf) {
@@ -426,27 +530,6 @@ fn find_frame_end_bytes(buf: &[u8]) -> Option<(usize, usize)> {
     }
 }
 
-/// Locate the end of the first complete SSE frame.
-///
-/// Returns the byte offset of the separator plus its length, handling both
-/// "\n\n" (LF) and "\r\n\r\n" (CRLF) terminators.
-#[cfg(test)]
-fn find_frame_end(buf: &str) -> Option<(usize, usize)> {
-    let lf = buf.find("\n\n");
-    let crlf = buf.find("\r\n\r\n");
-    match (lf, crlf) {
-        (Some(l), Some(c)) => {
-            if c < l {
-                Some((c, 4))
-            } else {
-                Some((l, 2))
-            }
-        }
-        (Some(l), None) => Some((l, 2)),
-        (None, Some(c)) => Some((c, 4)),
-        (None, None) => None,
-    }
-}
 
 
 // ── OpenAI Driver ───────────────────────────────────────────────────────────
@@ -462,15 +545,61 @@ pub struct OpenAiDriver {
     api_key: String,
     base_url: String,
     client: reqwest::Client,
+    use_max_completion_tokens: bool,
+    include_stream_usage: bool,
+    completion_path: String,
+    streaming_supported: bool,
 }
 
 impl OpenAiDriver {
+    /// First-party OpenAI defaults. Other Chat Completions gateways should use
+    /// `with_compat_options`, since many only accept the standard `max_tokens`.
     pub fn new(api_key: String, base_url: Option<String>) -> Self {
+        Self::with_compat_options(api_key, base_url, true, true)
+    }
+
+    pub fn with_compat_options(
+        api_key: String,
+        base_url: Option<String>,
+        use_max_completion_tokens: bool,
+        include_stream_usage: bool,
+    ) -> Self {
+        Self::with_endpoint_options(
+            api_key,
+            base_url,
+            use_max_completion_tokens,
+            include_stream_usage,
+            "chat/completions",
+        )
+    }
+
+    /// Configure the request path independently of the API root for an
+    /// OpenAI-shaped gateway with a documented nonstandard completion path.
+    pub fn with_endpoint_options(
+        api_key: String,
+        base_url: Option<String>,
+        use_max_completion_tokens: bool,
+        include_stream_usage: bool,
+        completion_path: &str,
+    ) -> Self {
+        let completion_path = completion_path.trim_matches('/');
         Self {
             api_key,
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
-            client: reqwest::Client::new(),
+            client: llm_client(),
+            use_max_completion_tokens,
+            include_stream_usage,
+            completion_path: if completion_path.is_empty() { "chat/completions".into() } else { completion_path.into() },
+            streaming_supported: true,
         }
+    }
+
+    /// Some OpenAI-shaped gateways implement only the non-streaming completion
+    /// endpoint. Keep the request/response wire shape but emit its completed
+    /// result as one final delta to the Native Agent event stream.
+    pub fn with_streaming_support(mut self, supported: bool) -> Self {
+        self.streaming_supported = supported;
+        self
     }
 
     /// Translate the engine's Anthropic-style messages into OpenAI messages.
@@ -488,7 +617,7 @@ impl OpenAiDriver {
 
         for message in &req.messages {
             let role = match message.role {
-                Role::User => "user",
+                Role::User | Role::Context => "user",
                 Role::Assistant => "assistant",
                 Role::System => "system",
             };
@@ -507,7 +636,7 @@ impl OpenAiDriver {
                         match block {
                             ContentBlock::Text { text } => text_parts.push(text.clone()),
                             ContentBlock::Thinking { .. } => {}
-                            ContentBlock::ToolUse { id, name, input } => {
+                            ContentBlock::ToolUse { id, name, input, .. } => {
                                 tool_calls.push(serde_json::json!({
                                     "id": id,
                                     "type": "function",
@@ -564,16 +693,21 @@ impl OpenAiDriver {
     /// omission is deliberate: dropping `temperature` for a model that would
     /// have accepted it costs one setting, whereas sending it to a model that
     /// refuses it fails the whole request.
-    fn is_reasoning_model(model: &str) -> bool {
+    pub(crate) fn is_reasoning_model(model: &str) -> bool {
         // Tolerate an `openai/` (OpenRouter-style) prefix on the model id.
         let name = model.rsplit('/').next().unwrap_or(model);
-        const FIXED_SAMPLING_PREFIXES: [&str; 4] = ["o1", "o3", "o4", "gpt-5"];
+        const FIXED_SAMPLING_PREFIXES: [&str; 6] = ["o1", "o3", "o4", "gpt-5", "gpt-6", "gpt-6.1"];
         FIXED_SAMPLING_PREFIXES
             .iter()
             .any(|p| name == *p || name.starts_with(&format!("{}-", p)))
     }
 
-    fn build_body(req: &CompletionRequest, stream: bool) -> serde_json::Value {
+    pub(crate) fn build_body(
+        req: &CompletionRequest,
+        stream: bool,
+        use_max_completion_tokens: bool,
+        include_stream_usage: bool,
+    ) -> serde_json::Value {
         let tools: Vec<serde_json::Value> = req
             .tools
             .iter()
@@ -600,16 +734,17 @@ impl OpenAiDriver {
         let mut body = serde_json::json!({
             "model": req.model,
             "messages": Self::convert_messages(req),
-            // `max_completion_tokens` is the modern spelling. Reasoning models
-            // reject the legacy `max_tokens` with a 400, while current chat
-            // models accept both, so one key covers every model we advertise.
-            "max_completion_tokens": req.max_tokens,
+            "max_tokens": req.max_tokens,
             "stream": stream,
         });
+        if use_max_completion_tokens {
+            body.as_object_mut().unwrap().remove("max_tokens");
+            body["max_completion_tokens"] = serde_json::json!(req.max_tokens);
+        }
         if !reasoning_model {
             body["temperature"] = serde_json::json!(req.temperature);
         }
-        if stream {
+        if stream && include_stream_usage {
             body["stream_options"] = serde_json::json!({ "include_usage": true });
         }
         if !tools.is_empty() {
@@ -620,11 +755,13 @@ impl OpenAiDriver {
     }
 
     fn build_request(&self, req: &CompletionRequest, stream: bool) -> reqwest::RequestBuilder {
-        self.client
-            .post(format!("{}/chat/completions", self.base_url))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("content-type", "application/json")
-            .json(&Self::build_body(req, stream))
+        let mut builder = self.client
+            .post(format!("{}/{}", self.base_url.trim_end_matches('/'), self.completion_path))
+            .header("content-type", "application/json");
+        if !self.api_key.is_empty() {
+            builder = builder.header("Authorization", format!("Bearer {}", self.api_key));
+        }
+        builder.json(&Self::build_body(req, stream, self.use_max_completion_tokens, self.include_stream_usage))
     }
 
     fn error_from(status: u16, body: &str, retry_after: Option<u64>) -> LlmError {
@@ -650,12 +787,13 @@ impl OpenAiDriver {
             Some("tool_calls") | Some("function_call") => StopReason::ToolUse,
             Some("length") => StopReason::MaxTokens,
             Some("stop") if has_tools => StopReason::ToolUse,
-            _ if has_tools => StopReason::ToolUse,
+            Some("stop") => StopReason::EndTurn,
+            None if has_tools => StopReason::ToolUse,
             _ => StopReason::EndTurn,
         }
     }
 
-    fn build_response(
+    pub(crate) fn build_response(
         text: String,
         tool_calls: Vec<ToolCall>,
         finish_reason: Option<&str>,
@@ -670,6 +808,7 @@ impl OpenAiDriver {
                 id: call.id.clone(),
                 name: call.name.clone(),
                 input: call.input.clone(),
+                provider_metadata: None,
             });
         }
         CompletionResponse {
@@ -694,6 +833,67 @@ impl OpenAiDriver {
     }
 }
 
+pub(crate) fn parse_openai_tool_call(call: &serde_json::Value) -> Result<ToolCall, LlmError> {
+    let id = call["id"].as_str().filter(|s| !s.is_empty())
+        .ok_or_else(|| LlmError::Parse("OpenAI tool call is missing its id".into()))?.to_string();
+    let name = call["function"]["name"].as_str().filter(|s| !s.is_empty())
+        .ok_or_else(|| LlmError::Parse(format!("OpenAI tool call {id} is missing its function name")))?.to_string();
+    let raw = call.get("function").and_then(|f| f.get("arguments"))
+        .ok_or_else(|| LlmError::Parse(format!("OpenAI tool call {id} is missing arguments")))?;
+    let input = if let Some(encoded) = raw.as_str() {
+        serde_json::from_str::<serde_json::Value>(encoded)
+            .map_err(|e| LlmError::Parse(format!("Invalid JSON arguments for tool '{name}': {e}")))?
+    } else if raw.is_object() {
+        raw.clone()
+    } else {
+        return Err(LlmError::Parse(format!("Arguments for tool '{name}' must be a JSON object or encoded JSON object")));
+    };
+    if !input.is_object() {
+        return Err(LlmError::Parse(format!("Arguments for tool '{name}' must decode to a JSON object")));
+    }
+    Ok(ToolCall { id, name, input })
+}
+
+pub(crate) fn parse_chat_completion(json: &serde_json::Value) -> Result<CompletionResponse, LlmError> {
+    if let Some(error) = json.get("error") {
+        return Err(LlmError::Api {
+            status: 200,
+            message: error.get("message").and_then(|v| v.as_str()).unwrap_or("provider returned an error object").to_string(),
+        });
+    }
+    let choice = json.get("choices").and_then(|v| v.get(0))
+        .filter(|v| !v.is_null())
+        .ok_or_else(|| LlmError::Parse("Chat Completions response has no choices[0]".into()))?;
+    let content = &choice["message"]["content"];
+    let text = if let Some(text) = content.as_str() {
+        text.to_string()
+    } else if let Some(parts) = content.as_array() {
+        parts.iter().filter_map(|part| part.get("text").and_then(|v| v.as_str())).collect::<String>()
+    } else {
+        String::new()
+    };
+    let mut tool_calls = Vec::new();
+    if let Some(calls) = choice["message"]["tool_calls"].as_array() {
+        for call in calls { tool_calls.push(parse_openai_tool_call(call)?); }
+    } else if !choice["message"]["tool_calls"].is_null() {
+        return Err(LlmError::Parse("Chat Completions message.tool_calls must be an array".into()));
+    }
+    let finish = choice["finish_reason"].as_str();
+    if matches!(finish, Some("length" | "content_filter")) && !tool_calls.is_empty() {
+        return Err(LlmError::Parse(format!("Provider ended with {finish:?} while emitting incomplete tool calls")));
+    }
+    Ok(OpenAiDriver::build_response(text, tool_calls, finish, OpenAiDriver::usage_from(&json["usage"])))
+}
+
+#[derive(Default)]
+struct OpenAiCallAccum {
+    id: String,
+    name: String,
+    arguments: String,
+    has_arguments: bool,
+    start_emitted: bool,
+}
+
 #[async_trait]
 impl LlmDriver for OpenAiDriver {
     async fn complete(&self, req: &CompletionRequest) -> Result<CompletionResponse, LlmError> {
@@ -701,14 +901,14 @@ impl LlmDriver for OpenAiDriver {
             .build_request(req, false)
             .send()
             .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+            .map_err(map_transport_error)?;
 
         let status = resp.status().as_u16();
         let retry_after = parse_retry_after_ms(resp.headers());
         let body = resp
             .text()
             .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+            .map_err(map_transport_error)?;
 
         if status != 200 {
             return Err(Self::error_from(status, &body, retry_after));
@@ -717,26 +917,7 @@ impl LlmDriver for OpenAiDriver {
         let json: serde_json::Value = serde_json::from_str(&body)
             .map_err(|e| LlmError::Parse(format!("{}: {}", e, safe_excerpt(&body, 200))))?;
 
-        let choice = &json["choices"][0];
-        let text = choice["message"]["content"].as_str().unwrap_or("").to_string();
-        let mut tool_calls = Vec::new();
-        if let Some(calls) = choice["message"]["tool_calls"].as_array() {
-            for call in calls {
-                let args = call["function"]["arguments"].as_str().unwrap_or("{}");
-                tool_calls.push(ToolCall {
-                    id: call["id"].as_str().unwrap_or_default().to_string(),
-                    name: call["function"]["name"].as_str().unwrap_or_default().to_string(),
-                    input: serde_json::from_str(args).unwrap_or(serde_json::json!({})),
-                });
-            }
-        }
-
-        Ok(Self::build_response(
-            text,
-            tool_calls,
-            choice["finish_reason"].as_str(),
-            Self::usage_from(&json["usage"]),
-        ))
+        parse_chat_completion(&json)
     }
 
     async fn stream(
@@ -744,11 +925,29 @@ impl LlmDriver for OpenAiDriver {
         req: &CompletionRequest,
         on_event: &(dyn Fn(StreamEvent) + Send + Sync),
     ) -> Result<CompletionResponse, LlmError> {
+        if !self.streaming_supported {
+            let response = self.complete(req).await?;
+            let text = response.text();
+            if !text.is_empty() {
+                on_event(StreamEvent::TextDelta(text));
+            }
+            for call in &response.tool_calls {
+                on_event(StreamEvent::ToolUseStart { id: call.id.clone(), name: call.name.clone() });
+                on_event(StreamEvent::ToolUseEnd {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    input: call.input.clone(),
+                });
+            }
+            on_event(StreamEvent::MessageDone(response.clone()));
+            return Ok(response);
+        }
+
         let resp = self
             .build_request(req, true)
             .send()
             .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+            .map_err(map_transport_error)?;
 
         let status = resp.status().as_u16();
         if status != 200 {
@@ -756,7 +955,7 @@ impl LlmDriver for OpenAiDriver {
             let body = resp
                 .text()
                 .await
-                .map_err(|e| LlmError::Http(e.to_string()))?;
+                .map_err(map_transport_error)?;
             return Err(Self::error_from(status, &body, retry_after));
         }
 
@@ -764,8 +963,9 @@ impl LlmDriver for OpenAiDriver {
         // Raw bytes: a chunk may end mid-character (see find_frame_end_bytes).
         let mut buf: Vec<u8> = Vec::new();
         let mut text = String::new();
-        // index -> (id, name, accumulated argument JSON)
-        let mut partial_calls: std::collections::BTreeMap<u64, (String, String, String)> =
+        // Tool-call argument strings arrive in deltas and must be validated only
+        // after the complete JSON object has arrived.
+        let mut partial_calls: std::collections::BTreeMap<u64, OpenAiCallAccum> =
             std::collections::BTreeMap::new();
         let mut finish_reason: Option<String> = None;
         let mut usage = TokenUsage {
@@ -775,7 +975,7 @@ impl LlmDriver for OpenAiDriver {
         };
 
         while let Some(chunk) = stream.next().await {
-            let bytes = chunk.map_err(|e| LlmError::Http(e.to_string()))?;
+            let bytes = chunk.map_err(map_transport_error)?;
             buf.extend_from_slice(&bytes);
 
             while let Some((pos, sep_len)) = find_frame_end_bytes(&buf) {
@@ -823,31 +1023,23 @@ impl LlmDriver for OpenAiDriver {
                     if let Some(calls) = delta["tool_calls"].as_array() {
                         for call in calls {
                             let index = call["index"].as_u64().unwrap_or(0);
-                            let entry = partial_calls.entry(index).or_insert_with(|| {
-                                (String::new(), String::new(), String::new())
-                            });
+                            let entry = partial_calls.entry(index).or_default();
                             if let Some(id) = call["id"].as_str() {
-                                if !id.is_empty() {
-                                    entry.0 = id.to_string();
-                                }
+                                if !id.is_empty() { entry.id = id.to_string(); }
                             }
-                            // Only the FIRST delta of a tool call carries
-                            // `id`/`name`; continuations repeat the index with
-                            // arguments only, and some OpenAI-compatible
-                            // gateways send `"name": ""` in them. Set the name
-                            // once and emit ToolUseStart once — re-emitting on
-                            // every chunk would duplicate the UI event.
+                            // Only the first delta normally carries the name/id;
+                            // some gateways split those metadata fields across
+                            // adjacent events, so announce only when both exist.
                             if let Some(name) = call["function"]["name"].as_str() {
-                                if !name.is_empty() && entry.1.is_empty() {
-                                    entry.1 = name.to_string();
-                                    on_event(StreamEvent::ToolUseStart {
-                                        id: entry.0.clone(),
-                                        name: entry.1.clone(),
-                                    });
-                                }
+                                if !name.is_empty() && entry.name.is_empty() { entry.name = name.to_string(); }
                             }
                             if let Some(args) = call["function"]["arguments"].as_str() {
-                                entry.2.push_str(args);
+                                entry.arguments.push_str(args);
+                                entry.has_arguments = true;
+                            }
+                            if !entry.start_emitted && !entry.id.is_empty() && !entry.name.is_empty() {
+                                on_event(StreamEvent::ToolUseStart { id: entry.id.clone(), name: entry.name.clone() });
+                                entry.start_emitted = true;
                             }
                         }
                     }
@@ -863,21 +1055,27 @@ impl LlmDriver for OpenAiDriver {
         }
 
         let mut tool_calls = Vec::new();
-        for (_, (id, name, args)) in partial_calls {
-            if name.is_empty() {
-                continue;
+        for (_, partial) in partial_calls {
+            if partial.id.is_empty() || partial.name.is_empty() || !partial.has_arguments {
+                return Err(LlmError::Parse("OpenAI-compatible stream ended with an incomplete tool call (missing id, name, or arguments)".into()));
             }
-            let input = serde_json::from_str(&args).unwrap_or(serde_json::json!({}));
+            let input: serde_json::Value = serde_json::from_str(&partial.arguments)
+                .map_err(|e| LlmError::Parse(format!("Invalid streamed JSON arguments for tool '{}': {e}", partial.name)))?;
+            if !input.is_object() {
+                return Err(LlmError::Parse(format!("Streamed arguments for tool '{}' must be a JSON object", partial.name)));
+            }
             on_event(StreamEvent::ToolUseEnd {
-                id: id.clone(),
-                name: name.clone(),
-                input: serde_json::to_value(&input).unwrap_or(serde_json::json!({})),
+                id: partial.id.clone(),
+                name: partial.name.clone(),
+                input: input.clone(),
             });
-            tool_calls.push(ToolCall { id, name, input });
+            tool_calls.push(ToolCall { id: partial.id, name: partial.name, input });
+        }
+        if matches!(finish_reason.as_deref(), Some("length" | "content_filter")) && !tool_calls.is_empty() {
+            return Err(LlmError::Parse(format!("Provider ended with {:?} while emitting incomplete tool calls", finish_reason)));
         }
 
-        let response =
-            Self::build_response(text, tool_calls, finish_reason.as_deref(), usage);
+        let response = Self::build_response(text, tool_calls, finish_reason.as_deref(), usage);
         on_event(StreamEvent::MessageDone(response.clone()));
         Ok(response)
     }
@@ -890,6 +1088,7 @@ enum BlockAccum {
     ToolUse {
         id: String,
         name: String,
+        initial_input: serde_json::Value,
         input_json: String,
     },
     Thinking(String),
@@ -928,7 +1127,7 @@ impl StreamAccumulator {
         &mut self,
         json: &serde_json::Value,
         on_event: &(dyn Fn(StreamEvent) + Send + Sync),
-    ) {
+    ) -> Result<(), LlmError> {
         let event_type = json["type"].as_str().unwrap_or("");
 
         match event_type {
@@ -951,8 +1150,11 @@ impl StreamAccumulator {
                 self.current_block = match block_type {
                     "text" => Some(BlockAccum::Text(String::new())),
                     "tool_use" => {
-                        let id = block["id"].as_str().unwrap_or("").to_string();
-                        let name = block["name"].as_str().unwrap_or("").to_string();
+                        let id = block["id"].as_str().filter(|s| !s.is_empty())
+                            .ok_or_else(|| LlmError::Parse("Anthropic tool_use block is missing its id".into()))?.to_string();
+                        let name = block["name"].as_str().filter(|s| !s.is_empty())
+                            .ok_or_else(|| LlmError::Parse(format!("Anthropic tool_use {id} is missing its name")))?.to_string();
+                        let initial_input = block.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
                         on_event(StreamEvent::ToolUseStart {
                             id: id.clone(),
                             name: name.clone(),
@@ -960,6 +1162,7 @@ impl StreamAccumulator {
                         Some(BlockAccum::ToolUse {
                             id,
                             name,
+                            initial_input,
                             input_json: String::new(),
                         })
                     }
@@ -1021,18 +1224,16 @@ impl StreamAccumulator {
             "content_block_stop" => {
                 if let Some(block) = self.current_block.take() {
                     match &block {
-                        BlockAccum::ToolUse {
-                            id,
-                            name,
-                            input_json,
-                        } => {
-                            let input: serde_json::Value =
-                                serde_json::from_str(input_json).unwrap_or_else(|_| serde_json::json!({}));
-                            on_event(StreamEvent::ToolUseEnd {
-                                id: id.clone(),
-                                name: name.clone(),
-                                input: input.clone(),
-                            });
+                        BlockAccum::ToolUse { id, name, initial_input, input_json } => {
+                            let input: serde_json::Value = if input_json.trim().is_empty() {
+                                initial_input.clone()
+                            } else {
+                                serde_json::from_str(input_json).map_err(|e| LlmError::Parse(format!("Invalid streamed JSON arguments for Anthropic tool '{name}': {e}")))?
+                            };
+                            if !input.is_object() {
+                                return Err(LlmError::Parse(format!("Arguments for Anthropic tool '{name}' must be a JSON object")));
+                            }
+                            on_event(StreamEvent::ToolUseEnd { id: id.clone(), name: name.clone(), input });
                         }
                         BlockAccum::ServerToolUse { input, input_json, .. } => {
                             // Merge streamed input_json with initial input (which may be {})
@@ -1078,9 +1279,13 @@ impl StreamAccumulator {
 
             _ => {} // ignore ping, message_stop, etc.
         }
+        Ok(())
     }
 
-    fn finish(self) -> CompletionResponse {
+    fn finish(self) -> Result<CompletionResponse, LlmError> {
+        if self.current_block.is_some() {
+            return Err(LlmError::Parse("Anthropic stream ended before content_block_stop".into()));
+        }
         let mut content = vec![];
         let mut tool_calls = vec![];
 
@@ -1089,17 +1294,17 @@ impl StreamAccumulator {
                 BlockAccum::Text(text) => {
                     content.push(ContentBlock::Text { text });
                 }
-                BlockAccum::ToolUse {
-                    id,
-                    name,
-                    input_json,
-                } => {
-                    let input: serde_json::Value =
-                        serde_json::from_str(&input_json).unwrap_or_default();
+                BlockAccum::ToolUse { id, name, initial_input, input_json } => {
+                    let input: serde_json::Value = if input_json.trim().is_empty() {
+                        initial_input
+                    } else {
+                        serde_json::from_str(&input_json).map_err(|e| LlmError::Parse(format!("Invalid streamed JSON arguments for Anthropic tool '{name}': {e}")))?
+                    };
+                    if id.is_empty() || name.is_empty() || !input.is_object() {
+                        return Err(LlmError::Parse("Anthropic stream contained an invalid tool-use block".into()));
+                    }
                     content.push(ContentBlock::ToolUse {
-                        id: id.clone(),
-                        name: name.clone(),
-                        input: input.clone(),
+                        id: id.clone(), name: name.clone(), input: input.clone(), provider_metadata: None,
                     });
                     tool_calls.push(ToolCall { id, name, input });
                 }
@@ -1130,7 +1335,7 @@ impl StreamAccumulator {
             }
         }
 
-        CompletionResponse {
+        Ok(CompletionResponse {
             content,
             stop_reason: self.stop_reason,
             tool_calls,
@@ -1139,7 +1344,7 @@ impl StreamAccumulator {
                 output_tokens: self.output_tokens,
                 total_tokens: self.input_tokens + self.output_tokens,
             },
-        }
+        })
     }
 }
 
@@ -1230,9 +1435,8 @@ enum ApiResponseBlock {
 
 fn convert_message(msg: &Message) -> ApiMessage {
     let role = match msg.role {
-        Role::User => "user",
+        Role::User | Role::Context | Role::System => "user",
         Role::Assistant => "assistant",
-        Role::System => "user",
     };
 
     let content = match &msg.content {
@@ -1245,7 +1449,7 @@ fn convert_message(msg: &Message) -> ApiMessage {
                         "type": "text",
                         "text": text,
                     })),
-                    ContentBlock::ToolUse { id, name, input } => {
+                    ContentBlock::ToolUse { id, name, input, .. } => {
                         // API requires input to be a dict — normalize null/non-object to {}
                         let safe_input = if input.is_object() { input.clone() } else { serde_json::json!({}) };
                         Some(serde_json::json!({
@@ -1329,7 +1533,7 @@ fn parse_stop_reason(s: &str) -> StopReason {
     }
 }
 
-fn parse_api_response(resp: ApiResponse) -> CompletionResponse {
+fn parse_api_response(resp: ApiResponse) -> Result<CompletionResponse, LlmError> {
     let mut content = vec![];
     let mut tool_calls = vec![];
 
@@ -1339,10 +1543,11 @@ fn parse_api_response(resp: ApiResponse) -> CompletionResponse {
                 content.push(ContentBlock::Text { text });
             }
             ApiResponseBlock::ToolUse { id, name, input } => {
+                if id.is_empty() || name.is_empty() || !input.is_object() {
+                    return Err(LlmError::Parse("Anthropic response contained a tool call with a missing id/name or non-object input".into()));
+                }
                 content.push(ContentBlock::ToolUse {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
+                    id: id.clone(), name: name.clone(), input: input.clone(), provider_metadata: None,
                 });
                 tool_calls.push(ToolCall { id, name, input });
             }
@@ -1366,13 +1571,12 @@ fn parse_api_response(resp: ApiResponse) -> CompletionResponse {
         }
     }
 
-    let stop_reason = resp
-        .stop_reason
-        .as_deref()
-        .map(parse_stop_reason)
-        .unwrap_or(StopReason::EndTurn);
+    let stop_reason = resp.stop_reason.as_deref().map(parse_stop_reason).unwrap_or(StopReason::EndTurn);
+    if !tool_calls.is_empty() && stop_reason != StopReason::ToolUse {
+        return Err(LlmError::Parse("Anthropic returned tool_use blocks without stop_reason=tool_use".into()));
+    }
 
-    CompletionResponse {
+    Ok(CompletionResponse {
         content,
         stop_reason,
         tool_calls,
@@ -1381,7 +1585,7 @@ fn parse_api_response(resp: ApiResponse) -> CompletionResponse {
             output_tokens: resp.usage.output_tokens,
             total_tokens: resp.usage.input_tokens + resp.usage.output_tokens,
         },
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1394,7 +1598,7 @@ mod anthropic_stream_tests {
 
     fn feed(accum: &mut StreamAccumulator, raw: &str) {
         let json: serde_json::Value = serde_json::from_str(raw).unwrap();
-        accum.process_sse(&json, &noop());
+        accum.process_sse(&json, &noop()).unwrap();
     }
 
     /// Anthropic documents message_delta usage as cumulative. Summing it
@@ -1414,7 +1618,7 @@ mod anthropic_stream_tests {
             r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":200}}"#,
         );
 
-        let done = accum.finish();
+        let done = accum.finish().unwrap();
         assert_eq!(done.usage.input_tokens, 1000);
         // Correct: the final cumulative value. Old behaviour: 3+50+120+200=373.
         assert_eq!(
@@ -1435,7 +1639,7 @@ mod anthropic_stream_tests {
             r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}"#,
         );
         // Old behaviour: 1 + 42 = 43.
-        assert_eq!(accum.finish().usage.output_tokens, 42);
+        assert_eq!(accum.finish().unwrap().usage.output_tokens, 42);
     }
 
     /// Replaying a thinking block without its signature is a hard 400 that
@@ -1446,6 +1650,66 @@ mod anthropic_stream_tests {
             content: MessageContent::Blocks(blocks),
         };
         serde_json::to_value(convert_message(&msg)).unwrap()
+    }
+
+    #[test]
+    fn system_transcript_messages_are_folded_into_anthropic_system_prompt() {
+        let req = CompletionRequest {
+            model: "claude-sonnet-5-5".into(),
+            messages: vec![
+                Message {
+                    role: Role::System,
+                    content: MessageContent::Text("Earlier context summary".into()),
+                },
+                Message::user("continue"),
+            ],
+            tools: vec![],
+            max_tokens: 64,
+            temperature: 0.0,
+            system: Some("Workspace instructions".into()),
+        };
+        let (system, present) = collect_system_prompt(&req);
+        assert!(present);
+        assert_eq!(system, "Workspace instructions\nEarlier context summary");
+    }
+
+    #[test]
+    fn internal_context_summary_is_sent_as_user_content_not_system_instruction() {
+        let message = Message {
+            role: Role::Context,
+            content: MessageContent::Text("lossy session note".into()),
+        };
+        let wire = serde_json::to_value(convert_message(&message)).unwrap();
+        assert_eq!(wire["role"], "user");
+    }
+
+    #[test]
+    fn zen_anthropic_route_uses_x_api_key_and_omits_empty_auth() {
+        let driver = AnthropicDriver::with_bearer_auth(
+            String::new(),
+            Some("https://opencode.ai/zen/v1".into()),
+            false,
+        );
+        let req = CompletionRequest {
+            model: "claude-sonnet-4-6".into(),
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+            max_tokens: 32,
+            temperature: 0.0,
+            system: None,
+        };
+        let built = driver.build_request(&req, false).build().unwrap();
+        assert!(built.headers().get("authorization").is_none());
+        assert!(built.headers().get("x-api-key").is_none());
+
+        let authenticated = AnthropicDriver::with_bearer_auth(
+            "zen-secret".into(),
+            Some("https://opencode.ai/zen/v1".into()),
+            false,
+        );
+        let built = authenticated.build_request(&req, false).build().unwrap();
+        assert_eq!(built.headers().get("x-api-key").unwrap(), "zen-secret");
+        assert!(built.headers().get("authorization").is_none());
     }
 
     /// Replaying a thinking block without its signature is a hard 400 that
@@ -1475,6 +1739,7 @@ mod anthropic_stream_tests {
             id: "toolu_1".into(),
             name: "read_file".into(),
             input: serde_json::json!({"path": "a.txt"}),
+            provider_metadata: None,
         }]);
         let blocks = wire["content"].as_array().unwrap();
         assert_eq!(blocks[0]["type"], "tool_use");
@@ -1486,6 +1751,7 @@ mod anthropic_stream_tests {
             id: "toolu_2".into(),
             name: "noop".into(),
             input: serde_json::Value::Null,
+            provider_metadata: None,
         }]);
         let blocks = wire["content"].as_array().unwrap();
         assert!(blocks[0]["input"].is_object());
@@ -1564,30 +1830,104 @@ mod openai_wire_tests {
     #[test]
     fn temperature_is_omitted_only_for_reasoning_models() {
         // Reasoning model: sending temperature is a hard 400.
-        let body = OpenAiDriver::build_body(&req("o4-mini"), false);
+        let body = OpenAiDriver::build_body(&req("o4-mini"), false, true, true);
         assert!(body.get("temperature").is_none());
         // Regular chat model keeps the caller's value.
-        let body = OpenAiDriver::build_body(&req("gpt-4o"), false);
+        let body = OpenAiDriver::build_body(&req("gpt-4o"), false, true, true);
         assert_eq!(body["temperature"].as_f64().unwrap(), 0.2_f32 as f64);
     }
 
     #[test]
-    fn token_limit_always_uses_the_modern_key() {
+    fn token_limit_field_is_provider_specific() {
         for m in ["gpt-4o", "o4-mini"] {
-            let body = OpenAiDriver::build_body(&req(m), false);
+            let body = OpenAiDriver::build_body(&req(m), false, true, true);
             assert_eq!(body["max_completion_tokens"], 1024);
-            // The legacy key is a 400 on reasoning models — never send it.
             assert!(body.get("max_tokens").is_none());
         }
+        let compatible = OpenAiDriver::build_body(&req("model"), false, false, false);
+        assert_eq!(compatible["max_tokens"], 1024);
+        assert!(compatible.get("max_completion_tokens").is_none());
+    }
+
+    #[tokio::test]
+    async fn non_streaming_gateway_uses_json_completion_and_emits_one_final_delta() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 2048];
+            loop {
+                let count = socket.read(&mut chunk).await.unwrap();
+                if count == 0 { break; }
+                request.extend_from_slice(&chunk[..count]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(header_end) = text.find("\r\n\r\n") {
+                    let content_length = text[..header_end].lines()
+                        .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:")
+                            .and_then(|value| value.trim().parse::<usize>().ok()))
+                        .unwrap_or(0);
+                    if request.len() >= header_end + 4 + content_length { break; }
+                }
+            }
+            let text = String::from_utf8_lossy(&request);
+            let header_end = text.find("\r\n\r\n").unwrap();
+            let body: serde_json::Value = serde_json::from_str(&text[header_end + 4..]).unwrap();
+            assert_eq!(body["stream"], false);
+            assert!(body.get("stream_options").is_none());
+            assert!(body.get("tools").is_none());
+
+            let response = serde_json::json!({
+                "choices": [{"message": {"role": "assistant", "content": "AI Horde response"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}
+            }).to_string();
+            let wire = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(), response,
+            );
+            socket.write_all(wire.as_bytes()).await.unwrap();
+        });
+
+        let driver = OpenAiDriver::with_compat_options(
+            "0000000000".into(),
+            Some(format!("http://{address}/v1")),
+            false,
+            false,
+        ).with_streaming_support(false);
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let on_event = move |event: StreamEvent| sink.lock().unwrap().push(event);
+        let response = driver.stream(&req("koboldcpp/Llama-3.2-1B-Instruct"), &on_event).await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(response.text(), "AI Horde response");
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], StreamEvent::TextDelta(text) if text == "AI Horde response"));
+        assert!(matches!(&events[1], StreamEvent::MessageDone(_)));
+    }
+
+    #[test]
+    fn pollinations_uses_the_current_v1_chat_completions_path() {
+        let driver = OpenAiDriver::with_compat_options(
+            "pollinations-key".into(),
+            Some("https://gen.pollinations.ai/v1".into()),
+            false,
+            false,
+        );
+        let built = driver.build_request(&req("openai"), false).build().unwrap();
+        assert_eq!(built.url().as_str(), "https://gen.pollinations.ai/v1/chat/completions");
     }
 
     #[test]
     fn streaming_requests_ask_for_usage() {
-        let body = OpenAiDriver::build_body(&req("gpt-4o"), true);
+        let body = OpenAiDriver::build_body(&req("gpt-4o"), true, true, true);
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
         // Non-streaming must not carry stream_options.
-        let body = OpenAiDriver::build_body(&req("gpt-4o"), false);
+        let body = OpenAiDriver::build_body(&req("gpt-4o"), false, true, true);
         assert!(body.get("stream_options").is_none());
     }
 
@@ -1604,5 +1944,42 @@ mod openai_wire_tests {
         let usage = OpenAiDriver::usage_from(&chunk["usage"]);
         assert_eq!(usage.input_tokens, 41);
         assert_eq!(usage.output_tokens, 17);
+    }
+}
+
+
+#[cfg(test)]
+mod retry_classification_tests {
+    use super::LlmError;
+
+    #[tokio::test]
+    async fn refused_connection_is_classified_as_retryable_network_failure() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap();
+        let error = client
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap_err();
+        let mapped = super::map_transport_error(error);
+        assert!(matches!(mapped, LlmError::Network(_)));
+        assert!(mapped.is_retryable());
+    }
+
+    #[test]
+    fn retries_transient_errors_but_not_auth_or_invalid_request_errors() {
+        assert!(LlmError::Timeout("read timeout".into()).is_retryable());
+        assert!(LlmError::Network("connection refused".into()).is_retryable());
+        assert!(LlmError::RateLimited { retry_after_ms: 1_000 }.is_retryable());
+        assert!(LlmError::Overloaded { retry_after_ms: 1_000 }.is_retryable());
+        assert!(LlmError::Api { status: 503, message: "temporary".into() }.is_retryable());
+        assert!(!LlmError::Api { status: 401, message: "bad key".into() }.is_retryable());
+        assert!(!LlmError::Api { status: 400, message: "invalid request".into() }.is_retryable());
+        assert!(!LlmError::Parse("invalid wire format".into()).is_retryable());
     }
 }

@@ -12,6 +12,9 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
         // Lifecycle
         CAPPluginMethod(name: "initWorkspace", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "initialize", returnType: CAPPluginReturnPromise),
+        // App-owned runtime configuration
+        CAPPluginMethod(name: "getRuntimeConfig", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setRuntimeConfig", returnType: CAPPluginReturnPromise),
         // Agent
         CAPPluginMethod(name: "sendMessage", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "followUp", returnType: CAPPluginReturnPromise),
@@ -20,6 +23,7 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
         // Approval gate
         CAPPluginMethod(name: "respondToApproval", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "respondToMcpTool", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "respondToProviderRequest", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "respondToCronApproval", returnType: CAPPluginReturnPromise),
         // Auth
         CAPPluginMethod(name: "getAuthToken", returnType: CAPPluginReturnPromise),
@@ -294,6 +298,41 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
+    // ── App-owned runtime configuration ──────────────────────────────────────
+
+    @objc func getRuntimeConfig(_ call: CAPPluginCall) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let config = try AgentRuntimeConfigStore.get()
+                let data = try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])
+                guard let configJson = String(data: data, encoding: .utf8) else {
+                    throw NSError(domain: "NativeAgentRuntimeConfig", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not encode runtime config"])
+                }
+                call.resolve(["configJson": configJson])
+            } catch {
+                call.reject("getRuntimeConfig failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    @objc func setRuntimeConfig(_ call: CAPPluginCall) {
+        guard let configJson = call.getString("configJson") else {
+            return call.reject("configJson is required")
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let config = try AgentRuntimeConfigStore.update(configJson: configJson)
+                let data = try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])
+                guard let canonicalJson = String(data: data, encoding: .utf8) else {
+                    throw NSError(domain: "NativeAgentRuntimeConfig", code: 3, userInfo: [NSLocalizedDescriptionKey: "Could not encode runtime config"])
+                }
+                call.resolve(["configJson": canonicalJson])
+            } catch {
+                call.reject("setRuntimeConfig failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     // ── Agent ────────────────────────────────────────────────────────────────
 
     @objc func sendMessage(_ call: CAPPluginCall) {
@@ -373,6 +412,26 @@ public class NativeAgentPlugin: CAPPlugin, CAPBridgedPlugin {
                 call.resolve()
             } catch {
                 call.reject("respondToApproval failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    @objc func respondToProviderRequest(_ call: CAPPluginCall) {
+        withHandle(call) { h in
+            guard let requestId = call.getString("requestId"),
+                  let responseJson = call.getString("responseJson") else {
+                return call.reject("requestId and responseJson are required")
+            }
+            do {
+                try h.respondToProviderRequest(
+                    requestId: requestId,
+                    responseJson: responseJson,
+                    isFinal: call.getBool("isFinal") ?? false,
+                    isError: call.getBool("isError") ?? false
+                )
+                call.resolve()
+            } catch {
+                call.reject("respondToProviderRequest failed: \(error.localizedDescription)")
             }
         }
     }

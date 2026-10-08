@@ -14,7 +14,8 @@ path = "uniffi-bindgen.rs"
 
 [dependencies]
 uniffi = { version = "0.28", features = ["tokio", "cli"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "process", "io-util", "net"] }
+libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json", "stream"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

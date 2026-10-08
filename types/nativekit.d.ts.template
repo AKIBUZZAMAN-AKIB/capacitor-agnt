@@ -59,6 +59,226 @@ interface NativeKitAgentConfig {
   markSurfacedRead: boolean;
 }
 
+type NativeKitAgentProvider =
+  | 'anthropic' | 'openai' | 'gemini' | 'openrouter' | 'ovhcloud' | 'aihorde'
+  | 'llm7' | 'opencode_zen' | 'kilo' | 'pollinations' | 'webllm';
+type NativeKitAgentProviderChoice = NativeKitAgentProvider | 'auto';
+type NativeKitAgentProviderProtocol =
+  | 'anthropic_messages' | 'openai_chat_completions' | 'openai_responses'
+  | 'gemini_generate_content' | 'webllm_chat_completions';
+interface NativeKitAgentAutoRoutingConfig {
+  providerOrder: NativeKitAgentProvider[];
+  failoverOnTransient: boolean;
+  maxFallbacks: number;
+}
+type NativeKitAgentPermission = 'always_allow' | 'always_ask' | 'always_ask_biometric';
+
+/** Persisted runtime controls. Security boundaries (sandbox, approvals, SSRF, output caps, wake budget) remain fixed. */
+interface NativeKitAgentRuntimeConfig {
+  temperature: number;
+  maxTokens: number;
+  defaultMaxTurns: number;
+  contextCharBudget: number;
+  mcpToolTimeoutMs: number;
+  maxRetries: number;
+  baseRetryDelayMs: number;
+  maxRetryDelayMs: number;
+  defaultCronMaxTurns: number;
+  defaultHeartbeatMaxTurns: number;
+  defaultCronTimeoutMs: number;
+  defaultHeartbeatTimeoutMs: number;
+  defaultProvider: NativeKitAgentProviderChoice;
+  defaultModels: Partial<Record<NativeKitAgentProvider, string>>;
+  providerBaseUrls: Partial<Record<NativeKitAgentProvider, string>>;
+  providerModelProtocols: Partial<Record<NativeKitAgentProvider, Record<string, NativeKitAgentProviderProtocol>>>;
+  providerToolCapabilities: Partial<Record<NativeKitAgentProvider, Record<string, boolean>>>;
+  autoRouting: NativeKitAgentAutoRoutingConfig;
+}
+type NativeKitAgentRuntimeConfigPatch = Partial<Omit<NativeKitAgentRuntimeConfig, 'providerBaseUrls' | 'defaultModels' | 'providerModelProtocols' | 'providerToolCapabilities'>> & {
+  defaultModels?: Partial<Record<NativeKitAgentProvider, string | null>> | null;
+  providerBaseUrls?: Partial<Record<NativeKitAgentProvider, string | null>> | null;
+  providerModelProtocols?: Partial<Record<NativeKitAgentProvider, Record<string, NativeKitAgentProviderProtocol | null> | null>> | null;
+  providerToolCapabilities?: Partial<Record<NativeKitAgentProvider, Record<string, boolean | null> | null>> | null;
+};
+
+interface NativeKitAgentInitConfig {
+  dbPath: string;
+  workspacePath: string;
+  authProfilesPath: string;
+}
+interface NativeKitAgentActiveHours { start: string; end: string; tz?: string }
+type NativeKitAgentCronSchedule =
+  | { kind: 'at'; atMs: number; everyMs?: never; anchorMs?: never }
+  | { kind: 'every'; everyMs: number; anchorMs?: number | null; atMs?: never };
+interface NativeKitAgentSendMessageOptions {
+  prompt: string;
+  sessionKey: string;
+  model?: string;
+  provider?: NativeKitAgentProvider;
+  systemPrompt?: string;
+  maxTurns?: number;
+  /** [] means no tools; omit it to leave the tool set unrestricted. */
+  allowedTools?: string[];
+  /** Deprecated low-level JSON-string form; do not pass with allowedTools. */
+  allowedToolsJson?: string;
+  priorMessages?: unknown[];
+  priorMessagesJson?: string;
+}
+interface NativeKitAgentCronJobInput {
+  id?: string;
+  name: string;
+  enabled?: boolean;
+  sessionTarget?: 'isolated' | 'shared' | 'main';
+  wakeMode?: string;
+  schedule: NativeKitAgentCronSchedule;
+  skillId?: string | null;
+  prompt?: string;
+  deliveryMode?: 'notification' | 'webhook' | 'silent' | 'none';
+  deliveryWebhookUrl?: string | null;
+  deliveryNotificationTitle?: string | null;
+  activeHours?: NativeKitAgentActiveHours | null;
+}
+interface NativeKitAgentCronJobPatch extends Partial<NativeKitAgentCronJobInput> {}
+interface NativeKitAgentSchedulerConfig {
+  enabled?: boolean;
+  schedulingMode?: string;
+  runOnCharging?: boolean;
+  globalActiveHours?: NativeKitAgentActiveHours | null;
+}
+interface NativeKitAgentHeartbeatConfig {
+  enabled?: boolean;
+  everyMs?: number;
+  prompt?: string | null;
+  skillId?: string | null;
+  activeHours?: NativeKitAgentActiveHours | null;
+  nextRunAt?: number | null;
+  lastHash?: string | null;
+  lastSentAt?: number | null;
+}
+interface NativeKitAgentSkillInput {
+  id?: string;
+  name: string;
+  allowedTools?: string[] | null;
+  systemPrompt?: string | null;
+  model?: string | null;
+  maxTurns?: number;
+  timeoutMs?: number;
+}
+interface NativeKitAgentToolDefinition {
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+  approvalPolicy?: NativeKitAgentPermission;
+  webviewOnly?: boolean;
+}
+interface NativeKitAgentMcpServerConfig {
+  name: string;
+  url: string;
+  headers?: Record<string, string>;
+  approvalPolicy?: NativeKitAgentPermission;
+  timeoutMs?: number;
+}
+interface NativeKitAgentMcpConnection {
+  clients: unknown[];
+  toolCount: number;
+  failures: Array<{ server: string; error: string }>;
+  dispose(): Promise<void>;
+}
+interface NativeKitAgentToolPermissionRecord {
+  tool_name: string;
+  permission: string;
+  enabled: boolean;
+  source?: string | null;
+  group_id?: string | null;
+  updated_at?: number | null;
+}
+interface NativeKitAgentMemoryRecord {
+  key: string;
+  text?: string;
+  score?: number;
+  metadata?: Record<string, unknown>;
+  textTruncated?: boolean;
+  metadataTruncated?: boolean;
+}
+interface NativeKitAgentMemorySearchResult {
+  results: NativeKitAgentMemoryRecord[];
+  truncated: boolean;
+}
+type NativeKitAgentMemoryOperationResult =
+  | { success: boolean; key?: string; error?: string }
+  | { action: 'candidates'; candidates: NativeKitAgentMemoryRecord[]; truncated: boolean; message: string }
+  | { message: string };
+interface NativeKitAgentEvent { eventType: string; payloadJson: string }
+
+interface NativeKitAgentAPI {
+  readonly engineGeneration: string;
+  supported(): boolean;
+  checkAvailability(): Promise<{ abi: string; is64Bit: boolean; available: boolean; reason: string; engineGeneration?: string }>;
+  initWorkspace(config: NativeKitAgentInitConfig): Promise<void>;
+  initialize(config: NativeKitAgentInitConfig): Promise<void>;
+  getRuntimeConfig(): Promise<NativeKitAgentRuntimeConfig>;
+  setRuntimeConfig(patch: NativeKitAgentRuntimeConfigPatch): Promise<NativeKitAgentRuntimeConfig>;
+  scheduleBackgroundWakes(intervalMinutes?: number): Promise<NativeKitAgentWakeResult>;
+  cancelBackgroundWakes(): Promise<NativeKitAgentWakeResult>;
+  getWakeStatus(): Promise<NativeKitAgentWakeStatus>;
+  loadSurfacedMessages(limit?: number): Promise<NativeKitAgentSurfacedMessages>;
+  clearSurfacedMessages(): Promise<{ supported: boolean; cleared: number; unread?: number; engineGeneration?: string; platform?: string }>;
+  sendMessage(options: NativeKitAgentSendMessageOptions): Promise<{ runId: string }>;
+  followUp(prompt: string): Promise<void>;
+  abort(): Promise<void>;
+  steer(text: string): Promise<void>;
+  respondToApproval(toolCallId: string, approved: boolean, reason?: string): Promise<void>;
+  respondToMcpTool(toolCallId: string, resultJson: string, isError?: boolean): Promise<void>;
+  respondToProviderRequest(requestId: string, responseJson: string, isFinal?: boolean, isError?: boolean): Promise<void>;
+  respondToCronApproval(requestId: string, approved: boolean): Promise<void>;
+  getAuthToken(provider?: NativeKitAgentProvider): Promise<{ apiKey: string | null; isOAuth: boolean }>;
+  setAuthKey(key: string, provider?: NativeKitAgentProvider, authType?: string): Promise<void>;
+  deleteAuth(provider?: NativeKitAgentProvider): Promise<void>;
+  refreshToken(provider?: NativeKitAgentProvider): Promise<{ apiKey: string | null; isOAuth: boolean }>;
+  getAuthStatus(provider?: NativeKitAgentProvider): Promise<{ hasKey: boolean; masked: string; provider: string }>;
+  exchangeOAuthCode(tokenUrl: string, bodyJson: string, contentType?: string): Promise<{ success: boolean; status?: number; data?: unknown; text?: string; error?: string }>;
+  listSessions(agentId?: string): Promise<{ sessionsJson: string }>;
+  loadSession(sessionKey: string, agentId?: string): Promise<{ sessionKey: string; messagesJson: string }>;
+  resumeSession(options: { sessionKey: string; agentId?: string; messagesJson?: string; provider?: string; model?: string }): Promise<void>;
+  clearSession(): Promise<void>;
+  addCronJob(input: string | NativeKitAgentCronJobInput): Promise<{ recordJson: string }>;
+  updateCronJob(id: string, patch: string | NativeKitAgentCronJobPatch): Promise<void>;
+  removeCronJob(id: string): Promise<void>;
+  listCronJobs(): Promise<{ jobsJson: string }>;
+  runCronJob(jobId: string): Promise<void>;
+  listCronRuns(jobId?: string, limit?: number): Promise<{ runsJson: string }>;
+  handleWake(source?: string): Promise<{ ran: number; failed: number; surfaced: number; summary: string }>;
+  getSchedulerConfig(): Promise<{ schedulerJson: string; heartbeatJson: string; scheduler: NativeKitAgentSchedulerConfig; heartbeat: NativeKitAgentHeartbeatConfig }>;
+  setSchedulerConfig(config: string | NativeKitAgentSchedulerConfig): Promise<void>;
+  setHeartbeatConfig(config: string | NativeKitAgentHeartbeatConfig): Promise<void>;
+  addSkill(input: string | NativeKitAgentSkillInput): Promise<{ recordJson: string }>;
+  updateSkill(id: string, patch: string | Partial<NativeKitAgentSkillInput>): Promise<void>;
+  removeSkill(id: string): Promise<void>;
+  listSkills(): Promise<{ skillsJson: string }>;
+  startSkill(skillId: string, config?: string | Record<string, unknown>, provider?: string): Promise<{ sessionKey: string }>;
+  endSkill(skillId: string): Promise<void>;
+  seedToolPermissions(defaults: string | Array<Record<string, unknown>>): Promise<{ seeded: number }>;
+  setToolPermission(toolName: string, permission: NativeKitAgentPermission, enabled?: boolean): Promise<void>;
+  listToolPermissions(): Promise<{ permissionsJson: string }>;
+  resetToolPermissions(): Promise<void>;
+  startMcp(tools: string | NativeKitAgentToolDefinition[]): Promise<{ toolCount: number }>;
+  restartMcp(tools: string | NativeKitAgentToolDefinition[]): Promise<{ toolCount: number }>;
+  /** Compatibility alias implemented by restartMcp; not present on the raw Capacitor plugin. */
+  setMcpTools(tools: string | NativeKitAgentToolDefinition[]): Promise<Record<string, unknown>>;
+  connectMcp(servers: NativeKitAgentMcpServerConfig[]): Promise<NativeKitAgentMcpConnection>;
+  getModels(provider?: NativeKitAgentProvider): Promise<{ modelsJson: string }>;
+  invokeTool(toolName: string, args?: string | Record<string, unknown>): Promise<{ resultJson: string }>;
+  memory: {
+    store(options: { text: string; key?: string; category?: string; metadata?: Record<string, unknown> }): Promise<NativeKitAgentMemoryOperationResult>;
+    recall(options: { query: string; limit?: number }): Promise<NativeKitAgentMemorySearchResult>;
+    search(options: { query: string; maxResults?: number; limit?: number }): Promise<NativeKitAgentMemorySearchResult>;
+    /** Query returns candidates only; deletion requires an exact key and approval. */
+    forget(options: { key?: string; query?: string }): Promise<NativeKitAgentMemoryOperationResult>;
+    list(options?: { prefix?: string; limit?: number }): Promise<string[]>;
+  };
+  onEvent(callback: (event: NativeKitAgentEvent) => void): Promise<NativeKitRemoveHandle>;
+}
+
 /** One message the agent produced while the user was not looking. */
 interface NativeKitAgentSurfacedMessage {
   id: string;
@@ -589,16 +809,7 @@ interface NativeKitAPI {
    * OS for background runtime. Every call resolves; a build where the native side
    * is unreachable answers `supported: false` with a reason and an alternative.
    */
-  agent: {
-    readonly engineGeneration: string;
-    supported(): boolean;
-    scheduleBackgroundWakes(intervalMinutes?: number): Promise<NativeKitAgentWakeResult>;
-    cancelBackgroundWakes(): Promise<NativeKitAgentWakeResult>;
-    getWakeStatus(): Promise<NativeKitAgentWakeStatus>;
-    loadSurfacedMessages(limit?: number): Promise<NativeKitAgentSurfacedMessages>;
-    clearSurfacedMessages(): Promise<{ supported: boolean; cleared: number; unread?: number; engineGeneration?: string; platform?: string }>;
-    handleWake(source?: string): Promise<{ ran: number; failed: number; surfaced: number; summary: string }>;
-  };
+  agent: NativeKitAgentAPI;
   permissions: {
     check(): Promise<{
       camera: Record<string, NativeKitPermissionState>;
@@ -1009,6 +1220,28 @@ export {
   NativeKitFloatingWidgetOptions,
   NativeKitWidgetKind,
   NativeKitAgentConfig,
+  NativeKitAgentProvider,
+  NativeKitAgentPermission,
+  NativeKitAgentRuntimeConfig,
+  NativeKitAgentRuntimeConfigPatch,
+  NativeKitAgentInitConfig,
+  NativeKitAgentActiveHours,
+  NativeKitAgentCronSchedule,
+  NativeKitAgentSendMessageOptions,
+  NativeKitAgentCronJobInput,
+  NativeKitAgentCronJobPatch,
+  NativeKitAgentSchedulerConfig,
+  NativeKitAgentHeartbeatConfig,
+  NativeKitAgentSkillInput,
+  NativeKitAgentToolDefinition,
+  NativeKitAgentMcpServerConfig,
+  NativeKitAgentMcpConnection,
+  NativeKitAgentToolPermissionRecord,
+  NativeKitAgentMemoryRecord,
+  NativeKitAgentMemorySearchResult,
+  NativeKitAgentMemoryOperationResult,
+  NativeKitAgentEvent,
+  NativeKitAgentAPI,
   NativeKitAgentSurfacedMessage,
   NativeKitAgentSurfacedMessages,
   NativeKitAgentWakeResult,

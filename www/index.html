@@ -122,21 +122,148 @@
         <p style="color:var(--muted);font-size:.85rem;margin-top:8px">
           পুরো agent (LLM turn, tool call, cron, skill, MCP, memory) ফোনের ভেতরে
           native Rust-এ চলে — শুধু LLM provider-এর সাথে network কথা হয়।
-          <strong>ক্রম মেনে চলুন:</strong> ① Availability → ② Initialize → ③ API key →
-          ④ Send message। বাকিগুলো যেকোনো সময়।
+          <strong>ক্রম মেনে চলুন:</strong> ① Availability → ② Initialize → ③ দরকার হলে provider key →
+          ④ Send message। WebLLM local; AI Horde anonymous key-এ সর্বনিম্ন priority।
         </p>
         <p class="hint" id="agent-status" data-tone="muted">প্রস্তুত হচ্ছে…</p>
       </div>
 
       <div class="input-row" style="margin-top:14px;flex-wrap:wrap;gap:8px">
-        <input id="agent-provider" placeholder="provider (anthropic)" value="anthropic" autocomplete="off" style="flex:1 1 140px">
-        <input id="agent-model" placeholder="model (ফাঁকা = default)" autocomplete="off" style="flex:1 1 180px">
-        <input id="agent-key" type="password" placeholder="API key (sk-ant-…)" autocomplete="off" style="flex:2 1 240px">
+        <select id="agent-provider" aria-label="এই turn-এর provider" style="flex:1 1 160px">
+          <option value="auto">Auto routing</option>
+          <option value="anthropic">Anthropic</option><option value="openai">OpenAI</option>
+          <option value="gemini">Google Gemini</option><option value="openrouter">OpenRouter</option>
+          <option value="ovhcloud">OVHcloud</option><option value="aihorde" title="No tool calls or SSE; buffered response">AI Horde (buffered, no tools)</option>
+          <option value="llm7">LLM7</option><option value="opencode_zen">OpenCode Zen</option>
+          <option value="kilo">Kilo Code</option><option value="pollinations">Pollinations</option>
+          <option value="webllm">WebLLM (local WebGPU)</option>
+        </select>
+        <input id="agent-model" list="agent-model-list" placeholder="এই turn-এর model override (ঐচ্ছিক)" autocomplete="off" style="flex:1 1 220px">
+        <datalist id="agent-model-list"></datalist>
+        <select id="agent-auth-provider" aria-label="যে provider-এর key সংরক্ষণ করবেন" style="flex:1 1 160px">
+          <option value="anthropic">Anthropic key</option><option value="openai">OpenAI key</option>
+          <option value="gemini">Gemini key</option><option value="openrouter">OpenRouter key</option>
+          <option value="ovhcloud">OVHcloud key</option><option value="aihorde">AI Horde key (optional; anonymous lowest priority)</option>
+          <option value="llm7">LLM7 key</option><option value="opencode_zen">OpenCode Zen key</option>
+          <option value="kilo">Kilo key</option><option value="pollinations">Pollinations key</option>
+        </select>
+        <input id="agent-key" type="password" placeholder="selected provider-এর API key (runtime config-এ নয়)" autocomplete="off" style="flex:2 1 240px">
       </div>
       <div class="input-row" style="margin-top:8px;flex-wrap:wrap;gap:8px">
         <input id="agent-system" placeholder="system prompt (optional)" autocomplete="off" style="flex:1 1 220px">
         <input id="agent-prompt" placeholder="prompt — যা জিজ্ঞেস করবেন" value="Say hello in Bangla, one short sentence." autocomplete="off" style="flex:2 1 280px">
       </div>
+      <article class="card" style="margin-top:12px">
+        <span class="icon">⇄</span><h3>Provider, model & auto-routing</h3>
+        <p>Model তালিকা live catalog থেকে আনুন। নিচের default model ও base URL provider configuration; উপরের model field শুধু এই turn-এর override। Save করলে model-level tool/protocol/auth/stream capability ও fallback order runtime settings-এ থাকে; API key আলাদা auth store-এ যায়। Auto mode-এ turn override কেবল নির্বাচিত catalog provider-এ যাবে—পূর্ণ auto-routing চাইলে উপরের override ফাঁকা রাখুন। Free-tier model-এর prompt logging/training ঝুঁকি catalog-এ থাকলে এখানে দেখানো হবে।</p>
+        <div class="input-row">
+          <label class="hint" for="agent-catalog-provider">Catalog / default model provider</label>
+          <select id="agent-catalog-provider" aria-label="Model catalog provider">
+            <option value="anthropic">Anthropic</option><option value="openai">OpenAI</option>
+            <option value="gemini">Google Gemini</option><option value="openrouter">OpenRouter</option>
+            <option value="ovhcloud">OVHcloud</option><option value="aihorde" title="OpenAI shim has no tools or SSE; responses are buffered">AI Horde (buffered, no tools)</option>
+            <option value="llm7">LLM7</option><option value="opencode_zen">OpenCode Zen</option>
+            <option value="kilo">Kilo Code</option><option value="pollinations">Pollinations</option>
+            <option value="webllm">WebLLM</option>
+          </select>
+          <button data-agent-action="agentmodels" class="secondary">Refresh selected provider models</button>
+          <button data-agent-action="agentsaveproviders">Save provider / routing settings</button>
+        </div>
+        <div class="input-row">
+          <label class="hint" for="agent-provider-default-model">Provider default model</label>
+          <input id="agent-provider-default-model" list="agent-model-list" placeholder="leave blank to use the built-in default" autocomplete="off" style="flex:1 1 260px">
+          <label class="hint" for="agent-provider-base-url">Base URL override</label>
+          <input id="agent-provider-base-url" type="url" placeholder="https://… (optional API root; no credentials)" autocomplete="off" style="flex:2 1 300px">
+        </div>
+        <div class="input-row">
+          <label class="hint" for="agent-model-protocol">Wire protocol</label>
+          <select id="agent-model-protocol" aria-label="Model wire protocol">
+            <option value="">Catalog/provider default</option>
+            <option value="anthropic_messages">Anthropic Messages</option>
+            <option value="openai_chat_completions">OpenAI Chat Completions</option>
+            <option value="openai_responses">OpenAI Responses</option>
+            <option value="gemini_generate_content">Gemini generateContent</option>
+            <option value="webllm_chat_completions">WebLLM local Chat Completions</option>
+          </select>
+          <select id="agent-model-tools" aria-label="Model tool-call capability">
+            <option value="unknown">Tool capability: unknown (safe)</option>
+            <option value="true">Verified: model supports tools</option>
+            <option value="false">Verified: model does not support tools</option>
+          </select>
+        </div>
+        <p class="hint" id="agent-model-capability-summary">Catalog model metadata এখানে দেখানো হবে।</p>
+        <div class="input-row">
+          <input id="agent-provider-order" placeholder="Auto order: anthropic,openai,gemini,…" autocomplete="off" style="flex:2 1 320px">
+          <label class="chk"><input id="agent-failover" type="checkbox" checked>transient error-এ failover</label>
+          <label class="hint" for="agent-max-fallbacks">Max fallbacks</label>
+          <input id="agent-max-fallbacks" type="number" min="0" max="10" value="3" style="width:76px">
+        </div>
+        <p class="hint">Tool call থাকবে এমন task কেবল model-level-এ verified tool support থাকা route-এ যাবে। Stream শুরু হলে retry/failover বন্ধ—partial উত্তর duplicate হবে না। Auth/invalid request-এ অন্য provider-এ নির্বিচারে fallback হবে না।</p>
+        <p class="hint">WebLLM WebView-এর WebGPU ব্যবহার করে; browser module CDN থেকে load হতে পারে, model weights প্রথমবার নামতে পারে। iOS/Android WebView-এ WebGPU না থাকলে local provider ব্যবহারযোগ্য নাও হতে পারে।</p>
+      </article>
+
+      <article class="card agent-file-manager" id="agent-file-manager" aria-labelledby="agent-file-manager-title">
+        <div class="agent-file-manager-heading">
+          <span class="icon" aria-hidden="true">▤</span>
+          <div>
+            <h3 id="agent-file-manager-title">Workspace files — browse, edit, create & delete</h3>
+            <p>এখানে শুধু Native Agent-এর private workspace দেখা/বদলানো যায়—ফোনের অন্য app বা OS file নয়। UTF-8 text file (সর্বোচ্চ ১০ MB) editor-এ খুলবে। Save-এ conflict check ও native approval চলে; Delete-এ confirmation + native approval লাগে।</p>
+          </div>
+        </div>
+        <div class="agent-file-controls">
+          <div class="agent-file-control-row">
+            <label for="agent-files-dir">Workspace folder</label>
+            <input id="agent-files-dir" value="." autocomplete="off" spellcheck="false" aria-label="Workspace-relative folder">
+            <button type="button" data-agent-file-action="open-dir" class="secondary">Open folder</button>
+            <button type="button" data-agent-file-action="up" class="ghost" aria-label="Parent folder">↑ Up</button>
+            <button type="button" data-agent-file-action="refresh" class="ghost">Refresh</button>
+          </div>
+          <div class="agent-file-control-row">
+            <label for="agent-files-search">Find by name</label>
+            <input id="agent-files-search" placeholder="যেমন *.md বা config*" autocomplete="off" spellcheck="false">
+            <button type="button" data-agent-file-action="find" class="secondary">Search workspace</button>
+            <label class="agent-file-check"><input id="agent-files-include-skipped" type="checkbox"> বড়/system folder (.git, node_modules) দেখান</label>
+            <button type="button" data-agent-file-action="new-file">＋ New file</button>
+          </div>
+        </div>
+        <p class="hint" id="agent-files-status" data-tone="muted" aria-live="polite">Engine Initialize করার পর Refresh চাপুন। Folder ও recursive filename search—দুটিই private workspace-এর মধ্যেই সীমাবদ্ধ।</p>
+        <div class="agent-files-layout">
+          <section class="agent-file-pane" aria-label="Workspace file list">
+            <div class="agent-file-pane-heading"><h4>Files</h4><span id="agent-files-count" class="agent-file-count">—</span></div>
+            <div id="agent-files-list" class="agent-files-list" role="list" aria-label="Workspace files"></div>
+            <p class="hint">Directory খুলতে folder চাপুন; text file editor-এ খুলতে file চাপুন। Symbolic link edit/delete করা হয় না।</p>
+          </section>
+          <section class="agent-file-pane agent-file-editor" aria-label="Text file editor">
+            <div class="agent-file-pane-heading"><h4>Text editor</h4><span id="agent-file-state" class="agent-file-count">কোনো ফাইল খোলা নেই</span></div>
+            <p class="agent-file-current-path">Path: <code id="agent-file-relative-path">—</code></p>
+            <label for="agent-file-name">File name (current folder-এ)</label>
+            <input id="agent-file-name" autocomplete="off" spellcheck="false" disabled placeholder="একটি file নির্বাচন করুন বা New file চাপুন">
+            <textarea id="agent-file-content" rows="16" disabled spellcheck="false" placeholder="একটি UTF-8 text file নির্বাচন করুন অথবা নতুন file তৈরি করুন…"></textarea>
+            <div class="agent-file-editor-footer">
+              <span id="agent-file-size" class="hint">সর্বোচ্চ ১০ MB UTF-8 text</span>
+              <div class="agent-file-buttons">
+                <button type="button" data-agent-file-action="revert" class="ghost" disabled>Revert</button>
+                <button type="button" data-agent-file-action="save" disabled>Save</button>
+                <button type="button" data-agent-file-action="delete" class="danger" disabled>Delete</button>
+              </div>
+            </div>
+            <div id="agent-file-approval" class="agent-file-approval" hidden>
+              <span id="agent-file-approval-text">Native tool approval অপেক্ষা করছে।</span>
+              <div class="agent-file-buttons">
+                <button type="button" data-agent-action="agentapprove">Approve</button>
+                <button type="button" data-agent-action="agentdeny" class="ghost">Deny</button>
+              </div>
+            </div>
+            <div id="agent-file-delete-confirm" class="agent-file-delete-confirm" hidden>
+              <strong>স্থায়ীভাবে মুছে যাবে:</strong> <code id="agent-file-delete-path"></code>
+              <div class="agent-file-buttons">
+                <button type="button" data-agent-file-action="confirm-delete" class="danger">হ্যাঁ, স্থায়ীভাবে মুছুন</button>
+                <button type="button" data-agent-file-action="cancel-delete" class="ghost">বাতিল</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      </article>
 
       <div class="grid" style="margin-top:16px" aria-label="Agent API tests">
         <article class="card"><span class="icon">◇</span><h3>① Availability</h3><p>এই device-এর ABI-তে native lib load হয় কিনা। কখনো crash করে না — unsupported হলে <code>available:false</code>।</p><button data-agent-action="agentavail">Check availability</button></article>
@@ -147,7 +274,7 @@
 
         <article class="card"><span class="icon">▶</span><h3>④ Agent turn</h3><p>Streaming উত্তর নিচের বাক্সে আসবে; সব event log-এ।</p><div class="input-row"><button data-agent-action="agentsend">Send message</button><button data-agent-action="agentfollowup" class="secondary">Follow up</button></div><div class="input-row"><button data-agent-action="agentsteer" class="ghost">Steer</button><button data-agent-action="agentabort" class="ghost">Abort</button></div><pre id="agent-stream" class="agent-stream" aria-live="polite"></pre></article>
 
-        <article class="card warning"><span class="icon">⚖</span><h3>Approval gate</h3><p>Agent tool চালাতে চাইলে অনুমতি চায় (human-in-the-loop)। Pending request এলে নিচের বাটন সক্রিয় হবে।</p><div class="input-row"><button data-agent-action="agentapprove">Approve tool</button><button data-agent-action="agentdeny" class="secondary">Deny</button></div><div class="input-row"><button data-agent-action="agentmcpresult" class="ghost">MCP result</button><button data-agent-action="agentcronapprove" class="ghost">Cron approve</button></div></article>
+        <article class="card warning"><span class="icon">⚖</span><h3>Approval gate</h3><p>Agent এবং সরাসরি file-manager mutation—দুই পথেই native permission policy চলে। Write/edit/delete ডিফল্টে approval চায়; pending request-এর tool, session ও content-safe arguments এখানে দেখুন। File edit-এর approval editor card-এও দেখা যায়।</p><p id="agent-approval-status" class="hint" data-tone="muted" role="status">কোনো pending tool approval নেই।</p><pre id="agent-approval-details" class="agent-approval-details" aria-live="polite"></pre><div class="input-row"><button data-agent-action="agentapprove" disabled>Approve tool</button><button data-agent-action="agentdeny" class="secondary" disabled>Deny</button></div><div class="input-row"><button data-agent-action="agentmcpresult" class="ghost">MCP result</button><button data-agent-action="agentcronapprove" class="ghost">Cron approve</button></div></article>
 
         <article class="card"><span class="icon">☰</span><h3>Sessions</h3><p>Multi-turn history SQLite-এ থাকে। <code>resume</code> ফেরত দেয় <code>wasInterrupted</code>।</p><div class="input-row"><button data-agent-action="agentlistsessions">List</button><button data-agent-action="agentloadsession" class="secondary">Load current</button></div><div class="input-row"><button data-agent-action="agentresume" class="ghost">Resume</button><button data-agent-action="agentnewsession" class="ghost">New key</button></div><div class="input-row"><button data-agent-action="agentclearsession" class="ghost">Clear</button></div></article>
 
@@ -159,11 +286,11 @@
 
         <article class="card"><span class="icon">✦</span><h3>Skills</h3><p>পুনর্ব্যবহারযোগ্য prompt + tool-whitelist। Start করলে আলাদা session key ফেরত আসে।</p><div class="input-row"><button data-agent-action="agentaddskill">Add</button><button data-agent-action="agentlistskills" class="secondary">List</button></div><div class="input-row"><button data-agent-action="agentstartskill" class="ghost">Start</button><button data-agent-action="agentendskill" class="ghost">End</button></div><div class="input-row"><button data-agent-action="agentupdateskill" class="ghost">Update</button><button data-agent-action="agentremoveskill" class="ghost">Remove</button></div></article>
 
-        <article class="card"><span class="icon">⚿</span><h3>Tool permissions</h3><p>কোন tool <code>allow</code>/<code>ask</code>/<code>deny</code> — engine প্রতি turn-এ এটা মানে।</p><div class="input-row"><button data-agent-action="agentseedperms">Seed defaults</button><button data-agent-action="agentlistperms" class="secondary">List</button></div><div class="input-row"><button data-agent-action="agentsetperm" class="ghost">Set one</button><button data-agent-action="agentresetperms" class="ghost">Reset</button></div></article>
+        <article class="card"><span class="icon">⚿</span><h3>Tool permissions</h3><p>প্রতি tool-এর <code>enabled</code> ও <code>always_allow</code>/<code>always_ask</code> policy engine মানে; disabled tool schema থেকেও লুকানো থাকে।</p><div class="input-row"><button data-agent-action="agentseedperms">Seed defaults</button><button data-agent-action="agentlistperms" class="secondary">List</button></div><div class="input-row"><button data-agent-action="agentsetperm" class="ghost">Set one</button><button data-agent-action="agentresetperms" class="ghost">Reset</button></div></article>
 
         <article class="card"><span class="icon">⧉</span><h3>MCP</h3><p>Remote tool manifest register করুন; agent সেগুলো নিজের tool হিসেবে ব্যবহার করবে।</p><div class="input-row"><button data-agent-action="agentstartmcp">Start</button><button data-agent-action="agentsetmcptools" class="secondary">Set tools</button></div><div class="input-row"><button data-agent-action="agentrestartmcp" class="ghost">Restart</button></div><div class="input-row"><input id="agent-mcp-url" type="url" placeholder="https://example.com/mcp" /></div><div class="input-row"><button data-agent-action="agentconnectmcp">Connect real MCP server</button></div></article>
 
-        <article class="card"><span class="icon">◈</span><h3>Models & tools</h3><p>Provider-এর model তালিকা, আর JS থেকে সরাসরি একটা native tool চালানো।</p><div class="input-row"><button data-agent-action="agentmodels">Get models</button><button data-agent-action="agentinvoketool" class="secondary">Invoke tool</button></div></article>
+        <article class="card"><span class="icon">◈</span><h3>Models & tools</h3><p>JS থেকে সরাসরি একটি native tool চালানো; live model catalog ও selection উপরের routing panel-এ।</p><div class="input-row"><button data-agent-action="agentinvoketool" class="secondary">Invoke tool</button></div></article>
 
         <article class="card"><span class="icon">≣</span><h3>Event stream</h3><p>Initialize নিজেই wire করে; আলাদা করে চাইলে এখান থেকে।</p><button data-agent-action="agentlisten" class="secondary">Listen</button></article>
       </div>

@@ -28,7 +28,8 @@
 | [`research/NODE-RUNTIME.bn.md`](./research/NODE-RUNTIME.bn.md) | মোবাইলে full Node.js চালানোর প্রশ্ন → ভার্ডিক্ট: না (llama.cpp পথেই যাই) |
 | [`research/FULLSCREEN-IMMERSIVE.bn.md`](./research/FULLSCREEN-IMMERSIVE.bn.md) | Fullscreen + blend বারের গবেষণা → v1.3.6 JS bridge জয় |
 
-## এজেন্ট পরিকল্পনা
+## এজেন্ট পরিকল্পনা ও গভীর audit
 | ডক | |
 |---|---|
+| [`PROVIDER-API-AUDIT.bn.md`](./PROVIDER-API-AUDIT.bn.md) | Native Agent-এর provider protocol/model/auth/tool/streaming, default tool policy, context compaction, memory ও privacy audit |
 | [`ai-agent/HARNESS.bn.md`](./ai-agent/HARNESS.bn.md) | Agent harness-এর কংক্রিট আর্কিটেকচার (M1 = রোডম্যাপের P0.1) |

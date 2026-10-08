@@ -8,12 +8,15 @@ class NativeAgentWeb extends WebPlugin {
     }
     async initWorkspace() { throw this.unavailable(ERR); }
     async initialize() { throw this.unavailable(ERR); }
+    async getRuntimeConfig() { throw this.unavailable(ERR); }
+    async setRuntimeConfig() { throw this.unavailable(ERR); }
     async sendMessage() { throw this.unavailable(ERR); }
     async followUp() { throw this.unavailable(ERR); }
     async abort() { throw this.unavailable(ERR); }
     async steer() { throw this.unavailable(ERR); }
     async respondToApproval() { throw this.unavailable(ERR); }
     async respondToMcpTool() { throw this.unavailable(ERR); }
+    async respondToProviderRequest() { throw this.unavailable(ERR); }
     async getAuthToken() { throw this.unavailable(ERR); }
     async setAuthKey() { throw this.unavailable(ERR); }
     async deleteAuth() { throw this.unavailable(ERR); }

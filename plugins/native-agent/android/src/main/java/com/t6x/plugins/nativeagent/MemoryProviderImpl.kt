@@ -1,6 +1,7 @@
 package com.t6x.plugins.nativeagent
 
 import android.content.Context
+import android.system.Os
 import org.json.JSONArray
 import org.json.JSONObject
 import uniffi.native_agent_ffi.MemoryProvider
@@ -27,8 +28,10 @@ import kotlin.math.ln
  * This class replaces it with something that is always present:
  *
  *  * **Storage** — one JSON document, `native-agent-memory/memory.json` under the
- *    app's private files dir, written atomically (temp file + rename) and capped
- *    ([MAX_ENTRIES]) so it cannot grow forever. Nothing leaves the device.
+ *    app's private `noBackupFilesDir`, written atomically (exclusive temp file +
+ *    rename) and capped by entry count, per-entry bytes, metadata bytes and total
+ *    bytes. Existing stores under `filesDir` are migrated once; the active store
+ *    is excluded from Android Auto Backup.
  *  * **Search** — a lexical scorer (token overlap with inverse document frequency
  *    weighting, plus a whole-phrase and a key-match bonus), *not* embeddings.
  *    That is an honest trade: it needs no model download, no network, no extra
@@ -48,29 +51,54 @@ import kotlin.math.ln
  *   * `forget` → `{"success":true,"key":"…"}`
  *   * failure  → `{"error":"…"}`
  *
- * The engine reads `recall`/`search` as an array (or `{"results":[…]}`) and uses
- * the `key` field to delete single matches for `memory_forget`.
+ * Rust bounds `recall`/`search` results and returns a `results` array; query-based
+ * `memory_forget` only returns candidates. Deletion happens only for an exact key.
  */
 class MemoryProviderImpl(context: Context) : MemoryProvider {
 
     private val appContext = context.applicationContext
-    private val storeFile = File(File(appContext.filesDir, DIR_NAME), FILE_NAME)
-    private val lock = ReentrantLock()
+    // noBackupFilesDir is excluded from Android Auto Backup even when a host app
+    // has backups enabled. Keep the old filesDir path only for one-time migration.
+    private val storeFile = File(File(appContext.noBackupFilesDir, DIR_NAME), FILE_NAME)
+    private val legacyStoreFile = File(File(appContext.filesDir, DIR_NAME), FILE_NAME)
+    // Shared between foreground and WorkManager provider instances in this
+    // process. The adjacent OS file lock also serializes a second app process.
+    private val lock = processLock(storeFile.absolutePath)
+
+    init {
+        // Move the pre-upgrade file out of the backup-eligible filesDir as soon
+        // as the provider is constructed, not only after the first memory tool
+        // call. Keep initialization available if migration fails; guarded memory
+        // operations will return the storage error and retry safely.
+        if (legacyStoreFile.isFile) {
+            try {
+                withStoreLock { Unit }
+            } catch (error: OutOfMemoryError) {
+                throw error
+            } catch (error: Throwable) {
+                android.util.Log.w(TAG, "Legacy memory migration will be retried when memory is accessed", error)
+            }
+        }
+    }
 
     // ── MemoryProvider ──────────────────────────────────────────────────────
 
     override fun store(key: String, text: String, metadataJson: String?): String = guard {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return@guard error("Nothing to store: 'text' is empty.")
-        if (trimmed.length > MAX_TEXT_LENGTH) {
-            return@guard error("Memory entry too large (${trimmed.length} chars, limit $MAX_TEXT_LENGTH).")
+        val textBytes = trimmed.toByteArray(Charsets.UTF_8).size
+        if (textBytes > MAX_TEXT_LENGTH) {
+            return@guard error("Memory entry too large ($textBytes UTF-8 bytes, limit $MAX_TEXT_LENGTH).")
         }
 
         val resolvedKey = key.trim().ifEmpty { "mem-${System.currentTimeMillis()}-${randomSuffix()}" }
+        if (resolvedKey.toByteArray(Charsets.UTF_8).size > MAX_KEY_BYTES) {
+            return@guard error("Memory key exceeds the $MAX_KEY_BYTES byte limit.")
+        }
         val now = System.currentTimeMillis()
         val metadata = parseMetadata(metadataJson)
 
-        lock.withLock {
+        withStoreLock {
             val entries = readDocument().entries
             // JSONArray has no indexOfFirst/find: walk it by index. (`entries[i]`
             // does not exist either — get() returns Any, so use optJSONObject.)
@@ -94,7 +122,8 @@ class MemoryProviderImpl(context: Context) : MemoryProvider {
                 .put("updatedAt", now)
             if (metadata != null) record.put("metadata", metadata)
 
-            if (existing >= 0) entries.put(existing, record) else entries.put(record)
+            if (existing >= 0) entries.remove(existing)
+            entries.put(record) // update moves this memory to the newest position
             while (entries.length() > MAX_ENTRIES) entries.remove(0) // oldest first
             writeDocument(entries)
         }
@@ -106,7 +135,7 @@ class MemoryProviderImpl(context: Context) : MemoryProvider {
 
     override fun search(query: String, maxResults: UInt): String = guard {
         val limit = maxResults.toInt().coerceIn(1, MAX_RESULTS)
-        val entries = lock.withLock { readDocument().entries }
+        val entries = withStoreLock { readDocument().entries }
         val scored = score(entries, query).take(limit)
 
         val results = JSONArray()
@@ -125,7 +154,7 @@ class MemoryProviderImpl(context: Context) : MemoryProvider {
         val wanted = key.trim()
         if (wanted.isEmpty()) return@guard error("Provide a key to forget.")
 
-        val removed = lock.withLock {
+        val removed = withStoreLock {
             val entries = readDocument().entries
             val kept = JSONArray()
             var found = false
@@ -149,7 +178,7 @@ class MemoryProviderImpl(context: Context) : MemoryProvider {
         val cap = (limit?.toInt() ?: MAX_RESULTS).coerceIn(1, MAX_RESULTS)
 
         val keys = JSONArray()
-        val entries = lock.withLock {
+        val entries = withStoreLock {
             readDocument().entries.let { array ->
                 // newest first, like every other listing this plugin returns
                 (0 until array.length()).mapNotNull { array.optJSONObject(it) }.sortedByDescending { it.optLong("updatedAt") }
@@ -173,53 +202,54 @@ class MemoryProviderImpl(context: Context) : MemoryProvider {
         val entries: JSONArray = root.optJSONArray("entries") ?: JSONArray()
     }
 
+    private data class TokenStats(
+        val frequencies: Map<String, Int>,
+        val partialMatches: Set<String>,
+    )
+
     private fun score(entries: JSONArray, query: String): List<Hit> {
-        val queryTokens = tokenize(query)
+        val queryTokens = tokenize(query, MAX_QUERY_TOKENS).distinct()
         val phrase = query.trim().lowercase()
         if (queryTokens.isEmpty() && phrase.length < MIN_PHRASE_LENGTH) return emptyList()
 
-        // document frequency per token: log(1 + N/df) is what makes a shared rare
-        // word count for more than a shared common one
         val records = (0 until entries.length()).mapNotNull { entries.optJSONObject(it) }
-        val total = records.size
-        if (total == 0) return emptyList()
+        if (records.isEmpty()) return emptyList()
+        val querySet = queryTokens.toHashSet()
 
+        // Scan every token for exact matches so a relevant word near the end of
+        // a maximum-sized memory is not silently ignored. Retain only counts for
+        // this bounded query (at most 32 terms). Partial-prefix bonuses remain
+        // intentionally limited to the first 512 document tokens to keep worst-
+        // case scoring cheap on a phone.
+        val stats = records.map { record ->
+            scanTokenStats("${record.optString("text")} ${record.optString("key")}", querySet)
+        }
         val documentFrequency = HashMap<String, Int>()
-        val tokenCache = HashMap<String, List<String>>()
-        for (record in records) {
-            val key = record.optString("key")
-            val tokens = tokenize("${record.optString("text")} $key")
-            tokenCache[key] = tokens
-            for (token in tokens.toSet()) documentFrequency[token] = (documentFrequency[token] ?: 0) + 1
+        for (tokenStats in stats) {
+            for (token in tokenStats.frequencies.keys) {
+                documentFrequency[token] = (documentFrequency[token] ?: 0) + 1
+            }
         }
 
+        val total = records.size
         val hits = ArrayList<Hit>()
-        for (record in records) {
+        for ((index, record) in records.withIndex()) {
             val key = record.optString("key")
             val text = record.optString("text")
-            val tokens = tokenCache[key] ?: emptyList()
-            if (tokens.isEmpty()) continue
-
+            val tokenStats = stats[index]
             var score = 0.0
             for (token in queryTokens) {
-                val occurrences = tokens.count { it == token }
+                val occurrences = tokenStats.frequencies[token] ?: 0
                 if (occurrences == 0) continue
                 val df = documentFrequency[token] ?: 1
                 val inverseFrequency = ln(1.0 + total.toDouble() / df)
-                // term frequency saturates: 3 hits are not 3x as relevant as 1
                 val termFrequency = occurrences.toDouble() / (occurrences + 0.5)
                 score += inverseFrequency * (1.0 + termFrequency)
             }
 
-            // an exact phrase hit or a key hit is a strong signal even when the
-            // individual words are common
-            val haystack = text.lowercase()
-            if (phrase.length >= MIN_PHRASE_LENGTH && haystack.contains(phrase)) score += PHRASE_BONUS
+            if (phrase.length >= MIN_PHRASE_LENGTH && text.lowercase().contains(phrase)) score += PHRASE_BONUS
             for (token in queryTokens) if (key.lowercase().contains(token)) score += KEY_BONUS
-
-            for (token in queryTokens) {
-                if (token.length >= MIN_PARTIAL_LENGTH && tokens.any { it.contains(token) }) score += PARTIAL_BONUS
-            }
+            for (token in queryTokens) if (tokenStats.partialMatches.contains(token)) score += PARTIAL_BONUS
 
             if (score > 0.0) hits.add(Hit(record, round(score)))
         }
@@ -227,16 +257,50 @@ class MemoryProviderImpl(context: Context) : MemoryProvider {
         return hits.sortedWith(compareByDescending<Hit> { it.score }.thenByDescending { it.record.optLong("updatedAt") })
     }
 
+    private fun scanTokenStats(text: String, queryTokens: Set<String>): TokenStats {
+        val frequencies = HashMap<String, Int>()
+        val partialMatches = HashSet<String>()
+        val current = StringBuilder()
+        var documentTokenIndex = 0
+
+        fun flush() {
+            if (current.length >= MIN_TOKEN_LENGTH) {
+                val token = current.toString()
+                if (queryTokens.contains(token)) frequencies[token] = (frequencies[token] ?: 0) + 1
+                if (documentTokenIndex < MAX_PARTIAL_SCAN_TOKENS) {
+                    for (queryToken in queryTokens) {
+                        if (queryToken.length >= MIN_PARTIAL_LENGTH && token.contains(queryToken)) {
+                            partialMatches.add(queryToken)
+                        }
+                    }
+                }
+                documentTokenIndex++
+            }
+            current.setLength(0)
+        }
+
+        for (character in text.lowercase()) {
+            if (character.isLetterOrDigit()) current.append(character) else flush()
+        }
+        flush()
+        return TokenStats(frequencies, partialMatches)
+    }
+
     /** Lowercase word/number runs of at least two characters. */
-    private fun tokenize(text: String): List<String> {
-        val tokens = ArrayList<String>()
+    private fun tokenize(text: String, maxTokens: Int): List<String> {
+        val tokens = ArrayList<String>(minOf(maxTokens, 64))
         val current = StringBuilder()
         fun flush() {
-            if (current.length >= MIN_TOKEN_LENGTH) tokens.add(current.toString())
+            if (current.length >= MIN_TOKEN_LENGTH && tokens.size < maxTokens) tokens.add(current.toString())
             current.setLength(0)
         }
         for (character in text.lowercase()) {
-            if (character.isLetterOrDigit()) current.append(character) else flush()
+            if (character.isLetterOrDigit()) {
+                current.append(character)
+            } else {
+                flush()
+                if (tokens.size >= maxTokens) return tokens
+            }
         }
         flush()
         return tokens
@@ -246,36 +310,175 @@ class MemoryProviderImpl(context: Context) : MemoryProvider {
 
     // ── storage ─────────────────────────────────────────────────────────────
 
+    private fun <T> withStoreLock(block: () -> T): T = lock.withLock {
+        val directory = storeFile.parentFile
+            ?: throw java.io.IOException("memory store has no parent directory")
+        if (!directory.exists() && !directory.mkdirs() && !directory.isDirectory) {
+            throw java.io.IOException("could not create memory directory")
+        }
+        val lockFile = File(directory, "memory.lock")
+        java.io.RandomAccessFile(lockFile, "rw").use { randomAccessFile ->
+            val fileLock = randomAccessFile.channel.lock()
+            try {
+                migrateLegacyStore(directory)
+                block()
+            } finally {
+                fileLock.release()
+            }
+        }
+    }
+
+    /**
+     * Move the pre-upgrade filesDir store into noBackupFilesDir while holding
+     * the store lock. A rename on the app's internal volume is atomic, so an
+     * interrupted upgrade leaves either the old file or the new one intact.
+     * If both exist, validate the new copy first and preserve the old snapshot
+     * under noBackupFilesDir rather than overwriting either version.
+     */
+    private fun migrateLegacyStore(directory: File) {
+        if (!legacyStoreFile.isFile) return
+
+        if (storeFile.exists()) {
+            if (!storeFile.isFile) {
+                archiveLegacyStore(directory)
+                throw java.io.IOException("memory store path exists but is not a file; legacy data was preserved in noBackupFilesDir")
+            }
+            // This also quarantines a corrupt current-format file. In that case,
+            // move the intact legacy source into the primary location below.
+            try {
+                readDocument()
+            } catch (error: java.io.IOException) {
+                // Preserve both unknown-format files without replacing the
+                // current one; the provider will keep reporting the read error.
+                archiveLegacyStore(directory)
+                throw error
+            }
+            if (storeFile.exists()) {
+                archiveLegacyStore(directory)
+                return
+            }
+        }
+
+        // Rename is O(1) and keeps even an oversized/corrupt legacy document out
+        // of backup. readDocument() will quarantine unsupported data afterward.
+        renameFileOrThrow(legacyStoreFile, storeFile, "migrate the legacy memory store")
+    }
+
+    private fun archiveLegacyStore(directory: File) {
+        val archive = File(directory, "${FILE_NAME}.legacy-${System.currentTimeMillis()}-${randomSuffix()}")
+        renameFileOrThrow(legacyStoreFile, archive, "preserve the legacy memory snapshot")
+    }
+
+    private fun renameFileOrThrow(source: File, destination: File, action: String) {
+        try {
+            Os.rename(source.absolutePath, destination.absolutePath)
+        } catch (error: Exception) {
+            throw java.io.IOException("could not $action; the original file was left in place", error)
+        }
+    }
+
     private fun readDocument(): Document {
         if (!storeFile.isFile) return Document(JSONObject().put("version", FORMAT_VERSION))
-        return try {
-            val parsed = JSONObject(storeFile.readText())
-            parsed.put("version", FORMAT_VERSION)
-            Document(parsed)
-        } catch (t: Throwable) {
-            // A corrupt file must not break every future tool call: keep it for
-            // the user to inspect and start clean.
-            val corrupt = File(storeFile.parentFile, "${storeFile.name}.corrupt-${System.currentTimeMillis()}")
-            runCatching { storeFile.renameTo(corrupt) }
-            Document(JSONObject().put("version", FORMAT_VERSION))
+        if (storeFile.length() > MAX_STORE_BYTES.toLong()) {
+            quarantineStore("oversized")
+            return Document(JSONObject().put("version", FORMAT_VERSION))
+        }
+
+        val parsed = try {
+            JSONObject(storeFile.readText())
+        } catch (_: Exception) {
+            // A corrupt file must not break future tool calls, but it must be
+            // moved successfully before a later write is allowed to replace it.
+            quarantineStore("corrupt")
+            return Document(JSONObject().put("version", FORMAT_VERSION))
+        }
+        val version = parsed.optInt("version", FORMAT_VERSION)
+        if (version != FORMAT_VERSION) {
+            // Another app version may have written a format this build cannot
+            // safely migrate. Never downgrade or overwrite it with an empty document.
+            throw java.io.IOException("memory store format $version is not supported (expected $FORMAT_VERSION)")
+        }
+        val entries = parsed.optJSONArray("entries")
+        if (entries == null) {
+            quarantineStore("corrupt")
+            return Document(JSONObject().put("version", FORMAT_VERSION))
+        }
+        for (index in 0 until entries.length()) {
+            val record = entries.optJSONObject(index)
+            val key = record?.opt("key") as? String ?: ""
+            val text = record?.opt("text") as? String ?: ""
+            val metadataIsValid = record == null || !record.has("metadata") || record.isNull("metadata") || record.optJSONObject("metadata") != null
+            if (record == null || key.trim().isEmpty() || key.toByteArray(Charsets.UTF_8).size > MAX_KEY_BYTES ||
+                text.trim().isEmpty() || text.toByteArray(Charsets.UTF_8).size > MAX_TEXT_LENGTH || !metadataIsValid) {
+                quarantineStore("corrupt")
+                return Document(JSONObject().put("version", FORMAT_VERSION))
+            }
+        }
+        parsed.put("version", FORMAT_VERSION)
+        return Document(parsed)
+    }
+
+    private fun quarantineStore(reason: String) {
+        val parent = storeFile.parentFile ?: throw java.io.IOException("memory store has no parent directory")
+        val backup = File(parent, "${storeFile.name}.$reason-${System.currentTimeMillis()}-${randomSuffix()}")
+        if (!storeFile.renameTo(backup)) {
+            throw java.io.IOException("could not preserve $reason memory store; refusing to overwrite the original")
         }
     }
 
     private fun writeDocument(entries: JSONArray) {
-        storeFile.parentFile?.mkdirs()
-        val root = JSONObject().put("version", FORMAT_VERSION).put("entries", entries)
-        val temporary = File(storeFile.parentFile, "${storeFile.name}.tmp")
-        temporary.writeText(root.toString())
-        if (!temporary.renameTo(storeFile)) {
-            storeFile.writeText(root.toString())
-            temporary.delete()
+        val directory = storeFile.parentFile
+            ?: throw java.io.IOException("memory store has no parent directory")
+        if (!directory.exists() && !directory.mkdirs() && !directory.isDirectory) {
+            throw java.io.IOException("could not create memory directory")
+        }
+
+        // Keep the newest records while enforcing both count and total-size
+        // limits. The old code bounded only entry count, allowing a valid-looking
+        // 2,000 x 20,000-byte store to consume hundreds of MB.
+        val retainedNewestFirst = ArrayList<JSONObject>()
+        var bytesUsed = 128 // root/version/array framing headroom
+        for (index in entries.length() - 1 downTo 0) {
+            if (retainedNewestFirst.size >= MAX_ENTRIES) break
+            val record = entries.optJSONObject(index) ?: continue
+            val recordBytes = record.toString().toByteArray(Charsets.UTF_8).size
+            if (recordBytes + 128 > MAX_STORE_BYTES) {
+                throw java.io.IOException("one memory record exceeds the total store size limit")
+            }
+            if (bytesUsed + recordBytes + 2 > MAX_STORE_BYTES) break
+            bytesUsed += recordBytes + 2
+            retainedNewestFirst.add(record)
+        }
+        val boundedEntries = JSONArray()
+        retainedNewestFirst.asReversed().forEach { boundedEntries.put(it) }
+        val root = JSONObject().put("version", FORMAT_VERSION).put("entries", boundedEntries)
+        val bytes = root.toString().toByteArray(Charsets.UTF_8)
+        if (bytes.size > MAX_STORE_BYTES) {
+            throw java.io.IOException("memory store exceeds the total size limit")
+        }
+
+        // createTempFile uses exclusive creation and an unpredictable name.
+        // Rename within the same directory is atomic and replaces the old file;
+        // never fall back to a truncating write on failure.
+        val temporary = File.createTempFile("${storeFile.name}.", ".tmp", directory)
+        try {
+            java.io.FileOutputStream(temporary).use { output ->
+                output.write(bytes)
+                output.fd.sync()
+            }
+            Os.rename(temporary.absolutePath, storeFile.absolutePath)
+        } finally {
+            if (temporary.exists()) temporary.delete()
         }
     }
 
     private fun parseMetadata(metadataJson: String?): JSONObject? {
         val raw = metadataJson?.trim().orEmpty()
         if (raw.isEmpty()) return null
-        return runCatching { JSONObject(raw) }.getOrNull()
+        if (raw.toByteArray(Charsets.UTF_8).size > MAX_METADATA_BYTES) {
+            throw IllegalArgumentException("memory metadata exceeds the $MAX_METADATA_BYTES byte limit")
+        }
+        return JSONObject(raw)
     }
 
     private fun randomSuffix(): String = java.util.UUID.randomUUID().toString().take(8)
@@ -283,6 +486,8 @@ class MemoryProviderImpl(context: Context) : MemoryProvider {
     /** Never throw across the FFI boundary; report failure as data. */
     private inline fun guard(block: () -> String): String = try {
         block()
+    } catch (t: OutOfMemoryError) {
+        throw t
     } catch (t: Throwable) {
         error("memory store failed: ${t.message ?: t::class.java.simpleName}")
     }
@@ -290,12 +495,23 @@ class MemoryProviderImpl(context: Context) : MemoryProvider {
     private fun error(message: String): String = JSONObject().put("error", message).toString()
 
     private companion object {
+        val PROCESS_LOCKS = java.util.concurrent.ConcurrentHashMap<String, ReentrantLock>()
+
+        fun processLock(path: String): ReentrantLock =
+            PROCESS_LOCKS.getOrPut(path) { ReentrantLock() }
+
+        const val TAG = "NativeAgentMemory"
         const val DIR_NAME = "native-agent-memory"
         const val FILE_NAME = "memory.json"
         const val FORMAT_VERSION = 1
         const val MAX_ENTRIES = 2_000
         const val MAX_TEXT_LENGTH = 20_000
+        const val MAX_KEY_BYTES = 512
+        const val MAX_METADATA_BYTES = 16_384
+        const val MAX_STORE_BYTES = 64_000_000
         const val MAX_RESULTS = 200
+        const val MAX_QUERY_TOKENS = 32
+        const val MAX_PARTIAL_SCAN_TOKENS = 512
         const val MIN_TOKEN_LENGTH = 2
         const val MIN_PHRASE_LENGTH = 3
         const val MIN_PARTIAL_LENGTH = 4

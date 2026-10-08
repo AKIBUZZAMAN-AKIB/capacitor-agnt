@@ -28,6 +28,55 @@ export interface InitConfig {
     /** Path to auth-profiles.json */
     authProfilesPath: string;
 }
+export type AgentProvider = 'anthropic' | 'openai' | 'gemini' | 'openrouter' | 'ovhcloud' | 'aihorde' | 'llm7' | 'opencode_zen' | 'kilo' | 'pollinations' | 'webllm';
+export type AgentProviderChoice = AgentProvider | 'auto';
+export type AgentProviderProtocol = 'anthropic_messages' | 'openai_chat_completions' | 'openai_responses' | 'gemini_generate_content' | 'webllm_chat_completions';
+export interface AgentAutoRoutingConfig {
+    providerOrder: AgentProvider[];
+    failoverOnTransient: boolean;
+    maxFallbacks: number;
+}
+/**
+ * Persisted, app-owned runtime tuning. Ranges are validated by both native
+ * bridges and Rust. Resource/security boundaries (sandbox, approvals, SSRF,
+ * output caps, wake budget) are deliberately not exposed as tunables.
+ */
+export interface AgentRuntimeConfig {
+    temperature: number;
+    maxTokens: number;
+    defaultMaxTurns: number;
+    /** Approximate whole-request character budget; provider/model token limits are not guaranteed. */
+    contextCharBudget: number;
+    mcpToolTimeoutMs: number;
+    maxRetries: number;
+    baseRetryDelayMs: number;
+    maxRetryDelayMs: number;
+    defaultCronMaxTurns: number;
+    defaultHeartbeatMaxTurns: number;
+    defaultCronTimeoutMs: number;
+    defaultHeartbeatTimeoutMs: number;
+    defaultProvider: AgentProviderChoice;
+    defaultModels: Partial<Record<AgentProvider, string>>;
+    providerBaseUrls: Partial<Record<AgentProvider, string>>;
+    /** Model-specific protocol overrides, used for gateways such as OpenCode Zen. */
+    providerModelProtocols: Partial<Record<AgentProvider, Record<string, AgentProviderProtocol>>>;
+    /** Model-specific tool-call capability evidence; absent means unknown. */
+    providerToolCapabilities: Partial<Record<AgentProvider, Record<string, boolean>>>;
+    /** Live model access requirements; unknown models fall back to provider defaults. */
+    providerModelAuthRequirements: Partial<Record<AgentProvider, Record<string, boolean>>>;
+    /** Live per-model streaming support; absent means use the provider/API default. */
+    providerModelStreamingCapabilities: Partial<Record<AgentProvider, Record<string, boolean>>>;
+    autoRouting: AgentAutoRoutingConfig;
+}
+/** Partial updates merge into persisted settings; null clears provider-model or endpoint overrides. */
+export type AgentRuntimeConfigPatch = Partial<Omit<AgentRuntimeConfig, 'providerBaseUrls' | 'defaultModels' | 'providerModelProtocols' | 'providerToolCapabilities' | 'providerModelAuthRequirements' | 'providerModelStreamingCapabilities'>> & {
+    defaultModels?: Partial<Record<AgentProvider, string | null>> | null;
+    providerBaseUrls?: Partial<Record<AgentProvider, string | null>> | null;
+    providerModelProtocols?: Partial<Record<AgentProvider, Record<string, AgentProviderProtocol | null> | null>> | null;
+    providerToolCapabilities?: Partial<Record<AgentProvider, Record<string, boolean | null> | null>> | null;
+    providerModelAuthRequirements?: Partial<Record<AgentProvider, Record<string, boolean | null> | null>> | null;
+    providerModelStreamingCapabilities?: Partial<Record<AgentProvider, Record<string, boolean | null> | null>> | null;
+};
 /**
  * Tool approval policy understood by the engine.
  *
@@ -43,7 +92,10 @@ export interface SendMessageParams {
     provider?: string;
     systemPrompt: string;
     maxTurns?: number;
-    /** JSON-encoded list of allowed tool names. Empty = all tools. */
+    /**
+     * JSON-encoded list of allowed tool names. Omitted/null = unrestricted;
+     * `[]` = no tools. The two cases are intentionally different.
+     */
     allowedToolsJson?: string;
     /**
      * JSON-encoded prior conversation messages for multi-turn skill sessions.
@@ -51,7 +103,8 @@ export interface SendMessageParams {
      * NOTE: there is deliberately no `extraToolsJson` here. It used to be
      * declared but the native `SendMessageParams` (Rust and Kotlin alike) has no
      * such field, so anything passed was silently dropped. Register extra tools
-     * with `setMcpTools` / `startMcp` instead.
+     * with `startMcp` / `restartMcp` instead (the `setMcpTools` compatibility
+     * alias exists only on the higher-level `NativeKit.agent` bridge).
      */
     priorMessagesJson?: string;
 }
@@ -68,6 +121,7 @@ export interface SessionInfo {
     sessionKey: string;
     agentId: string;
     updatedAt: number;
+    provider?: AgentProvider | string;
     model?: string;
     totalTokens?: number;
 }
@@ -76,10 +130,29 @@ export interface SessionHistoryResult {
     /** JSON-encoded messages array */
     messagesJson: string;
 }
+/** Supported active-hours timezone: device-local (omitted) or a fixed UTC offset, e.g. +06:00. */
+export interface ActiveHours {
+    start: string;
+    end: string;
+    tz?: string;
+}
+export type CronSchedule = {
+    kind: 'at';
+    atMs: number;
+    everyMs?: never;
+    anchorMs?: never;
+} | {
+    kind: 'every';
+    everyMs: number;
+    anchorMs?: number | null;
+    atMs?: never;
+};
 export interface SchedulerConfig {
     enabled: boolean;
     schedulingMode: string;
     runOnCharging: boolean;
+    globalActiveHours?: ActiveHours | null;
+    /** Legacy JSON-string input alias; prefer the object form. */
     globalActiveHoursJson?: string;
 }
 export interface HeartbeatConfig {
@@ -87,36 +160,50 @@ export interface HeartbeatConfig {
     everyMs: number;
     prompt?: string;
     skillId?: string;
+    activeHours?: ActiveHours | null;
+    /** Legacy JSON-string input alias; prefer the object form. */
     activeHoursJson?: string;
     nextRunAt?: number;
     lastHash?: string;
     lastSentAt?: number;
 }
-export interface CronJobInput {
+export interface CronJobInputBase {
     name: string;
     enabled?: boolean;
-    sessionTarget?: string;
+    sessionTarget?: 'isolated' | 'shared' | 'main';
     wakeMode?: string;
-    scheduleJson: string;
-    skillId: string;
+    skillId?: string;
     prompt: string;
-    deliveryMode?: string;
+    deliveryMode?: 'notification' | 'webhook' | 'silent' | 'none';
     deliveryWebhookUrl?: string;
     deliveryNotificationTitle?: string;
-    activeHoursJson?: string;
 }
+/** Canonical object form plus a deprecated JSON-string compatibility form. */
+export type CronJobInput = CronJobInputBase & ({
+    schedule: CronSchedule;
+    activeHours?: ActiveHours | null;
+    scheduleJson?: string;
+    activeHoursJson?: string;
+} | {
+    scheduleJson: string;
+    activeHoursJson?: string;
+});
 export interface CronJobRecord {
     id: string;
     name: string;
     enabled: boolean;
     sessionTarget: string;
     wakeMode: string;
+    schedule: CronSchedule;
+    /** Encoded compatibility alias returned by the engine. */
     scheduleJson: string;
-    skillId: string;
+    /** Present when the job invokes a stored skill instead of a prompt. */
+    skillId?: string | null;
     prompt: string;
     deliveryMode: string;
     deliveryWebhookUrl?: string;
     deliveryNotificationTitle?: string;
+    activeHours?: ActiveHours | null;
     activeHoursJson?: string;
     lastRunAt?: number;
     nextRunAt?: number;
@@ -140,7 +227,8 @@ export interface CronRunRecord {
 }
 export interface CronSkillInput {
     name: string;
-    allowedToolsJson?: string;
+    /** Explicit tool allow-list; [] intentionally means no tools. */
+    allowedTools?: string[];
     systemPrompt?: string;
     model?: string;
     maxTurns?: number;
@@ -250,7 +338,8 @@ export interface BackgroundWakeStatus extends BackgroundWakeResult {
 export interface CronSkillRecord {
     id: string;
     name: string;
-    allowedToolsJson?: string;
+    /** Raw JSON string returned by the pinned engine's DB record. */
+    allowedTools?: string | null;
     systemPrompt?: string;
     model?: string;
     maxTurns?: number;
@@ -275,7 +364,7 @@ export interface TokenUsage {
  * are never emitted; the cron/wake/heartbeat events below were emitted but
  * missing from the union.
  */
-export type NativeAgentEventType = 'text_delta' | 'thinking' | 'tool_use' | 'tool_result' | 'mcp_tool_call' | 'user_message' | 'approval_request' | 'retry' | 'web_search_start' | 'web_search_complete' | 'max_turns_reached' | 'agent.background_timeout' | 'agent.completed' | 'agent.error' | 'wake.no_jobs' | 'wake.jobs_found' | 'wake.skipped'
+export type NativeAgentEventType = 'provider.route' | 'provider.selected' | 'provider.fallback' | 'provider.request' | 'provider.bridge.delta' | 'text_delta' | 'thinking' | 'tool_use' | 'tool_result' | 'mcp_tool_call' | 'user_message' | 'approval_request' | 'retry' | 'web_search_start' | 'web_search_complete' | 'max_turns_reached' | 'context.compacted' | 'context.trimmed' | 'transcript.repaired' | 'agent.background_timeout' | 'agent.completed' | 'agent.error' | 'wake.no_jobs' | 'wake.jobs_found' | 'wake.skipped'
 /**
  * The wake ran out of its total time budget and stopped between jobs.
  * `deferred` jobs were left untouched and stay due, so the next wake picks
@@ -290,6 +379,15 @@ export interface NativeAgentPlugin {
     checkAvailability(): Promise<AgentAvailabilityResult>;
     initWorkspace(config: InitConfig): Promise<void>;
     initialize(config: InitConfig): Promise<void>;
+    /** Runtime config is persisted beside the native init config, outside the workspace. */
+    getRuntimeConfig(): Promise<{
+        configJson: string;
+    }>;
+    setRuntimeConfig(options: {
+        configJson: string;
+    }): Promise<{
+        configJson: string;
+    }>;
     sendMessage(params: SendMessageParams): Promise<{
         runId: string;
     }>;
@@ -331,6 +429,13 @@ export interface NativeAgentPlugin {
     respondToMcpTool(options: {
         toolCallId: string;
         resultJson: string;
+        isError?: boolean;
+    }): Promise<void>;
+    /** Reply to one WebLLM browser-runtime event. `responseJson` is an OpenAI-shaped final response or a typed stream delta. */
+    respondToProviderRequest(options: {
+        requestId: string;
+        responseJson: string;
+        isFinal?: boolean;
         isError?: boolean;
     }): Promise<void>;
     getAuthToken(options: {

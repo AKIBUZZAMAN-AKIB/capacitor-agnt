@@ -28,7 +28,7 @@ pub struct SendMessageParams {
     pub provider: Option<String>,
     pub system_prompt: String,
     pub max_turns: Option<u32>,
-    /// JSON-encoded list of allowed tool names. Empty = all tools.
+    /// JSON-encoded list of allowed tool names. `None` means unrestricted; `[]` means no tools.
     pub allowed_tools_json: Option<String>,
     /// JSON-encoded prior conversation messages for multi-turn sessions.
     pub prior_messages_json: Option<String>,
@@ -73,6 +73,9 @@ pub struct PendingEvent {
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     System,
+    /// Internal session context (such as a rolling summary). Provider adapters
+    /// send it as user content, never as elevated system instructions.
+    Context,
     User,
     Assistant,
 }
@@ -88,6 +91,10 @@ pub enum ContentBlock {
         id: String,
         name: String,
         input: serde_json::Value,
+        /// Protocol metadata required to replay provider-native calls (for
+        /// example Gemini 3 `thoughtSignature`/function-call IDs).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<serde_json::Value>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
@@ -310,12 +317,16 @@ impl DisplayMessage {
     ) -> Vec<Self> {
         let mut result = Vec::with_capacity(msgs.len());
         let now = base_timestamp;
+        // Usage describes the latest completed agent turn, not every assistant
+        // message in the full session transcript. Attach it once, to the newest
+        // assistant message, so restored history does not duplicate totals.
+        let last_assistant_index = msgs.iter().rposition(|msg| msg.role == Role::Assistant);
 
         for (i, msg) in msgs.iter().enumerate() {
             let role = match msg.role {
                 Role::User => "user",
                 Role::Assistant => "assistant",
-                Role::System => continue, // system messages are not displayed
+                Role::System | Role::Context => continue, // internal messages are not displayed
             };
 
             match &msg.content {
@@ -326,7 +337,7 @@ impl DisplayMessage {
                         tool_calls: Vec::new(),
                         tool_results: Vec::new(),
                         model: if msg.role == Role::Assistant { model.map(|s| s.to_string()) } else { None },
-                        usage: if msg.role == Role::Assistant { usage.cloned() } else { None },
+                        usage: if Some(i) == last_assistant_index { usage.cloned() } else { None },
                         timestamp: now,
                         sequence: i as u32,
                     });
@@ -344,7 +355,7 @@ impl DisplayMessage {
                     let tool_calls: Vec<DisplayToolCall> = blocks
                         .iter()
                         .filter_map(|b| match b {
-                            ContentBlock::ToolUse { id, name, input } => Some(DisplayToolCall {
+                            ContentBlock::ToolUse { id, name, input, .. } => Some(DisplayToolCall {
                                 id: id.clone(),
                                 name: name.clone(),
                                 input: input.clone(),
@@ -375,7 +386,7 @@ impl DisplayMessage {
                         tool_calls,
                         tool_results,
                         model: if msg.role == Role::Assistant { model.map(|s| s.to_string()) } else { None },
-                        usage: if msg.role == Role::Assistant { usage.cloned() } else { None },
+                        usage: if Some(i) == last_assistant_index { usage.cloned() } else { None },
                         timestamp: now,
                         sequence: i as u32,
                     });
@@ -404,6 +415,7 @@ mod round_trip_tests {
                 id: "toolu_1".into(),
                 name: "read_file".into(),
                 input: serde_json::json!({"path": "a.txt", "n": 3}),
+                provider_metadata: None,
             },
             ContentBlock::ToolResult {
                 tool_use_id: "toolu_1".into(),
@@ -453,6 +465,7 @@ mod round_trip_tests {
             id: "toolu_9".into(),
             name: "bash".into(),
             input: serde_json::json!({}),
+            provider_metadata: None,
         }]);
         let json = serde_json::to_string(&blocks).unwrap();
         match serde_json::from_str::<MessageContent>(&json).unwrap() {
@@ -478,6 +491,7 @@ mod round_trip_tests {
                     id: "toolu_a".into(),
                     name: "read_file".into(),
                     input: serde_json::json!({"path": "x"}),
+                    provider_metadata: None,
                 },
             ]),
         };
@@ -502,13 +516,48 @@ mod round_trip_tests {
     }
 
     #[test]
+    fn usage_is_attached_only_to_the_latest_assistant_message() {
+        let messages = vec![
+            Message::assistant_text("earlier answer"),
+            Message::user("follow-up"),
+            Message::assistant_text("latest answer"),
+        ];
+        let usage = TokenUsage { input_tokens: 10, output_tokens: 4, total_tokens: 14 };
+        let display = DisplayMessage::from_messages(&messages, Some("test-model"), Some(&usage), 1);
+        assert_eq!(display.len(), 3);
+        assert!(display[0].usage.is_none());
+        assert!(display[1].usage.is_none());
+        assert_eq!(display[2].usage.as_ref().map(|value| value.total_tokens), Some(14));
+    }
+
+    #[test]
+    fn internal_context_messages_persist_but_are_hidden_from_chat_display() {
+        let context = Message {
+            role: Role::Context,
+            content: MessageContent::Text("continuity note".into()),
+        };
+        let json = serde_json::to_string(&context).unwrap();
+        let restored: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.role, Role::Context);
+        let display = DisplayMessage::from_messages(
+            &[restored, Message::user("current request")],
+            None,
+            None,
+            1,
+        );
+        assert_eq!(display.len(), 1);
+        assert_eq!(display[0].text, "current request");
+    }
+
+    #[test]
     fn roles_serialise_lowercase_as_the_db_expects() {
-        // load_session_messages_raw matches on "user"/"assistant"/"system";
+        // load_session_messages_raw matches on "user"/"assistant"/"system"/"context";
         // any other spelling silently DROPS the message.
         for (role, want) in [
             (Role::User, "\"user\""),
             (Role::Assistant, "\"assistant\""),
             (Role::System, "\"system\""),
+            (Role::Context, "\"context\""),
         ] {
             assert_eq!(serde_json::to_string(&role).unwrap(), want);
         }

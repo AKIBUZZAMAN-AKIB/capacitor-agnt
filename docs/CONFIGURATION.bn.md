@@ -186,6 +186,49 @@ Policy semantics-এ durable state `ask`, `allow`, `block`। App disable ও ca
 agent turn + LLM কল = নেটওয়ার্ক ও ব্যাটারি খরচ। প্ল্যাটফর্ম-বাস্তবতাসহ বিস্তারিত:
 [`BACKGROUND-WAKES.bn.md`](./BACKGROUND-WAKES.bn.md)।
 
+### Persisted runtime settings
+
+Agent `initialize()` করার পর runtime tuning-এর জন্য `NativeKit.agent.getRuntimeConfig()` এবং
+`NativeKit.agent.setRuntimeConfig(patch)` ব্যবহার করুন। সেটিংস `.native-agent-config.json`-এর
+পাশের `.native-agent-runtime.json` sidecar-এ atomicভাবে থাকে, workspace sandbox-এর বাইরে; তাই
+পরের foreground/background run একই মান পড়ে। Partial patch merge হয়।
+
+- `defaultProvider`-এর ডিফল্ট `anthropic`; `auto` অথবা `anthropic`, `openai`, `gemini`,
+  `openrouter`, `ovhcloud`, `aihorde`, `llm7`, `opencode_zen`, `kilo`, `pollinations`, `webllm`
+  বেছে নেওয়া যায়। Message/skill-এ দেওয়া provider বা per-turn model override এই default-এর
+  অগ্রাধিকার পায়।
+- `defaultModels` provider-ভিত্তিক model ID রাখে; না দিলে ওই provider-এর built-in default
+  থাকলে সেটি, অন্যথায় নিজে model ID configure করতে হবে। `providerBaseUrls` হলো API root
+  override (যেমন OpenAI-compatible API-তে `/v1` root), কেবল host-সহ HTTP(S),
+  credential/query/fragment-বিহীন URL গ্রহণ করা হয়। `defaultModels`, `providerBaseUrls`,
+  `providerModelProtocols`, `providerToolCapabilities` map patch-এ কোনো provider/model-এর মান
+  `null` দিলে শুধু সেই entry মুছে যায়; পুরো map `null` দিলে map খালি হয়।
+- `providerModelProtocols` শুধু documented/যাচাইকৃত adapter-এ model-specific override; মান
+  `anthropic_messages`, `openai_chat_completions`, `openai_responses`, `gemini_generate_content`
+  বা `webllm_chat_completions`। OpenCode Zen-এর protocol model-ভেদে বদলায়; অজানা Zen model-কে
+  ইচ্ছামতো Chat Completions ধরে route করা হয় না।
+- `providerToolCapabilities` model-ভিত্তিক যাচাইকৃত `true`/`false`; অজানা মান auto-route-এ
+  tool-সহ task-এর জন্য অযোগ্য। Gateway-এর সামগ্রিক support থেকে প্রতিটি model tool-capable
+  ধরে নেওয়া হয় না। `autoRouting.providerOrder`, `failoverOnTransient`, `maxFallbacks` দিয়ে
+  fallback সাজানো যায়। Timeout/connect/429/নির্বাচিত 5xx-এর মতো transient failure retry/fallback
+  পায়; auth/invalid-request error-এ নয়, এবং stream-এ visible text/tool event যাওয়ার পর duplicate
+  output এড়াতে retry/fallback বন্ধ থাকে।
+- AI Horde-এর OpenAI shim-এ tool calling ও SSE streaming নেই—agent সেটিকে buffered response
+  হিসেবে ব্যবহার করে এবং tool-required route থেকে বাদ দেয়। WebLLM browser/WebGPU runtime;
+  foreground WebView ছাড়া, বিশেষ করে background job-এ, এটি route হয় না।
+- API key `setAuthKey(key, provider)` দিয়ে আলাদা auth store-এ দিন; `.native-agent-runtime.json`
+  config patch-এ কখনো secret রাখবেন না।
+
+```ts
+await NativeKit.agent.setRuntimeConfig({
+  defaultProvider: 'openai',
+  defaultModels: { openai: 'your-model-id' },
+})
+```
+
+Tool approval, sandbox/SSRF সুরক্ষা, output/resource caps, background wake budget এবং OS scheduling
+এই runtime setting-এ পরিবর্তনযোগ্য নয়; সেগুলোকে custom tunable ধরে নেবেন না।
+
 ## `security`
 
 | Field | অর্থ |
@@ -194,7 +237,7 @@ agent turn + LLM কল = নেটওয়ার্ক ও ব্যাটা�
 | `allowNavigation` | WebView-এ extra top-level navigation; default খালি |
 | `contentSecurityPolicy` | staged `index.html`-এ inject করা CSP |
 
-`allowNavigation` request allowlist নয় এবং remote code-কে safe করে না। External script অনুমতি দিলে সেই script NativeKit access পেতে পারে—default CSP-তে remote scripts নিষিদ্ধ রাখুন। `unsafe-inline` বর্তমান replaceable static app compatibility-এর জন্য আছে; production app সম্ভব হলে nonce/hash/external local script দিয়ে কঠোর করুন।
+`allowNavigation` request allowlist নয় এবং remote code-কে safe করে না। External script অনুমতি দিলে সেই script NativeKit access পেতে পারে—default CSP-তে remote scripts নিষিদ্ধ রাখুন। `unsafe-inline` বর্তমান replaceable static app compatibility-এর জন্য আছে; production app সম্ভব হলে nonce/hash/external local script দিয়ে কঠোর করুন। WebLLM opt-in চালাতে dynamic module `cdn.jsdelivr.net` থেকে load হয়, তাই `script-src`-এ শুধু ওই নির্দিষ্ট host এবং WebAssembly compilation-এর জন্য `wasm-unsafe-eval`, আর model worker-এর জন্য `worker-src 'self' blob:` রাখা হয়েছে। WebLLM ব্যবহার না করলে CDN script অনুমতি সরিয়ে দিন; `https:` বা `unsafe-eval` দিয়ে সব remote script খুলবেন না।
 
 ## Validation
 
