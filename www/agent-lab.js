@@ -186,6 +186,12 @@ function setStatus(text, tone = 'muted') {
 }
 
 function requireInit() {
+  // The owner-facing workspace and this developer Lab share ONE native handle.
+  // Do not make a second initialize() call merely because the Lab was opened
+  // after the workspace; replacing the handle could interrupt a live turn.
+  if (!state.initialized && globalThis.__nativeKitAgentInitialized) {
+    state.initialized = true;
+  }
   if (!state.initialized) {
     throw new Error('আগে "Initialize" চাপুন — engine চালু না হলে কোনো API কাজ করবে না।');
   }
@@ -1210,6 +1216,13 @@ const agentActions = {
   }),
 
   agentinit: async () => {
+    if (state.initialized || globalThis.__nativeKitAgentInitialized) {
+      state.initialized = true;
+      await loadRuntimeConfigIntoUi();
+      await wireEvents();
+      updateFileManagerControls();
+      return { initialized: true, reused: true };
+    }
     const probe = await window.NativeKit.agent.checkAvailability();
     if (!probe.available) {
       setStatus(`এই device-এ agent চলবে না (${probe.abi})`, 'err');
@@ -1221,6 +1234,7 @@ const agentActions = {
       authProfilesPath: 'files://agent/auth-profiles.json',
     });
     state.initialized = true;
+    globalThis.__nativeKitAgentInitialized = true;
     await loadRuntimeConfigIntoUi();
     setStatus('Engine চালু — provider/auth settings যাচাই করুন।', 'ok');
     updateFileManagerControls();

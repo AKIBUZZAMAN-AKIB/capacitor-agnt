@@ -266,9 +266,12 @@ document.querySelectorAll('[data-action]').forEach((button) => {
   button.addEventListener('click', () => execute(button.dataset.action, actions[button.dataset.action], button));
 });
 
-// ── Agent lab (on-device Rust AI agent) ──────────────────────────────────────
-// Loaded as a module so its ~47 API tests stay out of this file. It reuses the
-// same execute()/log() contract, so results land in the shared Host Event Log.
+// ── Owner-facing AI workspace + advanced diagnostic lab ─────────────────────
+// The workspace is the real-user chat/customization surface. The original Lab
+// remains available in a collapsed developer section for every native API test.
+import('./agent-workspace.js')
+  .then((mod) => mod.wireAgentWorkspace())
+  .catch((error) => log('agent-workspace load failed', error.message));
 import('./agent-lab.js')
   .then((mod) => mod.wireAgentButtons(execute))
   .catch((error) => log('agent-lab load failed', error.message));

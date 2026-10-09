@@ -33,3 +33,4 @@
 |---|---|
 | [`PROVIDER-API-AUDIT.bn.md`](./PROVIDER-API-AUDIT.bn.md) | Native Agent-এর provider protocol/model/auth/tool/streaming, default tool policy, context compaction, memory ও privacy audit |
 | [`ai-agent/HARNESS.bn.md`](./ai-agent/HARNESS.bn.md) | Agent harness-এর কংক্রিট আর্কিটেকচার (M1 = রোডম্যাপের P0.1) |
+| [`AI-WORKSPACE-UPGRADE.bn.md`](./AI-WORKSPACE-UPGRADE.bn.md) | বাস্তব-user AI Workspace: chat, approval, cron, skills, memory, persona files, secure MCP + 2026-07-28 protocol audit |

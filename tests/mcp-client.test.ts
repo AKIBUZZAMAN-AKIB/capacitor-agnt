@@ -454,3 +454,63 @@ describe('connectMcpServers', () => {
     await conn.dispose();
   });
 });
+
+describe('MCP 2026-07-28 stateless mode', () => {
+  it('does not send a legacy handshake and attaches protocol metadata to list calls', async () => {
+    const sent: any[] = [];
+    const client = new McpClient(
+      'modern',
+      fakeServer({ 'tools/list': () => ({ tools: [{ name: 'search' }] }) }, { recordInto: sent }),
+      { protocolVersion: '2026-07-28' },
+    );
+    await client.connect();
+    expect(sent).toEqual([]);
+    expect((await client.listTools()).map((tool) => tool.name)).toEqual(['search']);
+    expect(sent[0].method).toBe('tools/list');
+    expect(sent[0].params._meta['io.modelcontextprotocol/protocolVersion']).toBe('2026-07-28');
+    expect(client.protocolVersion).toBe('2026-07-28');
+  });
+
+  it('falls back once to the legacy handshake when an auto server rejects current calls', async () => {
+    const sent: any[] = [];
+    const transport: McpTransport = {
+      async send(message: any) {
+        sent.push(message);
+        if (message.id === undefined) return null;
+        if (message.method === 'tools/list' && message.params?._meta) {
+          return { jsonrpc: '2.0', id: message.id, error: { code: -32600, message: 'initialize required' } };
+        }
+        if (message.method === 'initialize') return { jsonrpc: '2.0', id: message.id, result: { serverInfo: { name: 'legacy' } } };
+        if (message.method === 'tools/list') return { jsonrpc: '2.0', id: message.id, result: { tools: [{ name: 'old_search' }] } };
+        return { jsonrpc: '2.0', id: message.id, result: {} };
+      },
+    };
+    const client = new McpClient('auto', transport, { protocolVersion: 'auto' });
+    expect((await client.listTools()).map((tool) => tool.name)).toEqual(['old_search']);
+    expect(sent.map((message) => message.method)).toEqual(['tools/list', 'initialize', 'notifications/initialized', 'tools/list']);
+    expect(client.protocolVersion).toBe('2025-06-18');
+  });
+
+  it('sends current routing headers without leaking a legacy session id', async () => {
+    const fetchImpl = vi.fn(async () => okModern({ jsonrpc: '2.0', id: 3, result: { content: [] } }) as any);
+    const transport = new HttpMcpTransport('https://example.test/mcp', { fetchImpl: fetchImpl as any });
+    await transport.send({
+      jsonrpc: '2.0', id: 3, method: 'tools/call',
+      params: { name: 'issue_create', arguments: {}, _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28' } },
+    });
+    const [, init] = fetchImpl.mock.calls[0] as any[];
+    expect(init.headers['mcp-protocol-version']).toBe('2026-07-28');
+    expect(init.headers['mcp-method']).toBe('tools/call');
+    expect(init.headers['mcp-name']).toBe('issue_create');
+    expect(init.headers['mcp-session-id']).toBeUndefined();
+  });
+
+  function okModern(body: unknown) {
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: (key: string) => key.toLowerCase() === 'content-type' ? 'application/json' : null },
+      text: async () => JSON.stringify(body),
+    };
+  }
+});

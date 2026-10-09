@@ -147,6 +147,7 @@ Trusted, installed ও remote URL—তিন tier-এর সম্পূর্�
 - [সব configuration field](./docs/CONFIGURATION.bn.md)
 - [Home-screen + floating widget guide (আর্কিটেকচার, API, config, সীমাবদ্ধতা)](./docs/WIDGETS.bn.md)
 - [একক পূর্ণ Bengali NativeKit API reference—trusted host, installed package, App Browser manager ও remote URL](./docs/API-REFERENCE.bn.md)
+- [বাস্তব-user AI Workspace—chat, approval, cron, skills, memory, persona files, MCP ও নিরাপত্তা](./docs/AI-WORKSPACE-UPGRADE.bn.md)
 - [Official/Capawesome/Capgo In-App Browser source audit ও architecture decision](./docs/IN-APP-BROWSER-COMPARISON.bn.md)
 - [Local build, signing ও GitHub Actions secrets](./docs/BUILD-SIGNING-CI.bn.md)
 - [Security, CORS, Service Worker ও store policy](./docs/SECURITY-POLICY.bn.md)

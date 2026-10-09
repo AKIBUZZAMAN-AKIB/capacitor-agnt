@@ -10,6 +10,7 @@
   <title>NativeKit Demo</title>
   <link rel="stylesheet" href="./styles.css">
   <link rel="stylesheet" href="./app-browser.css">
+  <link rel="stylesheet" href="./agent-workspace.css">
   <!-- scripts/prepare-web.mjs injects nativekit.js before this application script. -->
   <script defer src="./app.js"></script>
   <script defer src="./app-browser-manager.js"></script>
@@ -115,7 +116,100 @@
       </div>
     </section>
 
-    <section class="panel agent-panel" id="agent-lab">
+    <section class="agent-workspace" id="agent-workspace" aria-labelledby="aw-title">
+      <div class="aw-topbar">
+        <div class="aw-mark" aria-hidden="true">✦</div>
+        <div class="aw-heading"><p>PRIVATE ON-DEVICE AGENT</p><h2 id="aw-title">আমার AI Workspace</h2></div>
+        <div class="aw-status" id="aw-status" data-tone="muted" role="status"><i class="aw-status-dot"></i><span>শুরু করতে “Agent চালু করুন” চাপুন</span></div>
+      </div>
+      <div class="aw-shell">
+        <aside class="aw-sidebar" aria-label="Agent navigation">
+          <button class="aw-primary" id="aw-start" type="button">⚡ Agent চালু করুন <span>Private workspace, memory ও scheduler প্রস্তুত হবে</span></button>
+          <span class="aw-side-label">WORKSPACE</span>
+          <nav class="aw-nav" role="tablist" aria-label="Agent workspace sections">
+            <button type="button" data-aw-tab="chat" aria-selected="true" role="tab"><span class="aw-nav-icon">◉</span><span>চ্যাট</span></button>
+            <button type="button" data-aw-tab="automations" aria-selected="false" role="tab"><span class="aw-nav-icon">◷</span><span>অটোমেশন</span></button>
+            <button type="button" data-aw-tab="skills" aria-selected="false" role="tab"><span class="aw-nav-icon">✦</span><span>Skills</span></button>
+            <button type="button" data-aw-tab="memory" aria-selected="false" role="tab"><span class="aw-nav-icon">◆</span><span>মেমোরি</span></button>
+            <button type="button" data-aw-tab="persona" aria-selected="false" role="tab"><span class="aw-nav-icon">▤</span><span>ব্যক্তিত্ব ও ফাইল</span></button>
+            <button type="button" data-aw-tab="mcp" aria-selected="false" role="tab"><span class="aw-nav-icon">⌘</span><span>MCP সংযোগ</span></button>
+            <button type="button" data-aw-tab="settings" aria-selected="false" role="tab"><span class="aw-nav-icon">⚙</span><span>সেটিংস ও টুল</span></button>
+          </nav>
+          <div class="aw-session-block">
+            <span class="aw-side-label">RECENT CHATS</span>
+            <div id="aw-session-list" class="aw-session-list" aria-live="polite"></div>
+          </div>
+        </aside>
+
+        <div class="aw-main">
+          <section id="aw-tab-chat" class="aw-tab active" role="tabpanel">
+            <div class="aw-chat-layout">
+              <div class="aw-chat-toolbar">
+                <div class="aw-model-badge"><span>●</span><strong id="aw-model-label">Auto provider</strong><span id="aw-session-label">নতুন চ্যাট</span></div>
+                <div class="aw-actions"><button id="aw-refresh-sessions" type="button" class="ghost">চ্যাট ইতিহাস</button><button id="aw-new-chat" type="button" class="ghost">＋ নতুন</button></div>
+              </div>
+              <div id="aw-approval-queue" class="aw-approval-queue" aria-live="assertive"></div>
+              <div class="aw-chat-feed" id="aw-chat-feed" aria-live="polite">
+                <div class="aw-empty-chat" id="aw-empty-chat"><div><div class="aw-empty-icon">✦</div><h3>আপনার কাজের AI সহকারী</h3><p>বাংলা বা ইংরেজিতে বলুন কী করতে চান। Agent আপনার অনুমতি ছাড়া সংবেদনশীল কাজ করবে না—ফাইল বদলানো, নেটওয়ার্ক, MCP বা স্থায়ী মেমোরির আগে আপনি দেখতে ও অনুমোদন করতে পারবেন।</p><div class="aw-suggestions"><button type="button" data-aw-prompt="আজকের কাজগুলো সাজিয়ে একটি পরিকল্পনা দাও।">আজকের পরিকল্পনা</button><button type="button" data-aw-prompt="আমার পছন্দের ভাষা বাংলা—এটি মেমোরিতে রাখো।">বাংলা পছন্দ মনে রাখো</button><button type="button" data-aw-prompt="workspace-এর গুরুত্বপূর্ণ ফাইলগুলো দেখে সংক্ষেপে বলো।">ফাইলগুলো দেখো</button></div></div></div>
+              </div>
+              <form id="aw-composer" class="aw-composer">
+                <textarea id="aw-chat-input" rows="3" placeholder="যেমন: প্রতি সকাল ৮টায় আমার কাজের তালিকা তৈরি করো…" aria-label="Agent message"></textarea>
+                <div class="aw-composer-bottom"><span class="aw-composer-note">Enter পাঠাবে · Shift + Enter নতুন লাইন · ⛨ সংবেদনশীল কাজ অনুমতি চাইবে</span><div class="aw-send-row"><button id="aw-abort" type="button" class="ghost" hidden>থামাও</button><button class="aw-send" type="submit">পাঠান ↑</button></div></div>
+              </form>
+            </div>
+          </section>
+
+          <section id="aw-tab-automations" class="aw-tab" role="tabpanel" aria-label="Automations">
+            <div class="aw-panel-title"><div><h3>সময়মতো কাজ করান</h3><p>Cron job ফোন বন্ধ/ব্যাকগ্রাউন্ডে থাকলেও OS সুযোগ দিলে চলবে। Android-এ কমপক্ষে ১৫ মিনিট; iOS সময়টি নিশ্চিত করে না।</p></div><button id="aw-refresh-automations" type="button" class="ghost">↻ Refresh</button></div>
+            <div class="aw-grid">
+              <article class="aw-card"><h4>নতুন Automation</h4><form id="aw-cron-form" class="aw-form">
+                <label class="aw-field">কাজের নাম<input id="aw-cron-name" required maxlength="200" placeholder="সকালের ব্রিফিং"></label>
+                <label class="aw-field">Agent-কে কী করতে হবে?<textarea id="aw-cron-prompt" maxlength="100000" placeholder="আজকের অগ্রাধিকারগুলো বাংলায় সংক্ষেপে তৈরি করো। Skill বাছলে এটি ঐচ্ছিক।"></textarea></label>
+                <label class="aw-field">Saved Skill (ঐচ্ছিক)<select id="aw-cron-skill"><option value="">নিজের prompt ব্যবহার করুন</option></select></label>
+                <div class="aw-inline"><label class="aw-field">সময়সূচি<select id="aw-cron-kind"><option value="every">প্রতি নির্দিষ্ট সময়</option><option value="at">একবার, নির্দিষ্ট সময়ে</option></select></label><label class="aw-field" id="aw-every-wrap">প্রতি (মিনিট)<input id="aw-cron-every" type="number" min="1" max="10080" value="60"></label><label class="aw-field" id="aw-at-wrap" hidden>তারিখ ও সময়<input id="aw-cron-at" type="datetime-local"></label></div>
+                <div class="aw-inline"><label class="aw-field">ডেলিভারি<select id="aw-cron-delivery"><option value="notification">নোটিফিকেশন + ইনবক্স</option><option value="silent">শুধু ইনবক্স</option><option value="none">কোনো ডেলিভারি নয়</option></select></label><label class="aw-field">চ্যাট প্রসঙ্গ<select id="aw-cron-session"><option value="isolated">আলাদা, নিরাপদ প্রসঙ্গ</option><option value="main">এই মূল চ্যাট</option><option value="shared">Shared</option></select></label></div>
+                <label class="aw-checkbox"><input id="aw-cron-enabled" type="checkbox" checked> তৈরি হওয়ার সাথে সাথে চালু</label><button type="submit">Automation যোগ করুন</button></form></article>
+              <article class="aw-card"><h4>ব্যাকগ্রাউন্ড Wake</h4><p>এটি cron job-এর সময় দেখার জন্য OS-কে অনুরোধ করে। Exact alarm নয়; battery, network এবং platform policy প্রযোজ্য।</p><div class="aw-inline"><label class="aw-field">প্রতি (মিনিট)<input id="aw-wake-minutes" type="number" min="15" max="1440" value="30"></label><button id="aw-schedule-wake" type="button">Wake চালু</button><button id="aw-cancel-wake" type="button" class="ghost">বন্ধ</button></div><p id="aw-wake-status" class="aw-help">স্থিতি এখনো দেখা হয়নি।</p><h4 style="margin-top:20px">Agent inbox</h4><div class="aw-actions"><button id="aw-refresh-inbox" type="button" class="ghost">Background ফলাফল দেখুন</button><button id="aw-clear-inbox" type="button" class="ghost">Inbox মুছুন</button></div><div id="aw-inbox" class="aw-list aw-inbox" style="margin-top:10px"></div></article>
+              <article class="aw-card"><h4>Heartbeat · নিয়মিত self-check</h4><p>নির্দিষ্ট সময় পর agent আপনার private <code>HEARTBEAT.md</code>-এর নিয়ম দেখে প্রয়োজনীয় কাজ করবে। এটি OS wake-এর সাথে best-effort চলে; জরুরি বা exact alarm নয়।</p><form id="aw-heartbeat-form" class="aw-form"><label class="aw-checkbox"><input id="aw-heartbeat-enabled" type="checkbox"> Heartbeat চালু রাখুন</label><div class="aw-inline"><label class="aw-field">প্রতি (মিনিট)<input id="aw-heartbeat-minutes" type="number" min="1" max="1440" value="60"></label><label class="aw-field">Saved Skill (ঐচ্ছিক)<select id="aw-heartbeat-skill"><option value="">HEARTBEAT.md অনুযায়ী</option></select></label></div><label class="aw-field">অতিরিক্ত নির্দেশনা (ঐচ্ছিক)<textarea id="aw-heartbeat-prompt" maxlength="10000" placeholder="শুধু নতুন বা গুরুত্বপূর্ণ পরিবর্তন হলে আমাকে জানাবে।"></textarea></label><button type="submit">Heartbeat সংরক্ষণ করুন</button><p id="aw-heartbeat-status" class="aw-help">Heartbeat status এখনো দেখা হয়নি।</p></form></article>
+            </div>
+            <article class="aw-card" style="margin-top:14px"><h4>চালু Automation</h4><div id="aw-cron-list" class="aw-list"></div></article>
+          </section>
+
+          <section id="aw-tab-skills" class="aw-tab" role="tabpanel" aria-label="Skills">
+            <div class="aw-panel-title"><div><h3>নিজের কাজের ধরন শেখান</h3><p>একটি Skill হলো পুনর্ব্যবহারযোগ্য নির্দেশনা এবং tool allow-list। এটিকে chat ও automation—দুই জায়গাতেই ব্যবহার করা যায়।</p></div><button id="aw-refresh-skills" type="button" class="ghost">↻ Refresh</button></div>
+            <div class="aw-grid"><article class="aw-card"><h4>নতুন Skill</h4><form id="aw-skill-form" class="aw-form"><label class="aw-field">Skill নাম<input id="aw-skill-name" required maxlength="200" placeholder="বাংলা সংক্ষিপ্তকারী"></label><label class="aw-field">বিশেষ নির্দেশনা<textarea id="aw-skill-prompt" required placeholder="সব উত্তর বাংলায় ৩টি বুলেটে দিন। তথ্য না পেলে আগে প্রশ্ন করুন।"></textarea></label><label class="aw-field">অনুমোদিত tool (কমা দিয়ে; খালি = কোনো tool নয়)<input id="aw-skill-tools" placeholder="read_file, list_files"></label><div class="aw-inline"><label class="aw-field">সর্বোচ্চ turn<input id="aw-skill-turns" type="number" min="1" max="25" value="5"></label><label class="aw-field">সময় সীমা (সেকেন্ড)<input id="aw-skill-timeout" type="number" min="10" max="480" value="60"></label></div><button type="submit">Skill সংরক্ষণ করুন</button></form></article><article class="aw-card"><h4>কীভাবে ব্যবহার করবেন</h4><p>Skill তৈরি হলে নিচের তালিকায় <b>Start</b> চাপুন। আলাদা session তৈরি হবে—সেই session থেকে chat চালাতে চাইলে chat history থেকে সেটি খুলুন। Automation ও Heartbeat form-এ Saved Skill বেছে নিতে পারবেন; engine সেই Skill-এর tool allow-list ও timeout মেনে চলবে।</p><p class="aw-mcp-server-note">নিরাপত্তা: allow-list কোনো অনুমতি bypass করে না। নির্বাচিত tool-এ সংরক্ষিত approval policy সবসময় প্রযোজ্য থাকে।</p></article></div><article class="aw-card" style="margin-top:14px"><h4>সংরক্ষিত Skills</h4><div id="aw-skill-list" class="aw-list"></div></article>
+          </section>
+
+          <section id="aw-tab-memory" class="aw-tab" role="tabpanel" aria-label="Memory">
+            <div class="aw-panel-title"><div><h3>Agent কী মনে রাখবে, সেটি আপনি ঠিক করবেন</h3><p>এটি local long-term memory। সংরক্ষণের আগে অনুমতি লাগে; automatic memory নয়। চাইলে যে কোনো সময় মুছুন।</p></div><button id="aw-refresh-memory" type="button" class="ghost">↻ Refresh</button></div>
+            <div class="aw-grid"><article class="aw-card"><h4>একটি মেমোরি যোগ করুন</h4><form id="aw-memory-form" class="aw-form"><label class="aw-field">চেনার নাম / key<input id="aw-memory-key" maxlength="200" required placeholder="language-preference"></label><label class="aw-field">কী মনে রাখবে?<textarea id="aw-memory-text" required placeholder="আমি সবসময় বাংলায় উত্তর পছন্দ করি।"></textarea></label><label class="aw-field">ধরন (ঐচ্ছিক)<input id="aw-memory-category" placeholder="preference"></label><button type="submit">মেমোরি সংরক্ষণ</button></form></article><article class="aw-card"><h4>খুঁজে দেখুন</h4><form id="aw-memory-search-form" class="aw-form"><label class="aw-field">কী খুঁজবেন?<input id="aw-memory-query" placeholder="ভাষা, পছন্দ, কাজ…"></label><button type="submit" class="ghost">অনুসন্ধান</button></form><div id="aw-memory-search-results" class="aw-list" style="margin-top:12px"></div></article></div><article class="aw-card" style="margin-top:14px"><h4>মেমোরির তালিকা</h4><div id="aw-memory-list" class="aw-list"></div></article>
+          </section>
+
+          <section id="aw-tab-persona" class="aw-tab" role="tabpanel" aria-label="Persona and files">
+            <div class="aw-panel-title"><div><h3>নিজের মতো করে Agent গড়ুন</h3><p>এই ফাইলগুলো আপনার private workspace-এর অংশ। এগুলো বদলালে Agent-এর নিয়ম, পরিচয়, আপনার পছন্দ ও heartbeat আচরণ বদলাবে—পরের turn থেকেই।</p></div><button id="aw-open-file-manager" type="button" class="ghost">সব ফাইল খুলুন ↓</button></div>
+            <article class="aw-card"><div id="aw-persona-files" class="aw-persona-files" role="tablist"><button type="button" class="active" data-aw-persona-file="AGENTS.md">AGENTS.md · নিয়ম</button><button type="button" data-aw-persona-file="SOUL.md">SOUL.md · টোন</button><button type="button" data-aw-persona-file="IDENTITY.md">IDENTITY.md · পরিচয়</button><button type="button" data-aw-persona-file="USER.md">USER.md · আমার পছন্দ</button><button type="button" data-aw-persona-file="TOOLS.md">TOOLS.md · Tool নিয়ম</button><button type="button" data-aw-persona-file="HEARTBEAT.md">HEARTBEAT.md · নিয়মিত কাজ</button><button type="button" data-aw-persona-file="MEMORY.md">MEMORY.md · স্থায়ী নির্দেশ</button></div><p id="aw-persona-hint" class="aw-help">AGENTS.md: agent-এর প্রধান নিয়ম ও কাজের সীমা লিখুন।</p><textarea id="aw-persona-editor" class="aw-code-editor" spellcheck="false" aria-label="Persona file editor" placeholder="Agent চালু হলে file load হবে…"></textarea><div class="aw-actions" style="margin-top:10px"><button id="aw-load-persona" type="button" class="ghost">↻ Reload</button><button id="aw-save-persona" type="button">এই ফাইল সংরক্ষণ</button></div></article>
+            <p class="aw-mcp-server-note" style="margin-top:14px">Tip: “সবসময় আগে পরিকল্পনা দেখাও”, “বাংলায় উত্তর দাও”, “কোনো file delete করার আগে ব্যাখ্যা দাও”—এ ধরনের স্থায়ী নিয়ম <b>AGENTS.md</b>-এ লিখুন। API key, token বা password কোনো persona file-এ রাখবেন না।</p>
+          </section>
+
+          <section id="aw-tab-mcp" class="aw-tab" role="tabpanel" aria-label="MCP connections">
+            <div class="aw-panel-title"><div><h3>বাইরের MCP tools নিরাপদে যুক্ত করুন</h3><p>প্রতিটি server আলাদা নামে যুক্ত হয়। Tool call দেখানো ও অনুমোদন ছাড়া চালানো হয় না; access token Android Keystore/iOS Keychain-এ রাখা হয়, সাধারণ settings-এ নয়।</p></div><button id="aw-reconnect-mcp" type="button" class="ghost">সব পুনঃসংযোগ</button></div>
+            <div class="aw-grid"><article class="aw-card"><h4>MCP server যোগ করুন</h4><form id="aw-mcp-form" class="aw-form"><label class="aw-field">চেনার নাম (letters, digits, _ বা -)<input id="aw-mcp-name" required pattern="[A-Za-z][A-Za-z0-9_-]{0,63}" placeholder="github"></label><label class="aw-field">HTTPS endpoint<input id="aw-mcp-url" type="url" required placeholder="https://example.com/mcp"></label><label class="aw-field">Protocol<select id="aw-mcp-protocol"><option value="auto">Auto · সর্বশেষ MCP, দরকারে legacy</option><option value="2026-07-28">MCP 2026-07-28</option><option value="2025-06-18">Legacy 2025-06-18</option></select></label><label class="aw-field">Bearer token (ঐচ্ছিক; নিরাপদে সংরক্ষিত)<input id="aw-mcp-token" type="password" autocomplete="off" placeholder="খালি রাখলে আগের token অপরিবর্তিত থাকবে"></label><label class="aw-checkbox"><input id="aw-mcp-always-ask" type="checkbox" checked> প্রতিটি MCP tool-এর আগে অনুমতি চাইবে</label><button type="submit">সেভ ও Connect</button></form></article><article class="aw-card"><h4>OAuth ও নিরাপত্তা</h4><p>OAuth-চালিত MCP server-এর জন্য আগে server-এর browser/OAuth flow-এ consent শেষ করে পাওয়া access token দিন। Token শুধুই নির্দিষ্ট server-এর নামে নিরাপদ storage-এ রাখা হয় এবং chat/transcript-এ লেখা হয় না।</p><p class="aw-mcp-server-note">MCP server-এর tool description ও ফলাফল বাইরের input—তাই এগুলোকে নির্দেশ হিসেবে বিশ্বাস না করে approval ও tool policy-র মধ্যে রাখুন।</p><p class="aw-help">সর্বশেষ 2026-07-28 MCP stateless HTTP, route headers ও stronger authorization ব্যবহার করে; পুরোনো server-এ auto mode legacy fallback চেষ্টা করে।</p></article></div><article class="aw-card" style="margin-top:14px"><h4>সংযুক্ত Server ও Tools</h4><div id="aw-mcp-list" class="aw-list"></div></article>
+          </section>
+
+          <section id="aw-tab-settings" class="aw-tab" role="tabpanel" aria-label="Settings and tools">
+            <div class="aw-panel-title"><div><h3>Model, নিরাপত্তা ও tool নিয়ন্ত্রণ</h3><p>API key কেবল নির্বাচিত provider-এর secure auth store-এ যায়। প্রতিটি tool-এর অনুমতি আলাদা করে ঠিক করুন।</p></div><button id="aw-load-settings" type="button" class="ghost">↻ Refresh</button></div>
+            <div class="aw-grid"><article class="aw-card"><h4>Provider ও Model</h4><form id="aw-provider-form" class="aw-form"><label class="aw-field">চ্যাটের Route<select id="aw-provider"><option value="auto">Auto router · নিরাপদ priority অনুযায়ী</option><option value="anthropic">Anthropic</option><option value="openai">OpenAI</option><option value="gemini">Google Gemini</option><option value="openrouter">OpenRouter</option><option value="ovhcloud">OVHcloud</option><option value="aihorde">AI Horde</option><option value="llm7">LLM7</option><option value="opencode_zen">OpenCode Zen</option><option value="kilo">Kilo</option><option value="pollinations">Pollinations</option><option value="webllm">WebLLM (local)</option></select></label><label class="aw-field">Model override (ঐচ্ছিক)<input id="aw-model" list="aw-model-list" placeholder="নির্দিষ্ট provider হলে model ID; Auto হলে provider/model"><datalist id="aw-model-list"></datalist></label><label class="aw-field">API key / token<input id="aw-provider-key" type="password" autocomplete="off" placeholder="এই provider-এর জন্য একবার save করুন"></label><div class="aw-inline"><button type="button" id="aw-refresh-models" class="ghost">Model তালিকা</button><button type="button" id="aw-save-key">Key সংরক্ষণ</button></div><p id="aw-key-status" class="aw-help">Key status এখনো দেখা হয়নি।</p></form></article><article class="aw-card"><h4>Run limits</h4><form id="aw-runtime-form" class="aw-form"><div class="aw-inline"><label class="aw-field">Default max turns<input id="aw-max-turns" type="number" min="1" max="100"></label><label class="aw-field">Max output tokens<input id="aw-max-tokens" type="number" min="1" max="200000"></label></div><div class="aw-inline"><label class="aw-field">Temperature (0–2)<input id="aw-temperature" type="number" min="0" max="2" step="0.1"></label><label class="aw-field">Context budget (chars)<input id="aw-context-budget" type="number" min="10000" max="1000000" step="1000"></label></div><button type="submit">Runtime settings সংরক্ষণ</button><p class="aw-help">Budget সীমা খরচ ও endless tool loop কমায়। Approval/sandbox/SSRF সীমা এখান থেকে শিথিল করা যায় না।</p></form></article></div>
+            <article class="aw-card aw-router-card" style="margin-top:14px"><div class="aw-panel-title"><div><h4>AI Router · provider priority ও failover</h4><p>Auto route-এ engine প্রথম eligible route ব্যবহার করে। কেবল retryable failure এবং কোনো output শুরু হওয়ার আগেই পরের route চেষ্টা হয়—ডুপ্লিকেট উত্তর বা side effect এড়াতে।</p></div><div class="aw-actions"><button id="aw-router-check" type="button" class="ghost">Config যাচাই</button><button id="aw-router-live-test" type="button" class="ghost">বাস্তব পরীক্ষা</button><button id="aw-router-refresh" type="button" class="ghost">↻ Refresh</button></div></div><form id="aw-router-form" class="aw-form"><div id="aw-router-list" class="aw-router-list" aria-live="polite"></div><div class="aw-inline"><label class="aw-checkbox"><input id="aw-router-failover" type="checkbox" checked> transient failure-এ fallback</label><label class="aw-field">সর্বোচ্চ fallback<input id="aw-router-max-fallbacks" type="number" min="0" max="10" value="3"></label><button type="submit">Router policy সংরক্ষণ</button></div><p id="aw-router-summary" class="aw-help">Auto router এখনো load করা হয়নি।</p></form><div class="aw-route-live" id="aw-route-live" aria-live="polite"></div></article>
+            <article class="aw-card" style="margin-top:14px"><div class="aw-panel-title"><div><h4>Tool permissions</h4><p>Disabled tool model দেখতে বা চালাতে পারে না। “প্রতিবার জিজ্ঞেস” সংবেদনশীল কাজের জন্য নিরাপদ default।</p></div><div class="aw-actions"><button id="aw-seed-tools" type="button" class="ghost">নিরাপদ defaults</button><button id="aw-refresh-tools" type="button" class="ghost">↻ Refresh</button></div></div><div id="aw-tool-list" class="aw-tool-grid"></div></article>
+          </section>
+          <div id="aw-toast" class="aw-toast" hidden role="status"></div>
+        </div>
+      </div>
+    </section>
+
+    <details class="agent-lab-advanced">
+      <summary>Developer diagnostics · সম্পূর্ণ native Agent API Lab</summary>
+      <section class="panel agent-panel" id="agent-lab">
       <div>
         <p class="eyebrow">ON-DEVICE AI AGENT</p>
         <h2>Rust agent engine — সব API টেস্ট</h2>
@@ -294,7 +388,8 @@
 
         <article class="card"><span class="icon">≣</span><h3>Event stream</h3><p>Initialize নিজেই wire করে; আলাদা করে চাইলে এখান থেকে।</p><button data-agent-action="agentlisten" class="secondary">Listen</button></article>
       </div>
-    </section>
+      </section>
+    </details>
 
     <section class="panel network-panel">
       <div>

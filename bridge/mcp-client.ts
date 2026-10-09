@@ -11,8 +11,9 @@
  * JSON-RPC framing, `initialize`, `tools/list`, `tools/call` — was left for the
  * app to write, with no guidance beyond the method names.
  *
- * This module is that missing half, implemented against the MCP specification
- * (2025-06-18 schema):
+ * This module is that missing half. It prefers the current stateless MCP
+ * specification (2026-07-28) while retaining a deliberately isolated legacy
+ * adapter for 2025-06-18 servers that still require initialize/session headers:
  *
  *   1. {@link McpClient} speaks JSON-RPC 2.0 to a server over a pluggable
  *      transport ({@link HttpMcpTransport} implements Streamable HTTP).
@@ -35,10 +36,23 @@
  *    inner `isError`.
  */
 
-// ── Protocol types (MCP 2025-06-18) ─────────────────────────────────────────
+// ── Protocol types ───────────────────────────────────────────────────────────
 
-/** The protocol revision this client implements. */
-export const MCP_PROTOCOL_VERSION = '2025-06-18';
+/**
+ * The old stateful wire revision. It remains exported because many hosted MCP
+ * servers still use it and callers may opt in explicitly.
+ */
+export const MCP_LEGACY_PROTOCOL_VERSION = '2025-06-18';
+/** The current stateless Streamable HTTP revision. */
+export const MCP_CURRENT_PROTOCOL_VERSION = '2026-07-28';
+/** Backward-compatible name used by older callers/tests. */
+export const MCP_PROTOCOL_VERSION = MCP_LEGACY_PROTOCOL_VERSION;
+export type McpProtocolVersion = typeof MCP_LEGACY_PROTOCOL_VERSION | typeof MCP_CURRENT_PROTOCOL_VERSION;
+export type McpProtocolMode = McpProtocolVersion | 'auto';
+
+function isCurrentProtocol(value: McpProtocolVersion): boolean {
+  return value === MCP_CURRENT_PROTOCOL_VERSION;
+}
 
 export interface McpToolDefinition {
   name: string;
@@ -76,6 +90,8 @@ interface JsonRpcResponse {
 export interface McpTransport {
   /** Send one request and resolve with the decoded JSON-RPC response. */
   send(message: Record<string, unknown>): Promise<JsonRpcResponse | null>;
+  /** Clears a captured legacy session when a caller falls back/reconnects. */
+  resetSession?(): void;
   close?(): Promise<void> | void;
 }
 
@@ -116,63 +132,89 @@ export class HttpMcpTransport implements McpTransport {
     } = {},
   ) {}
 
+  resetSession(): void {
+    this.sessionId = null;
+  }
+
   async send(message: Record<string, unknown>): Promise<JsonRpcResponse | null> {
     const doFetch = this.options.fetchImpl ?? globalThis.fetch;
     if (typeof doFetch !== 'function') {
       throw new McpError('No fetch implementation is available for the MCP transport');
     }
 
+    const params = message.params as Record<string, unknown> | undefined;
+    const meta = params?._meta as Record<string, unknown> | undefined;
+    const protocolVersion = typeof meta?.['io.modelcontextprotocol/protocolVersion'] === 'string'
+      ? meta['io.modelcontextprotocol/protocolVersion'] as string
+      : MCP_LEGACY_PROTOCOL_VERSION;
+    const method = typeof message.method === 'string' ? message.method : '';
+    const name = typeof params?.name === 'string'
+      ? params.name
+      : typeof params?.uri === 'string' ? params.uri : undefined;
+    const legacy = protocolVersion === MCP_LEGACY_PROTOCOL_VERSION;
     const headers: Record<string, string> = {
-      'content-type': 'application/json',
-      // Both are advertised because the server picks which one to use.
-      accept: 'application/json, text/event-stream',
-      'mcp-protocol-version': MCP_PROTOCOL_VERSION,
       ...(this.options.headers ?? {}),
+      // App-provided headers are intentionally added first. Authorization is
+      // allowed, but no caller may downgrade/misroute a protocol request by
+      // replacing these protocol-critical headers.
+      'content-type': 'application/json',
+      'accept': 'application/json, text/event-stream',
+      'mcp-protocol-version': protocolVersion,
+      // MCP 2026-07-28 requires these mirrored routing headers. They are
+      // harmless to a legacy endpoint and give a proxy enough information to
+      // authorize before parsing a potentially large JSON body.
+      'mcp-method': method,
+      ...(name ? { 'mcp-name': name } : {}),
     };
-    if (this.sessionId) headers['mcp-session-id'] = this.sessionId;
+    if (legacy && this.sessionId) headers['mcp-session-id'] = this.sessionId;
 
-    // Bound every request: without this a hung server would hold the agent's
-    // turn until the engine's own 30 s timeout fires, which reports the far
-    // less useful "tool timed out".
     const controller = new AbortController();
     const timeoutMs = this.options.timeoutMs ?? 20_000;
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new McpError(`MCP transport request timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
 
     let response: Response;
     try {
-      response = await doFetch(this.url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(message),
-        signal: controller.signal,
-      });
+      // Native CapacitorHttp does not implement AbortSignal. Promise.race still
+      // releases the agent turn at the advertised deadline; a late native reply
+      // is ignored instead of blocking the model for the engine's full timeout.
+      response = await Promise.race([
+        doFetch(this.url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(message),
+          signal: controller.signal,
+        }),
+        timeout,
+      ]);
     } catch (err) {
+      if (err instanceof McpError) throw err;
       const reason = (err as Error)?.name === 'AbortError'
         ? `timed out after ${timeoutMs}ms`
         : String((err as Error)?.message ?? err);
       throw new McpError(`MCP transport request failed: ${reason}`);
     } finally {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
     }
 
     const captured = response.headers?.get?.('mcp-session-id');
-    if (captured) this.sessionId = captured;
+    if (legacy && captured) this.sessionId = captured;
 
     if (!response.ok) {
       const body = await safeText(response);
       throw new McpError(`MCP server returned HTTP ${response.status}: ${truncate(body, 500)}`);
     }
-
-    // 202 Accepted with no body is the correct answer to a notification.
     if (response.status === 202) return null;
 
     const contentType = response.headers?.get?.('content-type') ?? '';
     const raw = await safeText(response);
     if (!raw.trim()) return null;
-
-    const payload = contentType.includes('text/event-stream')
-      ? lastSseJson(raw)
-      : raw;
+    const payload = contentType.includes('text/event-stream') ? lastSseJson(raw) : raw;
     if (payload == null) return null;
 
     try {
@@ -219,26 +261,38 @@ export function lastSseJson(body: string): string | null {
 export class McpClient {
   private nextId = 1;
   private initialized = false;
+  private protocol: McpProtocolVersion;
   private serverInfo: { name?: string; version?: string } = {};
 
   constructor(
     readonly name: string,
     private readonly transport: McpTransport,
-  ) {}
+    options: { protocolVersion?: McpProtocolMode } = {},
+  ) {
+    // The class keeps legacy default semantics for existing direct callers.
+    // connectMcpServers explicitly uses `auto`, which means current MCP first.
+    this.protocol = options.protocolVersion === MCP_CURRENT_PROTOCOL_VERSION || options.protocolVersion === 'auto'
+      ? MCP_CURRENT_PROTOCOL_VERSION
+      : MCP_LEGACY_PROTOCOL_VERSION;
+  }
+
+  private requestMeta(): Record<string, unknown> | undefined {
+    if (!isCurrentProtocol(this.protocol)) return undefined;
+    return {
+      'io.modelcontextprotocol/protocolVersion': MCP_CURRENT_PROTOCOL_VERSION,
+      'io.modelcontextprotocol/clientCapabilities': {},
+    };
+  }
 
   private async request(method: string, params?: Record<string, unknown>): Promise<unknown> {
     const id = this.nextId++;
-    const response = await this.transport.send({ jsonrpc: '2.0', id, method, ...(params ? { params } : {}) });
+    const meta = this.requestMeta();
+    const finalParams = params || meta ? { ...(params ?? {}), ...(meta ? { _meta: meta } : {}) } : undefined;
+    const response = await this.transport.send({ jsonrpc: '2.0', id, method, ...(finalParams ? { params: finalParams } : {}) });
     if (!response) throw new McpError(`MCP server sent no response to '${method}'`);
     if (response.error) {
-      throw new McpError(
-        `MCP server rejected '${method}': ${response.error.message}`,
-        response.error.code,
-        response.error.data,
-      );
+      throw new McpError(`MCP server rejected '${method}': ${response.error.message}`, response.error.code, response.error.data);
     }
-    // A mismatched id means responses are being correlated wrongly; surfacing
-    // it is better than handing the caller another call's result.
     if (response.id !== id) {
       throw new McpError(`MCP response id mismatch for '${method}' (sent ${id}, got ${String(response.id)})`);
     }
@@ -249,43 +303,64 @@ export class McpClient {
     await this.transport.send({ jsonrpc: '2.0', method, ...(params ? { params } : {}) });
   }
 
-  /** `initialize` + the `notifications/initialized` acknowledgement. */
+  /**
+   * Connects a legacy server with initialize/initialized. The 2026 revision is
+   * stateless and intentionally has no handshake or session header.
+   */
   async connect(clientInfo: { name: string; version: string } = { name: 'nativekit', version: '1.0.0' }): Promise<void> {
     if (this.initialized) return;
+    if (isCurrentProtocol(this.protocol)) {
+      this.initialized = true;
+      return;
+    }
     const result = (await this.request('initialize', {
-      protocolVersion: MCP_PROTOCOL_VERSION,
+      protocolVersion: MCP_LEGACY_PROTOCOL_VERSION,
       capabilities: {},
       clientInfo,
-    })) as { serverInfo?: { name?: string; version?: string }; protocolVersion?: string } | undefined;
-
+    })) as { serverInfo?: { name?: string; version?: string } } | undefined;
     this.serverInfo = result?.serverInfo ?? {};
-    // The spec requires this notification before any other request; servers are
-    // entitled to reject everything until they receive it.
     await this.notify('notifications/initialized');
     this.initialized = true;
   }
 
+  private async useLegacyFallback(): Promise<void> {
+    if (!isCurrentProtocol(this.protocol)) throw new McpError('MCP server rejected tools/list');
+    this.protocol = MCP_LEGACY_PROTOCOL_VERSION;
+    this.initialized = false;
+    this.transport.resetSession?.();
+    await this.connect();
+  }
+
   async listTools(): Promise<McpToolDefinition[]> {
-    const tools: McpToolDefinition[] = [];
-    let cursor: string | undefined;
-    // `tools/list` is paginated; stopping after the first page would silently
-    // hide tools from the model.
-    do {
-      const page = (await this.request('tools/list', cursor ? { cursor } : undefined)) as
-        | { tools?: McpToolDefinition[]; nextCursor?: string }
-        | undefined;
-      if (page?.tools?.length) tools.push(...page.tools);
-      cursor = page?.nextCursor;
-    } while (cursor);
-    return tools;
+    await this.connect();
+    const collect = async (): Promise<McpToolDefinition[]> => {
+      const tools: McpToolDefinition[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = (await this.request('tools/list', cursor ? { cursor } : undefined)) as
+          | { tools?: McpToolDefinition[]; nextCursor?: string }
+          | undefined;
+        if (page?.tools?.length) tools.push(...page.tools);
+        cursor = page?.nextCursor;
+      } while (cursor);
+      return tools;
+    };
+    try {
+      return await collect();
+    } catch (error) {
+      // Auto/current deployments sometimes point at an older stateful server.
+      // Fall back once, not on every page; the legacy handshake will expose a
+      // meaningful error if the endpoint was simply unreachable or unauthorized.
+      if (!isCurrentProtocol(this.protocol)) throw error;
+      await this.useLegacyFallback();
+      return collect();
+    }
   }
 
   async callTool(name: string, args: Record<string, unknown>): Promise<McpCallToolResult> {
+    await this.connect();
     const result = (await this.request('tools/call', { name, arguments: args ?? {} })) as McpCallToolResult;
-    // Normalise a server that omits `content` so downstream never sees undefined.
-    if (!result || !Array.isArray(result.content)) {
-      return { content: [], isError: Boolean(result?.isError) };
-    }
+    if (!result || !Array.isArray(result.content)) return { content: [], isError: Boolean(result?.isError) };
     return result;
   }
 
@@ -294,9 +369,9 @@ export class McpClient {
     return name ? `${name}${version ? ` ${version}` : ''}` : this.name;
   }
 
-  async close(): Promise<void> {
-    await this.transport.close?.();
-  }
+  get protocolVersion(): McpProtocolVersion { return this.protocol; }
+
+  async close(): Promise<void> { await this.transport.close?.(); }
 }
 
 // ── Agent wiring ────────────────────────────────────────────────────────────
@@ -312,7 +387,10 @@ export interface McpServerConfig {
   /** Short, stable id — becomes the `<id>__` prefix on every tool name. */
   name: string;
   url: string;
+  /** Runtime-only authorization headers. Persist bearer tokens in secure storage, never here. */
   headers?: Record<string, string>;
+  /** `auto` tries current stateless MCP then falls back to legacy stateful MCP. */
+  protocolVersion?: McpProtocolMode;
   /** Passed straight through to `startMcp` for each of this server's tools. */
   approvalPolicy?: 'always_allow' | 'always_ask' | 'always_ask_biometric';
   timeoutMs?: number;
@@ -324,6 +402,24 @@ export interface McpConnection {
   /** Errors from servers that failed to connect. Connecting is best-effort. */
   failures: Array<{ server: string; error: string }>;
   dispose(): Promise<void>;
+}
+
+function validateServerConfig(config: McpServerConfig, allowNonHttpsForInjectedTransport = false): void {
+  if (!/^[a-z][a-z0-9_-]{0,63}$/i.test(config.name)) {
+    throw new McpError(`MCP server name '${config.name}' must be 1–64 letters, digits, _ or - and start with a letter.`);
+  }
+  // Unit-test/in-process transports have no network boundary and commonly use
+  // symbolic URLs such as `x`; retain strict URL checks for every real transport.
+  if (!allowNonHttpsForInjectedTransport) {
+    let url: URL;
+    try { url = new URL(config.url); } catch { throw new McpError(`MCP server '${config.name}' has an invalid URL.`); }
+    if (url.protocol !== 'https:' || url.username || url.password || url.hash) {
+      throw new McpError(`MCP server '${config.name}' must use a credential-free HTTPS URL.`);
+    }
+  }
+  if (config.timeoutMs !== undefined && (!Number.isInteger(config.timeoutMs) || config.timeoutMs < 1_000 || config.timeoutMs > 120_000)) {
+    throw new McpError(`MCP server '${config.name}' timeout must be an integer from 1,000 to 120,000 ms.`);
+  }
 }
 
 /** `server__tool` — see the note on namespacing at the top of this file. */
@@ -365,7 +461,13 @@ export async function connectMcpServers(
           fetchImpl: options.fetchImpl,
           timeoutMs: config.timeoutMs,
         });
-      const client = new McpClient(config.name, transport);
+      validateServerConfig(config, Boolean(options.makeTransport));
+      const requestedProtocol = config.protocolVersion ?? 'auto';
+      const client = new McpClient(
+        config.name,
+        transport,
+        { protocolVersion: requestedProtocol === 'auto' ? MCP_CURRENT_PROTOCOL_VERSION : requestedProtocol },
+      );
       await client.connect();
       const tools = await client.listTools();
 
@@ -377,7 +479,10 @@ export async function connectMcpServers(
           // The WebView executes these, so they must not be offered to a
           // background wake that has no WebView to call into.
           webviewOnly: true,
-          ...(config.approvalPolicy ? { approvalPolicy: config.approvalPolicy } : {}),
+          // Server-provided descriptions/annotations are untrusted. Every
+          // remote MCP tool is therefore ask-by-default until its owner grants
+          // a narrower policy from the app's permission UI.
+          approvalPolicy: config.approvalPolicy ?? 'always_ask',
         });
       }
 
