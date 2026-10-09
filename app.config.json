@@ -3,9 +3,9 @@
   "app": {
     "name": "NativeKit TestLab",
     "id": "dev.nativekit.shell",
-    "versionName": "1.4.6-testlab",
-    "versionCode": 21,
-    "buildNumber": "21",
+    "versionName": "1.4.8-testlab",
+    "versionCode": 22,
+    "buildNumber": "22",
     "description": "A reusable, locally bundled Capacitor application shell",
     "defaultLanguage": "bn",
     "urlScheme": "nativekit"
