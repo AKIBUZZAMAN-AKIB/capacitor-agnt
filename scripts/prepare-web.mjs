@@ -142,17 +142,27 @@ async function main() {
   await copyClean(source, destination);
 
   const indexPath = path.join(destination, 'index.html');
+  const agentPath = path.join(destination, 'agent.html');
   let indexHtml = await fs.readFile(indexPath, 'utf8').catch(() => null);
+  let agentHtml = await fs.readFile(agentPath, 'utf8').catch(() => null);
   if (!indexHtml) throw new Error(`${path.relative(rootDir, source)}/index.html পাওয়া যায়নি`);
+  if (!agentHtml) throw new Error(`${path.relative(rootDir, source)}/agent.html পাওয়া যায়নি`);
   if (!/<html[\s>]/i.test(indexHtml)) throw new Error('index.html-এ বৈধ <html> element নেই');
+  if (!/<html[\s>]/i.test(agentHtml)) throw new Error('agent.html-এ বৈধ <html> element নেই');
 
   if (config.web.injectBridge) {
     const bridgeScript = path.join(rootDir, 'scripts', 'build-bridge.mjs');
     await import(`${pathToFileURL(bridgeScript).href}?t=${Date.now()}`);
     await fs.copyFile(path.join(rootDir, '.nativekit', 'bridge', 'nativekit.js'), path.join(destination, 'nativekit.js'));
-    indexHtml = injectHeadAsset(indexHtml, '<script src="./nativekit.js" data-nativekit-bridge></script>', BRIDGE_MARKER);
+    const bridgeTag = '<script src="./nativekit.js" data-nativekit-bridge></script>';
+    indexHtml = injectHeadAsset(indexHtml, bridgeTag, BRIDGE_MARKER);
+    agentHtml = injectHeadAsset(agentHtml, bridgeTag, BRIDGE_MARKER);
   }
   indexHtml = injectCsp(indexHtml, config.security.contentSecurityPolicy);
+  agentHtml = injectCsp(agentHtml, config.security.contentSecurityPolicy);
+  // Keep every user-facing native page self-sufficient: direct navigation to
+  // agent.html must have the same generated bridge and CSP as the home page.
+  await fs.writeFile(agentPath, agentHtml);
 
   if (target === 'web' && config.web.serviceWorker.enabledForWebTarget) {
     const register = `if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {\n  addEventListener('load', () => navigator.serviceWorker.register('./nativekit-sw.js').catch((error) => console.warn('NativeKit SW registration failed', error)));\n}\n`;

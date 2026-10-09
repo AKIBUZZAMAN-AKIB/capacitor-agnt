@@ -14,12 +14,19 @@ beforeAll(() => {
 });
 
 describe('native web staging', () => {
-  it('injects the generated bridge before application scripts', () => {
+  it('injects the generated bridge before application scripts on every native page', () => {
     const html = readFileSync(path.join(staged, 'index.html'), 'utf8');
     const bridgeIndex = html.indexOf('nativekit.js');
     const appIndex = html.indexOf('app.js');
     expect(bridgeIndex).toBeGreaterThan(-1);
     expect(appIndex).toBeGreaterThan(bridgeIndex);
+
+    const agentHtml = readFileSync(path.join(staged, 'agent.html'), 'utf8');
+    const agentBridgeIndex = agentHtml.indexOf('nativekit.js');
+    const agentAppIndex = agentHtml.indexOf('agent-page.js');
+    expect(agentBridgeIndex).toBeGreaterThan(-1);
+    expect(agentAppIndex).toBeGreaterThan(agentBridgeIndex);
+    expect(agentHtml).toContain('Content-Security-Policy');
     expect(existsSync(path.join(staged, 'nativekit.js'))).toBe(true);
   });
 

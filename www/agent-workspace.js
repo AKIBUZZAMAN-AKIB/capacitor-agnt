@@ -40,6 +40,7 @@ const PROVIDER_LABELS = Object.freeze({
 
 const state = {
   initialized: false,
+  initializing: false,
   listening: false,
   running: false,
   sessionKey: `chat-${Date.now()}`,
@@ -88,15 +89,21 @@ function status(message, tone = 'muted') {
 }
 
 function requireInit() {
-  if (!state.initialized) throw new Error('আগে “Agent চালু করুন” চাপুন।');
+  if (!state.initialized) throw new Error('Agent প্রস্তুত হচ্ছে—একটু অপেক্ষা করে আবার চেষ্টা করুন।');
+}
+
+function setComposerAvailability(ready) {
+  const disabled = !ready || state.running;
+  const submit = $('aw-composer')?.querySelector('[type="submit"]');
+  if (submit) submit.disabled = disabled;
+  const input = $('aw-chat-input');
+  if (input) input.disabled = disabled;
 }
 
 function setRunning(running, message) {
   state.running = running;
   $('aw-abort').hidden = !running;
-  const submit = $('aw-composer')?.querySelector('[type="submit"]');
-  if (submit) submit.disabled = running;
-  $('aw-chat-input').disabled = running;
+  setComposerAvailability(state.initialized);
   if (message) status(message, running ? 'busy' : 'ok');
 }
 
@@ -222,19 +229,22 @@ async function answerApproval(approved) {
 }
 
 async function initialize() {
-  if (!featureReady()) {
-    status('Web preview-এ native agent চলে না; Android/iOS build চালান।', 'warn');
-    toast('Native build ছাড়া AI engine চালু করা যাবে না।', 'warn');
-    return;
-  }
-  if (state.initialized || globalThis.__nativeKitAgentInitialized) {
-    state.initialized = true;
-    await afterInitialize();
-    return;
-  }
-  status('Agent engine প্রস্তুত হচ্ছে…', 'busy');
+  if (state.initializing) return;
+  state.initializing = true;
+  setComposerAvailability(false);
   $('aw-start').disabled = true;
   try {
+    if (!featureReady()) {
+      status('Web preview-এ native agent চলে না; Android/iOS build চালান।', 'warn');
+      toast('Native build ছাড়া AI engine চালু করা যাবে না।', 'warn');
+      return;
+    }
+    if (state.initialized || globalThis.__nativeKitAgentInitialized) {
+      state.initialized = true;
+      await afterInitialize();
+      return;
+    }
+    status('Agent engine প্রস্তুত হচ্ছে…', 'busy');
     const probe = await nativeAgent().checkAvailability();
     if (!probe.available) throw new Error(probe.reason || `এই device ABI (${probe.abi}) supported নয়`);
     await nativeAgent().initialize(AGENT_INIT);
@@ -246,14 +256,22 @@ async function initialize() {
   } catch (error) {
     status(`Agent চালু হয়নি: ${error.message ?? error}`, 'err');
     toast(`Agent চালু হয়নি: ${error.message ?? error}`, 'err');
-  } finally { $('aw-start').disabled = false; }
+  } finally {
+    state.initializing = false;
+    $('aw-start').disabled = false;
+  }
 }
 
 async function afterInitialize() {
   await wireEvents();
-  await Promise.allSettled([refreshSettings(), refreshSessions(), refreshAutomations(), refreshSkills(), refreshMemory(), loadMcpConfigs()]);
-  await loadPersona();
+  // The engine is ready at this point. Do not make chat wait for optional
+  // settings/history refreshes: that made a healthy agent look unsendable.
+  setComposerAvailability(true);
   $('aw-start').textContent = '✓ Agent প্রস্তুত';
+  await Promise.allSettled([
+    refreshSettings(), refreshSessions(), refreshAutomations(), refreshSkills(),
+    refreshMemory(), loadMcpConfigs(), loadPersona(),
+  ]);
 }
 
 async function wireEvents() {
@@ -596,8 +614,10 @@ async function saveRouter(event) {
 async function refreshSettings() {
   requireInit(); const config = await nativeAgent().getRuntimeConfig(); state.runtimeConfig = config; state.routerDraft = routerDraftFrom(config);
   $('aw-max-turns').value = config.defaultMaxTurns ?? 25; $('aw-max-tokens').value = config.maxTokens ?? 8192; $('aw-temperature').value = config.temperature ?? 0; $('aw-context-budget').value = config.contextCharBudget ?? 150000;
-  const selected = $('aw-provider').value || config.defaultProvider || 'auto'; $('aw-provider').value = selected; $('aw-model-label').textContent = selected === 'auto' ? 'Auto provider' : selected;
-  const authProvider = selected === 'auto' ? 'anthropic' : selected; const auth = await nativeAgent().getAuthStatus(authProvider).catch(() => null); $('aw-key-status').textContent = auth?.hasKey ? `Key সংরক্ষিত · ${auth.masked}` : 'এই provider-এর জন্য এখনো কোনো key সংরক্ষিত নেই।';
+  // Route choice and key management are intentionally separate: leaving the
+  // route untouched means every chat uses native Auto Router.
+  const selected = clean($('aw-provider').value) || 'auto'; $('aw-provider').value = selected; $('aw-model-label').textContent = selected === 'auto' ? 'Auto provider' : selected;
+  await refreshKeyStatus();
   renderRouter(config);
   const perms = await nativeAgent().listToolPermissions(); renderTools(parseJson(perms?.permissionsJson, []));
 }
@@ -606,7 +626,14 @@ function renderTools(rows) { const root = $('aw-tool-list'); root.replaceChildre
 async function saveTool(name, permission, enabled) { try { await nativeAgent().setToolPermission(name, permission, enabled); toast(`${name} policy সংরক্ষণ হয়েছে।`, 'ok'); } catch (error) { toast(String(error.message ?? error), 'err'); } }
 async function seedTools() { requireInit(); await nativeAgent().seedToolPermissions(TOOL_DEFAULTS.map(([toolName, permission]) => ({ toolName, permission, enabled: true }))); toast('নিরাপদ tool defaults যোগ হয়েছে; আগের সিদ্ধান্ত বদলানো হয়নি।', 'ok'); await refreshSettings(); }
 async function refreshModels() { requireInit(); const provider = clean($('aw-provider').value); if (provider === 'auto' || provider === 'webllm') { toast('নির্দিষ্ট cloud provider বাছলে তার model catalog আনা যাবে।', 'warn'); return; } const response = await nativeAgent().getModels(provider); const models = parseJson(response?.modelsJson, []); const list = $('aw-model-list'); list.replaceChildren(...models.slice(0, 500).map((model) => { const opt = document.createElement('option'); opt.value = model.id; opt.label = `${model.name ?? model.id}${model.toolCalling === true ? ' · tools' : ''}`; return opt; })); toast(`${models.length}টি model পাওয়া গেছে।`, 'ok'); }
-async function saveProviderKey() { requireInit(); const provider = clean($('aw-provider').value); const key = $('aw-provider-key').value; if (provider === 'auto' || provider === 'webllm') throw new Error('Key সংরক্ষণের জন্য একটি নির্দিষ্ট provider বাছুন।'); if (!key) throw new Error('API key/token লিখুন।'); await nativeAgent().setAuthKey(key, provider); $('aw-provider-key').value = ''; await refreshSettings(); toast('Key নিরাপদ auth store-এ সংরক্ষণ হয়েছে।', 'ok'); }
+async function refreshKeyStatus() {
+  const provider = clean($('aw-key-provider')?.value) || 'anthropic';
+  const auth = await nativeAgent().getAuthStatus(provider).catch(() => null);
+  $('aw-key-status').textContent = auth?.hasKey
+    ? `${PROVIDER_LABELS[provider] ?? provider}: key সংরক্ষিত · ${auth.masked}`
+    : `${PROVIDER_LABELS[provider] ?? provider}-এর জন্য এখনো কোনো key সংরক্ষিত নেই।`;
+}
+async function saveProviderKey() { requireInit(); const provider = clean($('aw-key-provider').value); const key = $('aw-provider-key').value; if (!provider || provider === 'webllm') throw new Error('Key সংরক্ষণের জন্য একটি নির্দিষ্ট provider বাছুন।'); if (!key) throw new Error('API key/token লিখুন।'); await nativeAgent().setAuthKey(key, provider); $('aw-provider-key').value = ''; await refreshKeyStatus(); toast('Key নিরাপদ auth store-এ সংরক্ষণ হয়েছে।', 'ok'); }
 async function saveRuntime(event) { event.preventDefault(); requireInit(); const patch = { defaultMaxTurns: Number($('aw-max-turns').value), maxTokens: Number($('aw-max-tokens').value), temperature: Number($('aw-temperature').value), contextCharBudget: Number($('aw-context-budget').value), defaultProvider: clean($('aw-provider').value) || 'auto' }; state.runtimeConfig = await nativeAgent().setRuntimeConfig(patch); toast('Runtime settings সংরক্ষণ হয়েছে।', 'ok'); }
 
 async function guarded(label, task) { try { await task(); } catch (error) { const message = String(error?.message ?? error); toast(message, 'err'); status(`${label}: ${safeText(message)}`, 'err'); } }
@@ -622,16 +649,23 @@ function bind() {
   $('aw-cron-form').addEventListener('submit', (event) => void guarded('Automation', () => createCron(event))); $('aw-heartbeat-form').addEventListener('submit', (event) => void guarded('Heartbeat', () => saveHeartbeat(event))); $('aw-refresh-automations').addEventListener('click', () => void guarded('Automation', refreshAutomations)); $('aw-schedule-wake').addEventListener('click', () => void guarded('Wake', scheduleWake)); $('aw-cancel-wake').addEventListener('click', () => void guarded('Wake', cancelWake)); $('aw-refresh-inbox').addEventListener('click', () => void guarded('Inbox', refreshAutomations)); $('aw-clear-inbox').addEventListener('click', () => void guarded('Inbox', async () => { await nativeAgent().clearSurfacedMessages(); await refreshAutomations(); }));
   $('aw-skill-form').addEventListener('submit', (event) => void guarded('Skill', () => createSkill(event))); $('aw-refresh-skills').addEventListener('click', () => void guarded('Skills', refreshSkills));
   $('aw-memory-form').addEventListener('submit', (event) => void guarded('মেমোরি', () => storeMemory(event))); $('aw-memory-search-form').addEventListener('submit', (event) => void guarded('মেমোরি খোঁজা', () => searchMemory(event))); $('aw-refresh-memory').addEventListener('click', () => void guarded('মেমোরি', refreshMemory));
-  document.querySelectorAll('[data-aw-persona-file]').forEach((button) => button.addEventListener('click', () => { state.personaFile = button.dataset.awPersonaFile; document.querySelectorAll('[data-aw-persona-file]').forEach((node) => node.classList.toggle('active', node === button)); void guarded('Persona file', loadPersona); })); $('aw-load-persona').addEventListener('click', () => void guarded('Persona file', loadPersona)); $('aw-save-persona').addEventListener('click', () => void guarded('Persona save', savePersona)); $('aw-open-file-manager').addEventListener('click', () => document.querySelector('#agent-file-manager')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  document.querySelectorAll('[data-aw-persona-file]').forEach((button) => button.addEventListener('click', () => { state.personaFile = button.dataset.awPersonaFile; document.querySelectorAll('[data-aw-persona-file]').forEach((node) => node.classList.toggle('active', node === button)); void guarded('Persona file', loadPersona); })); $('aw-load-persona').addEventListener('click', () => void guarded('Persona file', loadPersona)); $('aw-save-persona').addEventListener('click', () => void guarded('Persona save', savePersona)); $('aw-open-file-manager').addEventListener('click', () => { document.querySelector('#aw-persona-files')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); document.querySelector('#aw-persona-files button')?.focus(); });
   $('aw-mcp-form').addEventListener('submit', (event) => void guarded('MCP', () => addMcp(event))); $('aw-reconnect-mcp').addEventListener('click', () => void guarded('MCP', connectAllMcp));
-  $('aw-load-settings').addEventListener('click', () => void guarded('Settings', refreshSettings)); $('aw-provider').addEventListener('change', () => { $('aw-model-label').textContent = $('aw-provider').value === 'auto' ? 'Auto provider' : $('aw-provider').value; void guarded('Key status', refreshSettings); }); $('aw-router-form').addEventListener('submit', (event) => void guarded('AI Router', () => saveRouter(event))); $('aw-router-check').addEventListener('click', () => void guarded('AI Router', checkRouterConfig)); $('aw-router-live-test').addEventListener('click', () => void guarded('AI Router live test', runLiveRouterTest)); $('aw-router-refresh').addEventListener('click', () => void guarded('AI Router', refreshSettings)); $('aw-refresh-models').addEventListener('click', () => void guarded('Model catalog', refreshModels)); $('aw-save-key').addEventListener('click', () => void guarded('API key', saveProviderKey)); $('aw-runtime-form').addEventListener('submit', (event) => void guarded('Runtime settings', () => saveRuntime(event))); $('aw-seed-tools').addEventListener('click', () => void guarded('Tool defaults', seedTools)); $('aw-refresh-tools').addEventListener('click', () => void guarded('Tools', refreshSettings));
+  $('aw-load-settings').addEventListener('click', () => void guarded('Settings', refreshSettings)); $('aw-provider').addEventListener('change', () => { $('aw-model-label').textContent = $('aw-provider').value === 'auto' ? 'Auto provider' : $('aw-provider').value; }); $('aw-key-provider').addEventListener('change', () => void guarded('Key status', refreshKeyStatus)); $('aw-router-form').addEventListener('submit', (event) => void guarded('AI Router', () => saveRouter(event))); $('aw-router-check').addEventListener('click', () => void guarded('AI Router', checkRouterConfig)); $('aw-router-live-test').addEventListener('click', () => void guarded('AI Router live test', runLiveRouterTest)); $('aw-router-refresh').addEventListener('click', () => void guarded('AI Router', refreshSettings)); $('aw-refresh-models').addEventListener('click', () => void guarded('Model catalog', refreshModels)); $('aw-save-key').addEventListener('click', () => void guarded('API key', saveProviderKey)); $('aw-runtime-form').addEventListener('submit', (event) => void guarded('Runtime settings', () => saveRuntime(event))); $('aw-seed-tools').addEventListener('click', () => void guarded('Tool defaults', seedTools)); $('aw-refresh-tools').addEventListener('click', () => void guarded('Tools', refreshSettings));
 }
 
 function start() {
   if (!$('agent-workspace')) return;
   bind();
-  if (!featureReady()) { status('Web preview-এ agent চলে না; Android/iOS build-এ ব্যবহার করুন।', 'warn'); $('aw-start').disabled = true; }
-  else if (globalThis.__nativeKitAgentInitialized) { state.initialized = true; void afterInitialize(); }
+  setComposerAvailability(false);
+  if (!featureReady()) {
+    status('Web preview-এ agent চলে না; Android/iOS build-এ ব্যবহার করুন।', 'warn');
+    $('aw-start').disabled = true;
+    return;
+  }
+  // Native initialization is automatic; the visible button remains a retry
+  // control if availability or initialization fails.
+  void initialize();
 }
 
 export { start as wireAgentWorkspace };

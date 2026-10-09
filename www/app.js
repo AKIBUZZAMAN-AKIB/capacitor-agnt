@@ -266,12 +266,8 @@ document.querySelectorAll('[data-action]').forEach((button) => {
   button.addEventListener('click', () => execute(button.dataset.action, actions[button.dataset.action], button));
 });
 
-// ── Owner-facing AI workspace + advanced diagnostic lab ─────────────────────
-// The workspace is the real-user chat/customization surface. The original Lab
-// remains available in a collapsed developer section for every native API test.
-import('./agent-workspace.js')
-  .then((mod) => mod.wireAgentWorkspace())
-  .catch((error) => log('agent-workspace load failed', error.message));
+// The owner-facing workspace is now the standalone agent.html page. Keep this
+// screen focused on native diagnostics; the collapsed Lab remains available here.
 import('./agent-lab.js')
   .then((mod) => mod.wireAgentButtons(execute))
   .catch((error) => log('agent-lab load failed', error.message));
