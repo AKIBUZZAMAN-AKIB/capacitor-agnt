@@ -124,7 +124,28 @@ Checkout → Node → Xcode 26 → npm ci → npm run check → ci:ios → SPM r
 
 ---
 
-## ৫. পরের ধাপ (ঐচ্ছিক)
+## ৫. পুশ-পরবর্তী লাইভ ফলাফল ✅
+
+`main`-এ পুশ করা কমিট `9eb745a`-এর তিনটি ওয়ার্কফ্লোই সবুজ:
+
+| রান | ওয়ার্কফ্লো | ফল |
+| --- | --- | --- |
+| [38089246661](https://github.com/AKIBUZZAMAN-AKIB/capacitor-agnt/actions/runs/38089246661) | Verify — Rust/TS/web/binding | **success** |
+| [38089246561](https://github.com/AKIBUZZAMAN-AKIB/capacitor-agnt/actions/runs/38089246561) | Android APK and AAB | **success** (APK/AAB আর্টিফ্যাক্ট 86MB) |
+| [38089246646](https://github.com/AKIBUZZAMAN-AKIB/capacitor-agnt/actions/runs/38089246646) | iOS validation and IPA | **success** (আগে লাল ছিল) |
+
+আর ঠিক যে সিনারিওতে আগে iOS লাল হতো — **tag push** — সেটাও এখন সবুজ:
+
+| রান | ওয়ার্কফ্লো | ফল |
+| --- | --- | --- |
+| [38089897900](https://github.com/AKIBUZZAMAN-AKIB/capacitor-agnt/actions/runs/38089897900) | iOS validation and IPA (`v1.4.13-ui-refresh`) | **success** — `Evaluate Apple signing availability` পাস, সাইনিং স্টেপগুলো পরিষ্কারভাবে skipped, unsigned Simulator build আপলোড হয়েছে |
+| [38089897876](https://github.com/AKIBUZZAMAN-AKIB/capacitor-agnt/actions/runs/38089897876) | Android APK and AAB (`v1.4.13-ui-refresh`) | **success** — GitHub Release-ও তৈরি হয়েছে |
+
+📦 রিলিজ: **[v1.4.13-ui-refresh](https://github.com/AKIBUZZAMAN-AKIB/capacitor-agnt/releases/tag/v1.4.13-ui-refresh)** — `app-release.apk` (50.8 MB, ephemeral test key), `app-debug.apk` (53.4 MB), `app-release.aab` (28.0 MB), `SHA256SUMS.txt`.
+
+সাইনিং সিক্রেট যোগ করার পর একই tag আবার দিলে সাইনড IPA বেরোবে — কোড বদলাতে হবে না।
+
+## ৬. পরের ধাপ (ঐচ্ছিক)
 
 1. অ্যাপল সিক্রেট যোগ করলে ট্যাগ push-এ সাইনড IPA স্বয়ংক্রিয়ভাবে উঠবে।
 2. `require_ipa=true` দিয়ে dispatch করলে রিলিজের আগে সাইনিং বাধ্যতামূলক করা যায়।

@@ -183,7 +183,7 @@ jobs:
             for name in "${missing[@]}"; do echo "- \`$name\`"; done
             echo
             echo "The unsigned Simulator build is uploaded as \`ios-simulator-build-$GITHUB_SHA\`."
-            echo "See \`docs/ci-fixes.bn.md\` → *iOS signing* for the exact list and how to add them."
+            echo "See \`docs/ci-and-ui-refresh.bn.md\` → section 2.1 for the exact list and how to add them."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "available=false" >> "$GITHUB_OUTPUT"
           echo "reason=secrets-missing" >> "$GITHUB_OUTPUT"
