@@ -134,16 +134,26 @@ function forgetActiveSession() {
 function redactLogText(value, max = 220) {
   return safeText(String(value ?? '')
     .replace(/(bearer\s+)[^\s,;]+/ig, '$1[redacted]')
-    .replace(/((?:api[_ -]?key|token|secret|password)\s*[:=]\s*)[^\s,;]+/ig, '$1[redacted]'), max);
+    .replace(/((?:api[_ -]?key|token|secret|password)\s*[:=]\s*)[^\s,;]+/ig, '$1[redacted]')
+    // Provider key shapes (sk-or-…, gsk_…, hf_…) even when no label precedes them.
+    .replace(/\b(?:sk|pk|rk|gsk|xai|or|hf)[-_][A-Za-z0-9_-]{12,}/g, '[redacted]'), max);
 }
 
+// Credentials are always withheld by key name. Conversation/file bodies are
+// withheld by size only. Everything else (error, reason, message, output,
+// result, summary …) is kept, with secret VALUES masked by redactLogText. The
+// old blanket key rule hid the very error phrase the log exists to show, and
+// it also hid `sessionKey` (it contains "key"), which broke stream grouping.
+const LOG_SECRET_KEY = /(?:api[_-]?key|secret|password|authorization|cookie|^token$|[_-]token$)/i;
+const LOG_BODY_KEY = /^(?:prompt|systemPrompt|system|content|body|fileContent|file_content|instructions?|request|command|description)$/i;
+
 function safeLogValue(value, key = '', depth = 0) {
-  const sensitive = /(?:key|token|secret|password|authorization|cookie|prompt|content|command|message|text|file.?content|body|description|instruction|system|raw|request|response|output|result|error|reason)/i;
-  if (sensitive.test(key) && !(typeof value === 'boolean' || typeof value === 'number' || value == null)) {
+  if (value == null || typeof value === 'boolean' || typeof value === 'number') return value;
+  if (LOG_SECRET_KEY.test(key)) return '[redacted]';
+  if (LOG_BODY_KEY.test(key)) {
     if (typeof value === 'string') return `[redacted · ${bytes(value)} bytes]`;
     return '[redacted]';
   }
-  if (value == null || typeof value === 'boolean' || typeof value === 'number') return value;
   if (typeof value === 'string') return redactLogText(value, 260);
   if (depth >= 3) return Array.isArray(value) ? `[${value.length} items]` : '[object]';
   if (Array.isArray(value)) return value.slice(0, 20).map((entry) => safeLogValue(entry, '', depth + 1));
@@ -167,7 +177,10 @@ function eventSummary(type, payload = {}) {
   const tool = payload?.toolName ?? payload?.tool_name;
   const error = payload?.error ?? payload?.message ?? payload?.reason;
   const session = payload?.sessionKey ?? payload?.session_key;
-  if (error) return `error category: ${classifyAgentError(error).code}`;
+  if (error) {
+    const diagnosis = classifyAgentError(error, payload?.errorCategory);
+    return `error category: ${diagnosis.code} · ${diagnosis.detail}`;
+  }
   if (tool) return `${tool}${session ? ` · ${session}` : ''}`;
   if (provider) return `${provider}${model ? ` / ${model}` : ''}${session ? ` · ${session}` : ''}`;
   if (session) return session;
@@ -297,20 +310,53 @@ function appendThinking(payload = {}) {
   if (meta) meta.textContent = `${state.thinking.chunks}টি update · ${state.thinking.characters} characters`;
 }
 
-function classifyAgentError(error) {
+// Advice shown to the user, keyed by the category the native side reports.
+const AGENT_ERROR_ADVICE = Object.freeze({
+  cancelled: 'কাজটি বন্ধ করা হয়েছে।',
+  auth: 'Provider-এর API key বা অনুমতি ঠিক নেই। Settings থেকে key যাচাই করুন।',
+  rate_limit: 'Provider-এর rate limit/কোটা শেষ হয়েছে। একটু পরে আবার চেষ্টা করুন বা অন্য route নিন।',
+  overloaded: 'Provider এখন ব্যস্ত (overloaded)। একটু পরে আবার চেষ্টা করুন বা অন্য route নিন।',
+  context_limit: 'এই conversation-এর context limit ছুঁয়েছে। নতুন chat নিন বা আগের অংশ সংক্ষেপ করুন।',
+  stream_protocol: 'Provider-এর streaming data অসম্পূর্ণ বা ভুল ছিল; উত্তরটির অংশ বাদ পড়তে পারে। আবার চেষ্টা করুন।',
+  timeout: 'Provider সময়মতো উত্তর দেয়নি। নেটওয়ার্ক বা provider retry করুন।',
+  network: 'নেটওয়ার্ক বা provider connection পাওয়া যায়নি। সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।',
+  tool: 'Agent tool কাজটি সম্পন্ন করতে পারেনি। নিচের log থেকে tool ও অনুমতি দেখুন।',
+  config: 'Provider route বা configuration পাওয়া যায়নি। Settings-এ provider ও model যাচাই করুন।',
+  provider_error: 'Provider বা agent-এর একটি সমস্যা হয়েছে। নিচের log-এর error category দেখুন।',
+  internal: 'Agent-এর ভেতরের একটি সমস্যা হয়েছে। নিচের log-এর বার্তা দেখুন।',
+});
+
+// Fallback for errors that arrive without a native category (older builds, or
+// text that did not come from the Rust taxonomy). Patterns mirror
+// error_taxonomy.rs and are ordered the same way: first match wins. They are
+// deliberately specific; a bare word like "context" or "parse" is not enough.
+const AGENT_ERROR_PATTERNS = Object.freeze([
+  ['cancelled', /\bcancell?ed\b|\babort(?:ed)?\b/i],
+  ['rate_limit', /rate limited|too many requests|\brate[ _-]?limit|quota (?:exceeded|exhausted)|\bAPI error \(429\)/i],
+  ['overloaded', /model overloaded|\bAPI error \((?:503|529)\)|\boverloaded\b/i],
+  ['auth', /\bAPI error \((?:401|403)\)|\bunauthori[sz]ed\b|\bforbidden\b|missing api key|invalid[ _-]*api[ _-]*key|authentication (?:failed|error)/i],
+  ['context_limit', /context (?:window|length)|maximum context|too many tokens|prompt is too long|input (?:is )?too (?:large|long)|max(?:imum)?[ _-]+(?:input[ _-]+)?tokens/i],
+  ['stream_protocol', /\bParse error\b|invalid json in provider sse|\bmalformed\b.*\b(?:sse|stream|frame|json)\b|\bstream (?:ended|error)\b|\bSSE\b/i],
+  ['timeout', /timed? ?out|deadline exceeded/i],
+  ['network', /Network connection error|connection (?:refused|reset|closed)|\bdns\b|\bsocket\b|fetch failed|\bHTTP error\b/i],
+  ['config', /no provider|unknown provider|provider .{0,40}not (?:found|configured)|no route/i],
+  ['tool', /tool .{0,40}(?:failed|error)|permission denied|approval (?:denied|required)/i],
+]);
+
+// `reportedCategory` is the typed `errorCategory` from the native event. When it
+// is a known code it wins over any text matching; the text is only a fallback.
+function classifyAgentError(error, reportedCategory = '') {
   const raw = String(error?.message ?? error ?? '').trim();
-  const rules = [
-    ['cancelled', /\b(?:cancel(?:led|ed)?|abort(?:ed)?)\b/i, 'কাজটি বন্ধ করা হয়েছে।'],
-    ['auth', /\b(?:401|403)\b|unauthori[sz]ed|invalid[\s_-]*(?:api[\s_-]*key|token|credential)|authentication/i, 'Provider-এর API key বা অনুমতি ঠিক নেই। Settings থেকে key যাচাই করুন।'],
-    ['rate_limit', /\b429\b|rate[\s_-]*limit|too many requests|quota(?:\s+exceeded)?/i, 'Provider-এর rate limit/কোটা শেষ হয়েছে। একটু পরে আবার চেষ্টা করুন বা অন্য route নিন।'],
-    ['context_limit', /context(?:\s+window|\s+length)?|too many tokens?|max(?:imum)?[\s_-]*(?:token|context)|input.*(?:too large|length)/i, 'এই conversation-এর context limit ছুঁয়েছে। নতুন chat নিন বা আগের অংশ সংক্ষেপ করুন।'],
-    ['stream_protocol', /(?:invalid|malformed|incomplete|unexpected).*(?:sse|stream|json)|(?:sse|stream).*(?:invalid|malformed|incomplete)|\bparse\b/i, 'Provider-এর streaming data অসম্পূর্ণ বা ভুল ছিল; উত্তরটির অংশ বাদ পড়তে পারে। আবার চেষ্টা করুন।'],
-    ['timeout', /timed?\s*out|timeout|deadline exceeded/i, 'Provider সময়মতো উত্তর দেয়নি। নেটওয়ার্ক বা provider retry করুন।'],
-    ['network', /network|dns|connection|socket|transport|fetch failed|connect(?:ion)? refused/i, 'নেটওয়ার্ক বা provider connection পাওয়া যায়নি। সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।'],
-    ['tool', /tool.*(?:failed|error)|approval|permission denied/i, 'Agent tool কাজটি সম্পন্ন করতে পারেনি। নিচের log থেকে tool ও অনুমতি দেখুন।'],
-  ];
-  const matched = rules.find(([, matcher]) => matcher.test(raw));
-  return { code: matched?.[0] ?? 'provider_error', message: matched?.[2] ?? 'Provider বা agent-এর একটি সমস্যা হয়েছে। নিচের log-এর error category দেখুন।' };
+  const known = Object.prototype.hasOwnProperty.call(AGENT_ERROR_ADVICE, reportedCategory);
+  const code = known
+    ? reportedCategory
+    : (AGENT_ERROR_PATTERNS.find(([, pattern]) => pattern.test(raw))?.[0] ?? 'provider_error');
+  return {
+    code,
+    message: AGENT_ERROR_ADVICE[code],
+    // The original phrase, redacted and capped, so the user sees what the provider said.
+    detail: redactLogText(raw, 300) || 'বার্তা পাওয়া যায়নি',
+  };
 }
 
 function clearEventLog() {
@@ -668,13 +714,13 @@ async function wireEvents() {
     if (type === 'agent.error' || type === 'agent.background_timeout') {
       const isForeground = !payload?.sessionKey || payload.sessionKey === state.sessionKey;
       const message = payload?.error ?? payload?.message ?? (type === 'agent.background_timeout' ? 'Background সময়সীমা শেষ' : 'Agent error');
-      const diagnosis = classifyAgentError(message);
+      const diagnosis = classifyAgentError(message, payload?.errorCategory);
       if (!isForeground) { appendActivity(`Background সমস্যা · ${diagnosis.code}`, 'warn'); void refreshSessions(); return; }
-      if (!state.currentAssistant?.textContent) state.currentAssistant = makeMessage('assistant', `⚠ ${diagnosis.message}`);
+      if (!state.currentAssistant?.textContent) state.currentAssistant = makeMessage('assistant', `⚠ ${diagnosis.message}\n${diagnosis.detail}`);
       state.currentAssistant?.removeAttribute('data-pending'); state.currentAssistant = null;
       persistEventLog();
       state.streamLogEntryId = null;
-      setRunning(false, `সমস্যা: ${diagnosis.code}`); toast(diagnosis.message, 'err'); return;
+      setRunning(false, `সমস্যা: ${diagnosis.code}`); toast(`${diagnosis.message} (${diagnosis.detail})`, 'err'); return;
     }
     if (/^(cron\.|heartbeat\.|wake\.)/.test(type ?? '')) { appendActivity(`${type}: ${safeText(payload?.summary ?? payload?.error ?? 'update')}`, type.includes('error') ? 'warn' : ''); void refreshAutomations(); }
   });
@@ -705,7 +751,7 @@ async function sendMessage(event) {
       // tool calls/results, not merely the display text shown in the DOM.
       await nativeAgent().resumeSession({ sessionKey: state.sessionKey, agentId: 'main' });
       recordEventLog('session.resumed_for_follow_up', { sessionKey: state.sessionKey });
-      await nativeAgent().followUp({ prompt });
+      await nativeAgent().followUp(prompt);
     } else {
       const options = { prompt, sessionKey: state.sessionKey, provider, ...(model ? { model } : {}), ...(systemPrompt ? { systemPrompt } : {}) };
       await nativeAgent().sendMessage(options);

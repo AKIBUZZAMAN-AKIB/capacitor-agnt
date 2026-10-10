@@ -101,7 +101,8 @@ describe('owner-facing AI Workspace', () => {
     expect(agent).toContain('./agent-workspace-icons.css');
     expect(agent).toContain('aw-icon-sprite');
     expect(ui).toContain('sessionReady: false');
-    expect(ui).toContain('await nativeAgent().followUp({ prompt });');
+    expect(ui).toContain('await nativeAgent().followUp(prompt);');
+    expect(ui).not.toContain('followUp({ prompt })');
     expect(ui).toContain("await nativeAgent().resumeSession({ sessionKey: state.sessionKey, agentId: 'main' });");
     expect(ui).toContain("await nativeAgent().resumeSession({ sessionKey, agentId: 'main' });");
     expect(ui).toContain('async function openHistory()');
@@ -123,7 +124,7 @@ describe('owner-facing AI Workspace', () => {
     const lab = read('www/agent-lab.js');
     expect(lab).toContain('sessionReady: false');
     expect(lab).toContain("await window.NativeKit.agent.resumeSession({ sessionKey: state.sessionKey, agentId: 'main' });");
-    expect(lab).toContain('res = await window.NativeKit.agent.followUp({ prompt });');
+    expect(lab).toContain('res = await window.NativeKit.agent.followUp(prompt);');
   });
 
   it('renders a redacted, persistent and complete runtime audit log below the composer', () => {
@@ -146,9 +147,9 @@ describe('owner-facing AI Workspace', () => {
     expect(ui).toContain("type === 'thinking' || type === 'thinking_delta' || type === 'reasoning_delta'");
     expect(ui).toContain('function appendThinking(');
     expect(ui).toContain('function classifyAgentError(');
-    expect(ui).toContain("['rate_limit', /\\b429\\b|rate[\\s_-]*limit");
-    expect(ui).toContain("['stream_protocol', /(?:invalid|malformed|incomplete|unexpected)");
-    expect(ui).toContain('error category: ${classifyAgentError(error).code}');
+    expect(ui).toContain("['rate_limit', /rate limited|too many requests|\\brate[ _-]?limit");
+    expect(ui).toContain("['stream_protocol', /\\bParse error\\b");
+    expect(ui).toContain('error category: ${diagnosis.code} · ${diagnosis.detail}');
   });
 
   it('removes decorative startup chrome and keeps touch scrolling owned by the active view', () => {

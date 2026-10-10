@@ -1356,7 +1356,7 @@ const agentActions = {
       // follow-up. This also protects the Lab from a background skill changing
       // the native handle in between two user messages.
       await window.NativeKit.agent.resumeSession({ sessionKey: state.sessionKey, agentId: 'main' });
-      res = await window.NativeKit.agent.followUp({ prompt });
+      res = await window.NativeKit.agent.followUp(prompt);
     } else {
       res = await window.NativeKit.agent.sendMessage({
         prompt,

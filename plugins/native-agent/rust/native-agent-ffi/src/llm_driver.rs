@@ -962,87 +962,21 @@ impl LlmDriver for OpenAiDriver {
         let mut stream = resp.bytes_stream();
         // Raw bytes: a chunk may end mid-character (see find_frame_end_bytes).
         let mut buf: Vec<u8> = Vec::new();
-        let mut text = String::new();
-        // Tool-call argument strings arrive in deltas and must be validated only
-        // after the complete JSON object has arrived.
-        let mut partial_calls: std::collections::BTreeMap<u64, OpenAiCallAccum> =
-            std::collections::BTreeMap::new();
-        let mut finish_reason: Option<String> = None;
-        let mut usage = TokenUsage {
-            input_tokens: 0,
-            output_tokens: 0,
-            total_tokens: 0,
-        };
+        let mut state = OpenAiStreamState::default();
 
         while let Some(chunk) = stream.next().await {
             let bytes = chunk.map_err(map_transport_error)?;
             buf.extend_from_slice(&bytes);
 
             while let Some((pos, sep_len)) = find_frame_end_bytes(&buf) {
-                // Whole frames end on a character boundary — safe to decode.
-                let frame = String::from_utf8_lossy(&buf[..pos]).into_owned();
-                buf.drain(..pos + sep_len);
-
-                for line in frame.lines() {
-                    let line = line.strip_suffix('\r').unwrap_or(line);
-                    let Some(rest) = line.strip_prefix("data:") else {
-                        continue;
-                    };
-                    let data = rest.strip_prefix(' ').unwrap_or(rest);
-                    if data == "[DONE]" {
-                        continue;
-                    }
-                    let Ok(json) = serde_json::from_str::<serde_json::Value>(data) else {
-                        continue;
-                    };
-
-                    if let Some(u) = json.get("usage").filter(|u| !u.is_null()) {
-                        usage = Self::usage_from(u);
-                    }
-
-                    // With `stream_options.include_usage` the final chunk
-                    // carries usage and an EMPTY `choices` array. Indexing
-                    // `[0]` on it yields Null, so guard explicitly instead of
-                    // reading fields off a non-existent choice.
-                    let Some(choice) = json["choices"].get(0).filter(|c| !c.is_null())
-                    else {
-                        continue;
-                    };
-                    if let Some(reason) = choice["finish_reason"].as_str() {
-                        finish_reason = Some(reason.to_string());
-                    }
-                    let delta = &choice["delta"];
-
-                    if let Some(piece) = delta["content"].as_str() {
-                        if !piece.is_empty() {
-                            text.push_str(piece);
-                            on_event(StreamEvent::TextDelta(piece.to_string()));
-                        }
-                    }
-
-                    if let Some(calls) = delta["tool_calls"].as_array() {
-                        for call in calls {
-                            let index = call["index"].as_u64().unwrap_or(0);
-                            let entry = partial_calls.entry(index).or_default();
-                            if let Some(id) = call["id"].as_str() {
-                                if !id.is_empty() { entry.id = id.to_string(); }
-                            }
-                            // Only the first delta normally carries the name/id;
-                            // some gateways split those metadata fields across
-                            // adjacent events, so announce only when both exist.
-                            if let Some(name) = call["function"]["name"].as_str() {
-                                if !name.is_empty() && entry.name.is_empty() { entry.name = name.to_string(); }
-                            }
-                            if let Some(args) = call["function"]["arguments"].as_str() {
-                                entry.arguments.push_str(args);
-                                entry.has_arguments = true;
-                            }
-                            if !entry.start_emitted && !entry.id.is_empty() && !entry.name.is_empty() {
-                                on_event(StreamEvent::ToolUseStart { id: entry.id.clone(), name: entry.name.clone() });
-                                entry.start_emitted = true;
-                            }
-                        }
-                    }
+                let frame_bytes: Vec<u8> = buf.drain(..pos + sep_len).collect();
+                // Strict decode of a complete frame: lossy replacement would
+                // silently turn a broken character into U+FFFD in the answer.
+                let frame = std::str::from_utf8(&frame_bytes[..pos]).map_err(|error| {
+                    LlmError::Parse(format!("provider SSE frame is not valid UTF-8: {error}"))
+                })?;
+                if let Some(json) = parse_sse_data_frame(frame)? {
+                    state.apply_chunk(&json, on_event)?;
                 }
             }
 
@@ -1054,6 +988,19 @@ impl LlmDriver for OpenAiDriver {
             }
         }
 
+        // Some gateways close the connection right after the last `data:` line
+        // without the blank separator. Dispatch that final frame rather than
+        // losing its text. A truncated JSON body still fails loudly as Parse.
+        if buf.iter().any(|byte| !byte.is_ascii_whitespace()) {
+            let frame = std::str::from_utf8(&buf).map_err(|error| {
+                LlmError::Parse(format!("provider SSE tail is not valid UTF-8: {error}"))
+            })?;
+            if let Some(json) = parse_sse_data_frame(frame)? {
+                state.apply_chunk(&json, on_event)?;
+            }
+        }
+
+        let OpenAiStreamState { text, partial_calls, finish_reason, usage } = state;
         let mut tool_calls = Vec::new();
         for (_, partial) in partial_calls {
             if partial.id.is_empty() || partial.name.is_empty() || !partial.has_arguments {
@@ -1078,6 +1025,158 @@ impl LlmDriver for OpenAiDriver {
         let response = Self::build_response(text, tool_calls, finish_reason.as_deref(), usage);
         on_event(StreamEvent::MessageDone(response.clone()));
         Ok(response)
+    }
+}
+
+/// Parses one complete SSE event for OpenAI-compatible streams.
+///
+/// Per the SSE spec every `data:` line of an event is joined with `\n` before
+/// the JSON is read, so a payload folded over several lines is one value.
+/// `[DONE]` and events without data yield `None`. Invalid JSON is an error:
+/// dropping it silently is how a stream lost phrases without any signal.
+pub(crate) fn parse_sse_data_frame(frame: &str) -> Result<Option<serde_json::Value>, LlmError> {
+    let mut data_lines: Vec<&str> = Vec::new();
+    for raw in frame.lines() {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if let Some(rest) = line.strip_prefix("data:") {
+            data_lines.push(rest.strip_prefix(' ').unwrap_or(rest));
+        }
+    }
+    if data_lines.is_empty() {
+        return Ok(None);
+    }
+    let data = data_lines.join("\n");
+    if data.trim() == "[DONE]" {
+        return Ok(None);
+    }
+    serde_json::from_str::<serde_json::Value>(&data)
+        .map(Some)
+        .map_err(|error| LlmError::Parse(format!(
+            "invalid JSON in provider SSE event ({error}); excerpt: {}",
+            safe_excerpt(&data, 160)
+        )))
+}
+
+/// Text pieces of one `delta.content` value. Gateways send either a plain
+/// string or an array of `{ "type": "text", "text": ... }` parts.
+fn openai_content_text(content: &serde_json::Value) -> Option<String> {
+    match content {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Array(parts) => {
+            let joined: String = parts
+                .iter()
+                .filter(|part| part["type"].as_str().map_or(true, |kind| kind == "text"))
+                .filter_map(|part| part["text"].as_str())
+                .collect();
+            Some(joined)
+        }
+        _ => None,
+    }
+}
+
+/// Reasoning text carried by one OpenAI-compatible delta. OpenRouter sends the
+/// same reasoning both as `reasoning` and inside `reasoning_details`, so the
+/// structured list wins when present and the flat string is only a fallback.
+fn openai_reasoning_text(delta: &serde_json::Value) -> Option<String> {
+    let from_details: String = delta["reasoning_details"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item["text"].as_str().or_else(|| item["summary"].as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !from_details.is_empty() {
+        return Some(from_details);
+    }
+    ["reasoning_content", "reasoning"]
+        .iter()
+        .find_map(|key| delta[*key].as_str().filter(|text| !text.is_empty()).map(str::to_string))
+}
+
+/// Mutable state of one OpenAI-compatible stream, updated per SSE event.
+#[derive(Default)]
+struct OpenAiStreamState {
+    text: String,
+    partial_calls: std::collections::BTreeMap<u64, OpenAiCallAccum>,
+    finish_reason: Option<String>,
+    usage: TokenUsage,
+}
+
+impl OpenAiStreamState {
+    fn apply_chunk(
+        &mut self,
+        json: &serde_json::Value,
+        on_event: &(dyn Fn(StreamEvent) + Send + Sync),
+    ) -> Result<(), LlmError> {
+        // An in-band error object (HTTP 200 followed by `{"error": ...}`) means
+        // the answer is incomplete. Treat it as a failed turn, never as text.
+        if let Some(error) = json.get("error").filter(|error| !error.is_null()) {
+            let status = error["code"]
+                .as_u64()
+                .or_else(|| error["code"].as_str().and_then(|code| code.parse().ok()))
+                .unwrap_or(502) as u16;
+            let message = error["message"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| error.to_string());
+            let message = safe_excerpt(&message, 400).to_string();
+            return Err(match status {
+                429 => LlmError::RateLimited { retry_after_ms: 5_000 },
+                503 | 529 => LlmError::Overloaded { retry_after_ms: 5_000 },
+                other => LlmError::Api { status: other, message },
+            });
+        }
+
+        if let Some(u) = json.get("usage").filter(|u| !u.is_null()) {
+            self.usage = OpenAiDriver::usage_from(u);
+        }
+
+        // With `stream_options.include_usage` the final chunk carries usage and
+        // an EMPTY `choices` array; indexing `[0]` on it yields Null.
+        let Some(choice) = json["choices"].get(0).filter(|c| !c.is_null()) else {
+            return Ok(());
+        };
+        if let Some(reason) = choice["finish_reason"].as_str() {
+            self.finish_reason = Some(reason.to_string());
+        }
+        let delta = &choice["delta"];
+
+        if let Some(reasoning) = openai_reasoning_text(delta) {
+            on_event(StreamEvent::ThinkingDelta(reasoning));
+        }
+
+        if let Some(piece) = openai_content_text(&delta["content"]) {
+            if !piece.is_empty() {
+                self.text.push_str(&piece);
+                on_event(StreamEvent::TextDelta(piece));
+            }
+        }
+
+        if let Some(calls) = delta["tool_calls"].as_array() {
+            for call in calls {
+                let index = call["index"].as_u64().unwrap_or(0);
+                let entry = self.partial_calls.entry(index).or_default();
+                if let Some(id) = call["id"].as_str() {
+                    if !id.is_empty() { entry.id = id.to_string(); }
+                }
+                // Only the first delta normally carries the name/id; some gateways
+                // split those fields across events, so announce only when both exist.
+                if let Some(name) = call["function"]["name"].as_str() {
+                    if !name.is_empty() && entry.name.is_empty() { entry.name = name.to_string(); }
+                }
+                if let Some(args) = call["function"]["arguments"].as_str() {
+                    entry.arguments.push_str(args);
+                    entry.has_arguments = true;
+                }
+                if !entry.start_emitted && !entry.id.is_empty() && !entry.name.is_empty() {
+                    on_event(StreamEvent::ToolUseStart { id: entry.id.clone(), name: entry.name.clone() });
+                    entry.start_emitted = true;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1981,5 +2080,135 @@ mod retry_classification_tests {
         assert!(!LlmError::Api { status: 401, message: "bad key".into() }.is_retryable());
         assert!(!LlmError::Api { status: 400, message: "invalid request".into() }.is_retryable());
         assert!(!LlmError::Parse("invalid wire format".into()).is_retryable());
+    }
+}
+
+/// Audit regression tests for the OpenAI-compatible SSE path that the default
+/// free routes (`kilo`, `openrouter`) use. Each test drives `OpenAiDriver::stream`
+/// against a real local HTTP server so the wire behaviour, not a helper, is what
+/// is verified.
+#[cfg(test)]
+mod openai_sse_audit_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn req() -> CompletionRequest {
+        CompletionRequest {
+            model: "kilo-auto/free".to_string(),
+            messages: vec![Message::user("hi")],
+            system: None,
+            tools: vec![],
+            max_tokens: 256,
+            temperature: 0.0,
+        }
+    }
+
+    /// Serves one streaming response with the given raw SSE body, then closes.
+    async fn serve_sse(body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 2048];
+            loop {
+                let count = socket.read(&mut chunk).await.unwrap();
+                if count == 0 { break; }
+                request.extend_from_slice(&chunk[..count]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(header_end) = text.find("\r\n\r\n") {
+                    let content_length = text[..header_end]
+                        .lines()
+                        .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:")
+                            .and_then(|value| value.trim().parse::<usize>().ok()))
+                        .unwrap_or(0);
+                    if request.len() >= header_end + 4 + content_length { break; }
+                }
+            }
+            let wire = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{body}"
+            );
+            socket.write_all(wire.as_bytes()).await.unwrap();
+            socket.shutdown().await.ok();
+        });
+        format!("http://{address}/v1")
+    }
+
+    async fn run(body: &'static str) -> (Result<CompletionResponse, LlmError>, Vec<StreamEvent>) {
+        let base = serve_sse(body).await;
+        let driver = OpenAiDriver::with_compat_options("0000000000".into(), Some(base), false, false)
+            .with_streaming_support(true);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let on_event = move |event: StreamEvent| sink.lock().unwrap().push(event);
+        let result = driver.stream(&req(), &on_event).await;
+        let events = events.lock().unwrap().clone();
+        (result, events)
+    }
+
+    #[tokio::test]
+    async fn multi_line_data_frame_is_joined_before_parsing() {
+        // One SSE event whose JSON is folded over two `data:` lines. Per the SSE
+        // spec the lines are joined with \n before parsing; per-line parsing drops it.
+        let (result, _) = run(
+            "data: {\"choices\":[{\"delta\":\n\
+             data: {\"content\":\"আমি বাংলায় কথা বলি\"}}]}\n\n\
+             data: [DONE]\n\n",
+        ).await;
+        assert_eq!(result.expect("stream must succeed").text(), "আমি বাংলায় কথা বলি");
+    }
+
+    #[tokio::test]
+    async fn mid_stream_error_frame_is_an_error_not_an_empty_answer() {
+        // OpenRouter-style: HTTP 200, then an in-band error object mid-stream.
+        let (result, _) = run(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"আংশিক\"}}]}\n\n\
+             data: {\"error\":{\"message\":\"Provider returned error\",\"code\":503}}\n\n\
+             data: [DONE]\n\n",
+        ).await;
+        assert!(result.is_err(), "an in-band error frame must fail the turn, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn malformed_json_frame_fails_loudly_instead_of_being_dropped() {
+        let (result, _) = run(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"হ্যাঁ\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"content\":\"broken\n\n",
+        ).await;
+        assert!(matches!(result, Err(LlmError::Parse(_))), "got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn final_frame_without_trailing_separator_is_not_lost() {
+        let (result, _) = run(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"শেষ বাক্য\"}}]}",
+        ).await;
+        assert_eq!(result.expect("stream must succeed").text(), "শেষ বাক্য");
+    }
+
+    #[tokio::test]
+    async fn reasoning_fields_are_emitted_as_thinking_and_kept_out_of_the_answer() {
+        let (result, events) = run(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"প্রথমে ভাবছি\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"reasoning\":\" তারপর উত্তর\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"content\":\"উত্তর\"}}]}\n\n\
+             data: [DONE]\n\n",
+        ).await;
+        let response = result.expect("stream must succeed");
+        assert_eq!(response.text(), "উত্তর", "reasoning must never leak into the final answer");
+        let thinking: String = events.iter().filter_map(|e| match e {
+            StreamEvent::ThinkingDelta(t) => Some(t.as_str()), _ => None,
+        }).collect();
+        assert_eq!(thinking, "প্রথমে ভাবছি তারপর উত্তর");
+    }
+
+    #[tokio::test]
+    async fn content_as_array_of_text_parts_is_not_dropped() {
+        let (result, _) = run(
+            "data: {\"choices\":[{\"delta\":{\"content\":[{\"type\":\"text\",\"text\":\"অংশ এক \"},{\"type\":\"text\",\"text\":\"অংশ দুই\"}]}}]}\n\n\
+             data: [DONE]\n\n",
+        ).await;
+        assert_eq!(result.expect("stream must succeed").text(), "অংশ এক অংশ দুই");
     }
 }

@@ -8,6 +8,7 @@ pub mod agent_loop;
 pub mod auth;
 pub mod config_store;
 pub mod db;
+pub mod error_taxonomy;
 pub mod event_bus;
 pub mod llm_driver;
 pub mod provider_catalog;
@@ -300,6 +301,13 @@ pub struct NativeAgentHandle {
     turn_in_flight: Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// Stored transcript for `session_key`; empty for a chat that has no turns yet.
+/// Kept outside the exported impl block: UniFFI would otherwise try to export it.
+fn stored_history(db_path: &str, session_key: &str) -> Result<Vec<types::Message>, NativeAgentError> {
+    let conn = db::open_db(db_path)?;
+    db::load_session_messages_raw(&conn, session_key)
+}
+
 #[uniffi::export]
 impl NativeAgentHandle {
     /// Create a new native agent handle.
@@ -361,11 +369,15 @@ impl NativeAgentHandle {
         params: types::SendMessageParams,
     ) -> Result<String, NativeAgentError> {
         self.reset_abort_flag(&self.abort_flag);
-        // Parse prior messages if provided (for skill follow-ups with history)
-        let prior_messages: Option<Vec<types::Message>> = params
-            .prior_messages_json
-            .as_deref()
-            .and_then(|json| serde_json::from_str(json).ok());
+        // An explicit transcript (skill follow-ups) is authoritative. Without one,
+        // a session key that already has stored turns must CONTINUE that
+        // transcript: the turn's snapshot is written back over the same key, so
+        // starting from an empty history would silently delete the conversation
+        // and the model would not see any earlier message.
+        let prior_messages: Option<Vec<types::Message>> = match params.prior_messages_json.as_deref() {
+            Some(json) => Some(serde_json::from_str(json)?),
+            None => Some(stored_history(&self.config.db_path, &params.session_key)?),
+        };
         let params = self.prepare_params(params)?;
         let session_state = self.session_state_from_params(
             &params,
@@ -377,6 +389,13 @@ impl NativeAgentHandle {
     /// Follow up on the current conversation.
     pub fn follow_up(&self, prompt: String) -> Result<(), NativeAgentError> {
         self.reset_abort_flag(&self.abort_flag);
+        // An empty follow-up would run a model turn with no new user message,
+        // so the model simply repeats its previous answer. Reject it up front.
+        if prompt.trim().is_empty() {
+            return Err(NativeAgentError::Agent {
+                msg: "follow-up prompt is empty".to_string(),
+            });
+        }
 
         let session = self
             .runtime
@@ -1041,11 +1060,14 @@ impl NativeAgentHandle {
                     }
 
                     if let Some(cb) = &callback {
+                        let report = error_taxonomy::report(&e);
                         let payload = serde_json::json!({
                             "runId": run_id_for_task,
                             "skillId": skill_id_for_task,
                             "sessionKey": params_for_task.session_key,
-                            "error": format!("{}", e),
+                            "error": report.message,
+                            "errorCategory": report.category.code(),
+                            "errorMessage": report.message,
                         });
                         cb.on_event("agent.error".into(), payload.to_string());
                     }
@@ -1484,9 +1506,12 @@ impl NativeAgentHandle {
                     }
 
                     if let Some(cb) = &callback {
+                        let report = error_taxonomy::report(&e);
                         let payload = serde_json::json!({
                             "runId": run_id_for_task,
-                            "error": e.to_string(),
+                            "error": report.message,
+                            "errorCategory": report.category.code(),
+                            "errorMessage": report.message,
                         });
                         cb.on_event("agent.error".into(), payload.to_string());
                     }
@@ -1721,5 +1746,221 @@ mod mcp_result_tests {
         let raw = r#"{"content":[{"type":"future_kind","payload":{"a":1}}]}"#;
         let (text, _) = normalize_mcp_result(raw, false);
         assert!(text.contains("future_kind"), "got: {text}");
+    }
+}
+
+/// End-to-end session-continuity tests.
+///
+/// These drive the real `NativeAgentHandle` (SQLite, workspace, route planning,
+/// agent loop, SSE driver) against a local OpenAI-compatible mock provider, and
+/// inspect the exact request body each turn sends. That is the only way to prove
+/// that "the agent remembers the previous message" holds on the wire.
+#[cfg(test)]
+mod session_continuity_e2e_tests {
+    use super::*;
+    use std::sync::mpsc as std_mpsc;
+    use std::time::Duration;
+
+    struct Capture(std_mpsc::Sender<(String, String)>);
+
+    impl NativeEventCallback for Capture {
+        fn on_event(&self, event_type: String, payload_json: String) {
+            let _ = self.0.send((event_type, payload_json));
+        }
+    }
+
+    /// Fresh app-sized sandbox: its own DB, workspace and auth file.
+    fn sandbox(name: &str) -> types::InitConfig {
+        let root = std::env::temp_dir().join(format!("na-e2e-{name}-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        types::InitConfig {
+            db_path: root.join("agent.db").display().to_string(),
+            workspace_path: workspace.display().to_string(),
+            auth_profiles_path: root.join("auth-profiles.json").display().to_string(),
+        }
+    }
+
+    /// Mock OpenAI-compatible provider. Every request body is sent to the
+    /// returned receiver; streaming requests get an SSE answer, others JSON.
+    fn spawn_mock_provider() -> (String, std_mpsc::Receiver<serde_json::Value>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (tx, rx) = std_mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut raw: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let body = loop {
+                    let count = match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break None,
+                        Ok(count) => count,
+                    };
+                    raw.extend_from_slice(&chunk[..count]);
+                    if let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&raw[..end]).to_string();
+                        let length = headers
+                            .lines()
+                            .find_map(|line| line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|v| v.trim().parse::<usize>().ok()))
+                            .unwrap_or(0);
+                        if raw.len() >= end + 4 + length {
+                            break serde_json::from_slice::<serde_json::Value>(&raw[end + 4..end + 4 + length]).ok();
+                        }
+                    }
+                };
+                let Some(body) = body else { continue };
+                let streaming = body["stream"] == serde_json::Value::Bool(true);
+                let _ = tx.send(body);
+                let usage = r#""usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}"#;
+                let (content_type, payload) = if streaming {
+                    ("text/event-stream", format!(
+                        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"ok\"}}}}]}}\n\n\
+                         data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}],{usage}}}\n\n\
+                         data: [DONE]\n\n"))
+                } else {
+                    ("application/json", format!(
+                        "{{\"choices\":[{{\"message\":{{\"role\":\"assistant\",\"content\":\"ok\"}},\"finish_reason\":\"stop\"}}],{usage}}}"))
+                };
+                let wire = format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nConnection: close\r\n\r\n{payload}");
+                let _ = stream.write_all(wire.as_bytes());
+            }
+        });
+        (format!("http://{address}/v1"), rx)
+    }
+
+    /// Builds a handle the way the app does on launch, routed to the mock.
+    fn launch(config: types::InitConfig, provider_base: &str) -> (Arc<NativeAgentHandle>, std_mpsc::Receiver<(String, String)>) {
+        let runtime_path = runtime_config::runtime_config_path(&config.workspace_path);
+        let handle = NativeAgentHandle::new(config.clone()).unwrap();
+        std::fs::write(
+            &runtime_path,
+            serde_json::json!({ "providerBaseUrls": { "openrouter": provider_base } }).to_string(),
+        ).unwrap();
+        handle.set_auth_key("sk-or-test-0000000000".into(), "openrouter".into(), "api_key".into()).unwrap();
+        let (tx, rx) = std_mpsc::channel();
+        handle.set_event_callback(Box::new(Capture(tx))).unwrap();
+        (handle, rx)
+    }
+
+    /// Writes a transcript exactly as an earlier launch would have persisted it.
+    fn seed_session(config: &types::InitConfig, session_key: &str, messages: &[types::Message]) {
+        let conn = db::open_db(&config.db_path).unwrap();
+        db::ensure_schema(&conn).unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        db::save_session(
+            &conn, session_key, "main",
+            &serde_json::to_string(messages).unwrap(),
+            Some("openrouter/free"), Some("openrouter"), now, None,
+        ).unwrap();
+    }
+
+    fn turn(role: types::Role, text: &str) -> types::Message {
+        types::Message { role, content: types::MessageContent::Text(text.to_string()) }
+    }
+
+    fn wait_for_turn(rx: &std_mpsc::Receiver<(String, String)>) {
+        loop {
+            let (event, payload) = rx.recv_timeout(Duration::from_secs(30)).expect("turn must finish");
+            match event.as_str() {
+                "agent.completed" => return,
+                "agent.error" => panic!("turn failed: {payload}"),
+                _ => {}
+            }
+        }
+    }
+
+    /// The user/assistant text the provider received, in order.
+    fn conversation_seen_by_provider(body: &serde_json::Value) -> Vec<(String, String)> {
+        body["messages"].as_array().unwrap().iter()
+            .filter(|m| m["role"] == "user" || m["role"] == "assistant")
+            .map(|m| (m["role"].as_str().unwrap().to_string(), m["content"].as_str().unwrap_or_default().to_string()))
+            .collect()
+    }
+
+    fn seeded_history() -> Vec<types::Message> {
+        vec![
+            turn(types::Role::User, "প্রথম প্রশ্ন"),
+            turn(types::Role::Assistant, "প্রথম উত্তর"),
+            turn(types::Role::User, "দ্বিতীয় প্রশ্ন"),
+            turn(types::Role::Assistant, "দ্বিতীয় উত্তর"),
+        ]
+    }
+
+    fn expected_history_plus(prompt: &str) -> Vec<(String, String)> {
+        vec![
+            ("user".into(), "প্রথম প্রশ্ন".into()),
+            ("assistant".into(), "প্রথম উত্তর".into()),
+            ("user".into(), "দ্বিতীয় প্রশ্ন".into()),
+            ("assistant".into(), "দ্বিতীয় উত্তর".into()),
+            ("user".into(), prompt.into()),
+        ]
+    }
+
+    /// Restart → resumeSession → followUp (the path the UI takes for a restored
+    /// chat). The provider must see the whole stored conversation and the new
+    /// prompt, and the saved transcript must grow instead of being replaced.
+    #[test]
+    fn resumed_chat_sends_full_history_and_saves_it_back() {
+        let config = sandbox("resume");
+        let (base, requests) = spawn_mock_provider();
+        seed_session(&config, "chat-seed", &seeded_history());
+        let (handle, events) = launch(config.clone(), &base);
+
+        handle.resume_session("chat-seed".into(), "main".into(), None, None, None).unwrap();
+        handle.follow_up("তৃতীয় প্রশ্ন".into()).unwrap();
+        wait_for_turn(&events);
+
+        let body = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(conversation_seen_by_provider(&body), expected_history_plus("তৃতীয় প্রশ্ন"));
+
+        let conn = db::open_db(&config.db_path).unwrap();
+        let stored = db::load_session_messages_raw(&conn, "chat-seed").unwrap();
+        assert_eq!(stored.len(), 6, "history must be extended, not replaced");
+    }
+
+    /// The UI can reach sendMessage() for an existing chat when the restore
+    /// state is not ready (e.g. after a failed restore). That must continue the
+    /// stored conversation, never replace it with a one-turn transcript.
+    #[test]
+    fn send_message_on_an_existing_chat_continues_it_instead_of_overwriting() {
+        let config = sandbox("send-existing");
+        let (base, requests) = spawn_mock_provider();
+        seed_session(&config, "chat-seed", &seeded_history());
+        let (handle, events) = launch(config.clone(), &base);
+
+        handle.send_message(types::SendMessageParams {
+            prompt: "নতুন প্রশ্ন".into(),
+            session_key: "chat-seed".into(),
+            model: Some("openrouter/free".into()),
+            provider: Some("openrouter".into()),
+            system_prompt: String::new(),
+            max_turns: None,
+            allowed_tools_json: None,
+            prior_messages_json: None,
+        }).unwrap();
+        wait_for_turn(&events);
+
+        let body = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(conversation_seen_by_provider(&body), expected_history_plus("নতুন প্রশ্ন"));
+        let conn = db::open_db(&config.db_path).unwrap();
+        assert_eq!(db::load_session_messages_raw(&conn, "chat-seed").unwrap().len(), 6);
+    }
+
+    /// An empty follow-up must be rejected. Accepting it runs a model turn with
+    /// no user message, so the model answers the previous question again.
+    #[test]
+    fn empty_follow_up_is_rejected_instead_of_running_a_turn_without_a_question() {
+        let config = sandbox("empty-followup");
+        let (base, requests) = spawn_mock_provider();
+        seed_session(&config, "chat-seed", &seeded_history());
+        let (handle, _events) = launch(config.clone(), &base);
+
+        handle.resume_session("chat-seed".into(), "main".into(), None, None, None).unwrap();
+        assert!(handle.follow_up("   ".into()).is_err());
+        assert!(requests.recv_timeout(Duration::from_millis(800)).is_err(), "no provider request may be sent");
     }
 }
