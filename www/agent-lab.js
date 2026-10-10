@@ -15,6 +15,10 @@ const state = {
   initialized: false,
   listening: false,
   sessionKey: `demo-${Date.now()}`,
+  // sendMessage creates a snapshot from scratch. Once a turn completes the
+  // same UI session must use followUp after resumeSession, or the Lab itself
+  // appears to the model as a brand-new conversation every time.
+  sessionReady: false,
   lastRunId: null,
   lastToolCallId: null,
   // MCP tool calls need their OWN id. Reusing lastToolCallId (set only by
@@ -1135,7 +1139,10 @@ async function wireEvents() {
         break;
       }
       case 'agent.completed': {
-        // Terminal: releases the re-entrancy guard in agentsend.
+        // Terminal: releases the re-entrancy guard in agentsend. Mark only the
+        // visible Lab transcript ready; an isolated skill/cron completion must
+        // not steal it.
+        if (!payload?.sessionKey || payload.sessionKey === state.sessionKey) state.sessionReady = true;
         state.turnRunning = false;
         updateFileManagerControls();
         setStatus('Turn শেষ।', 'ok');
@@ -1196,6 +1203,29 @@ async function wireEvents() {
   return { wired: true, hint: 'সব agent event এখন log-এ আসবে।' };
 }
 
+// The diagnostic surface shares the same native engine as the owner workspace.
+// If it is opened after a reload, make its Send button continue the most recent
+// durable main conversation too; otherwise this developer page is a surprising
+// one-turn-history destroyer.
+async function restoreLatestLabSession() {
+  try {
+    const reply = await window.NativeKit.agent.listSessions('main');
+    const sessions = typeof reply?.sessionsJson === 'string' ? JSON.parse(reply.sessionsJson) : [];
+    const latest = Array.isArray(sessions) ? sessions[0] : null;
+    if (!latest?.sessionKey) return null;
+    await window.NativeKit.agent.resumeSession({ sessionKey: latest.sessionKey, agentId: 'main' });
+    state.sessionKey = latest.sessionKey;
+    state.sessionReady = true;
+    log('agent.session.restored', { sessionKey: latest.sessionKey, updatedAt: latest.updatedAt ?? null });
+    return latest;
+  } catch (error) {
+    // Lab diagnostics must remain usable even if an older transcript cannot be
+    // decoded. Do not delete or overwrite it; leave a transparent log record.
+    log('agent.session.restore_failed', { error: String(error?.message ?? error) });
+    return null;
+  }
+}
+
 // ── Actions ──────────────────────────────────────────────────────────────────
 const agentActions = {
   // 1 ── Diagnostics ─────────────────────────────────────────────────────────
@@ -1222,8 +1252,9 @@ const agentActions = {
       state.initialized = true;
       await loadRuntimeConfigIntoUi();
       await wireEvents();
+      const restored = await restoreLatestLabSession();
       updateFileManagerControls();
-      return { initialized: true, reused: true };
+      return { initialized: true, reused: true, restoredSessionKey: restored?.sessionKey ?? null };
     }
     const probe = await window.NativeKit.agent.checkAvailability();
     if (!probe.available) {
@@ -1241,9 +1272,10 @@ const agentActions = {
     setStatus('Engine চালু — provider/auth settings যাচাই করুন।', 'ok');
     updateFileManagerControls();
     await wireEvents();
+    const restored = await restoreLatestLabSession();
     try { await runFileManagerOperation(() => loadFileDirectory('.')); }
     catch (error) { setFileStatus(`Engine চালু, তবে workspace তালিকা পড়া যায়নি: ${error.message}`, 'warn'); }
-    return res ?? { initialized: true, sessionKey: state.sessionKey };
+    return { ...(res ?? { initialized: true, sessionKey: state.sessionKey }), restoredSessionKey: restored?.sessionKey ?? null };
   },
 
   // 3 ── Auth ────────────────────────────────────────────────────────────────
@@ -1317,15 +1349,25 @@ const agentActions = {
         state.runtimeConfig = await window.NativeKit.agent.setRuntimeConfig(capabilityPatch);
       }
     }
-    const res = await window.NativeKit.agent.sendMessage({
-      prompt: val('agent-prompt') || 'Say hello in Bangla, one short sentence.',
-      sessionKey: state.sessionKey,
-      systemPrompt: val('agent-system') || undefined,
-      provider: chosenProvider,
-      model: routedModel,
-    });
+    const prompt = val('agent-prompt') || 'Say hello in Bangla, one short sentence.';
+    let res;
+    if (state.sessionReady) {
+      // Native current_session is process-local, so resume before every Lab
+      // follow-up. This also protects the Lab from a background skill changing
+      // the native handle in between two user messages.
+      await window.NativeKit.agent.resumeSession({ sessionKey: state.sessionKey, agentId: 'main' });
+      res = await window.NativeKit.agent.followUp({ prompt });
+    } else {
+      res = await window.NativeKit.agent.sendMessage({
+        prompt,
+        sessionKey: state.sessionKey,
+        systemPrompt: val('agent-system') || undefined,
+        provider: chosenProvider,
+        model: routedModel,
+      });
+    }
     state.lastRunId = res?.runId ?? null;
-    return res;
+    return { ...(res || {}), continuation: state.sessionReady };
     } catch (err) {
       // sendMessage only STARTS the turn; agent.completed/agent.error clear the
       // flag. If the start itself failed, no events are coming — clear it here.
@@ -1402,6 +1444,7 @@ const agentActions = {
   agentnewsession: async () => {
     requireInit();
     state.sessionKey = `demo-${Date.now()}`;
+    state.sessionReady = false;
     return { sessionKey: state.sessionKey };
   },
   agentclearsession: async () => { requireInit(); await window.NativeKit.agent.clearSession(); return { cleared: true }; },

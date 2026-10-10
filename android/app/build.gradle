@@ -2,7 +2,6 @@ apply plugin: 'com.android.application'
 
 def nativeKitKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
 def nativeKitSigningReady = nativeKitKeystorePath && System.getenv("ANDROID_KEYSTORE_PASSWORD") && System.getenv("ANDROID_KEY_ALIAS") && System.getenv("ANDROID_KEY_PASSWORD")
-
 android {
     // NATIVEKIT_SIGNING_START
     signingConfigs {
@@ -22,8 +21,8 @@ android {
         applicationId "dev.nativekit.shell"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 25
-        versionName "1.4.11-free-router"
+        versionCode 26
+        versionName "1.4.12-agent-continuity"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         // NativeKit ships prebuilt natives for exactly these four ABIs (agent engine,
         // widget, JNA). Restricting them keeps unreachable folders out of the APK —

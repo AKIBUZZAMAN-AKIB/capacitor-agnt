@@ -446,8 +446,16 @@ async function configureAndroid() {
 
   const signingPreamble = `def nativeKitKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
 def nativeKitSigningReady = nativeKitKeystorePath && System.getenv("ANDROID_KEYSTORE_PASSWORD") && System.getenv("ANDROID_KEY_ALIAS") && System.getenv("ANDROID_KEY_PASSWORD")`;
-  // Rebuild this generated preamble on every sync so interrupted/older mutations cannot corrupt Gradle syntax.
-  build = build.replace(/^(apply plugin: 'com\.android\.application')[\s\S]*?^android \{/m, `$1\n\n${signingPreamble}\n\nandroid {`);
+  // Rebuild the generated prefix by slicing at the *first physical* android
+  // block. A broad multiline regex can accidentally retain/interleave a
+  // Capacitor-added flatDir line in the middle of `nativeKitKeystorePath`, which
+  // makes Gradle fail with a nonsensical syntax error on a later sync.
+  const applicationPlugin = "apply plugin: 'com.android.application'";
+  const androidBlockStart = build.indexOf('\nandroid {');
+  if (!build.startsWith(applicationPlugin) || androidBlockStart < 0) {
+    throw new Error('android/app/build.gradle-এর application plugin বা android block পাওয়া যায়নি।');
+  }
+  build = `${applicationPlugin}\n\n${signingPreamble}${build.slice(androidBlockStart)}`;
 
   // Do this after replacing the generated signing preamble. Otherwise a
   // previously interrupted file can have the flatDir text captured by the

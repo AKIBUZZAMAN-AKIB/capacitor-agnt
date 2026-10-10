@@ -39,4 +39,13 @@ describe('central app configuration', () => {
     if (config.ios.alarmKitOnIOS26) expect(config.features.advancedAlarms).toBe(true);
     if (config.android.fullScreenAlarm) expect(config.features.advancedAlarms).toBe(true);
   });
+
+  it('rebuilds the Android signing preamble at a physical android block boundary', () => {
+    const configure = readFileSync(path.join(root, 'scripts/configure-native.mjs'), 'utf8');
+    const gradle = readFileSync(path.join(root, 'android/app/build.gradle'), 'utf8');
+    expect(configure).toContain("const androidBlockStart = build.indexOf('\\nandroid {')");
+    expect(configure).toContain('build = `${applicationPlugin}\\n\\n${signingPreamble}${build.slice(androidBlockStart)}`');
+    expect(gradle).toContain('def nativeKitKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH")');
+    expect(gradle).not.toContain("def nativeKitKeystorePa\n\t\tdirs");
+  });
 });

@@ -25,6 +25,12 @@ const AGENT_INIT = Object.freeze({
 });
 const MCP_PREF_KEY = 'nativekit.agent.mcp.servers.v1';
 const MCP_TOKEN_PREFIX = 'nativekit.agent.mcp.token.';
+// These browser-side pointers never contain the transcript itself. The source
+// of truth remains the native SQLite store; the pointer only tells the UI which
+// durable transcript to resume at the next launch.
+const ACTIVE_SESSION_STORAGE_KEY = 'nativekit.agent.workspace.active-session.v1';
+const EVENT_LOG_STORAGE_KEY = 'nativekit.agent.workspace.event-log.v1';
+const EVENT_LOG_LIMIT = 300;
 const PERSONA_HINTS = Object.freeze({
   'AGENTS.md': 'AGENTS.md: agent-এর প্রধান নিয়ম, কাজের ধাপ ও নিরাপত্তা সীমা লিখুন।',
   'SOUL.md': 'SOUL.md: কথার টোন, মূল্যবোধ ও আচরণ লিখুন।',
@@ -86,6 +92,14 @@ const state = {
   personaFile: 'AGENTS.md',
   files: { directory: '.', entries: [], mode: 'directory', selectedPath: null, originalContent: null, originalBytes: 0, isNew: false, editable: false, dirty: false, busy: false, truncated: false },
   activity: [],
+  // Full (redacted) audit trail for the bottom log. Unlike activity/route chips,
+  // it is not a six/eight-item summary and survives a WebView restart.
+  eventLog: [],
+  streamLogEntryId: null,
+  thinkingLogEntryId: null,
+  // Provider reasoning is deliberately session-local and never written to
+  // localStorage. It may contain provisional or private context.
+  thinking: { sessionKey: null, text: '', chunks: 0, characters: 0 },
   routerDraft: null,
   routeEvents: [],
   heartbeat: null,
@@ -100,6 +114,213 @@ function bytes(value) { return new TextEncoder().encode(String(value ?? '')).byt
 function parseJson(raw, fallback) { try { return JSON.parse(raw ?? ''); } catch { return fallback; } }
 function safeText(value, max = 140) { const text = String(value ?? '').replace(/\s+/g, ' ').trim(); return text.length > max ? `${text.slice(0, max)}…` : text; }
 function uniqueName(value) { return /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(value); }
+
+function workspaceStorage() {
+  try { return globalThis.localStorage; } catch { return null; }
+}
+
+function readStoredActiveSession() {
+  try { return clean(workspaceStorage()?.getItem(ACTIVE_SESSION_STORAGE_KEY)); } catch { return ''; }
+}
+
+function rememberActiveSession(sessionKey) {
+  try { workspaceStorage()?.setItem(ACTIVE_SESSION_STORAGE_KEY, sessionKey); } catch { /* Private-mode/storage quota: native history still works. */ }
+}
+
+function forgetActiveSession() {
+  try { workspaceStorage()?.removeItem(ACTIVE_SESSION_STORAGE_KEY); } catch { /* no-op */ }
+}
+
+function redactLogText(value, max = 220) {
+  return safeText(String(value ?? '')
+    .replace(/(bearer\s+)[^\s,;]+/ig, '$1[redacted]')
+    .replace(/((?:api[_ -]?key|token|secret|password)\s*[:=]\s*)[^\s,;]+/ig, '$1[redacted]'), max);
+}
+
+function safeLogValue(value, key = '', depth = 0) {
+  const sensitive = /(?:key|token|secret|password|authorization|cookie|prompt|content|command|message|text|file.?content|body|description|instruction|system|raw|request|response|output|result|error|reason)/i;
+  if (sensitive.test(key) && !(typeof value === 'boolean' || typeof value === 'number' || value == null)) {
+    if (typeof value === 'string') return `[redacted · ${bytes(value)} bytes]`;
+    return '[redacted]';
+  }
+  if (value == null || typeof value === 'boolean' || typeof value === 'number') return value;
+  if (typeof value === 'string') return redactLogText(value, 260);
+  if (depth >= 3) return Array.isArray(value) ? `[${value.length} items]` : '[object]';
+  if (Array.isArray(value)) return value.slice(0, 20).map((entry) => safeLogValue(entry, '', depth + 1));
+  if (typeof value === 'object') {
+    const safe = {};
+    for (const [name, child] of Object.entries(value).slice(0, 30)) safe[name] = safeLogValue(child, name, depth + 1);
+    return safe;
+  }
+  return redactLogText(value, 120);
+}
+
+function eventTone(type, payload = {}) {
+  if (/(?:error|failed|timeout|denied)/i.test(type) || payload?.result?.isError || payload?.isError) return 'err';
+  if (/(?:fallback|retry|trimmed|compacted|approval|warning|skipped)/i.test(type)) return 'warn';
+  return '';
+}
+
+function eventSummary(type, payload = {}) {
+  const provider = payload?.toProvider ?? payload?.provider ?? payload?.selectedProvider;
+  const model = payload?.toModel ?? payload?.model ?? payload?.selectedModel;
+  const tool = payload?.toolName ?? payload?.tool_name;
+  const error = payload?.error ?? payload?.message ?? payload?.reason;
+  const session = payload?.sessionKey ?? payload?.session_key;
+  if (error) return `error category: ${classifyAgentError(error).code}`;
+  if (tool) return `${tool}${session ? ` · ${session}` : ''}`;
+  if (provider) return `${provider}${model ? ` / ${model}` : ''}${session ? ` · ${session}` : ''}`;
+  if (session) return session;
+  return type === 'assistant.stream' ? 'উত্তর stream হচ্ছে' : 'event পাওয়া গেছে';
+}
+
+function persistEventLog() {
+  try { workspaceStorage()?.setItem(EVENT_LOG_STORAGE_KEY, JSON.stringify(state.eventLog.slice(0, EVENT_LOG_LIMIT))); } catch { /* redacted logs are best-effort only */ }
+}
+
+function renderEventLog() {
+  const root = $('aw-event-log');
+  const count = $('aw-event-log-count');
+  if (count) count.textContent = `${state.eventLog.length} events`;
+  if (!root) return;
+  const followLatest = !root.children.length || root.scrollHeight - root.scrollTop - root.clientHeight < 48;
+  root.replaceChildren();
+  if (!state.eventLog.length) {
+    const empty = document.createElement('p'); empty.className = 'aw-event-log-empty'; empty.textContent = 'এখনো কোনো event নেই। Chat শুরু হলে এখানে audit trail দেখা যাবে।'; root.append(empty); return;
+  }
+  // Entries are stored newest-first so persistence is cheap; render chronologically.
+  for (const entry of [...state.eventLog].reverse()) {
+    const row = document.createElement('div'); row.className = `aw-event-row ${entry.tone || ''}`.trim();
+    const at = document.createElement('time'); at.className = 'aw-event-time'; at.textContent = nowTime(entry.at); at.dateTime = new Date(entry.at).toISOString();
+    const type = document.createElement('code'); type.className = 'aw-event-type'; type.textContent = entry.type;
+    const body = document.createElement('div'); body.className = 'aw-event-message'; body.textContent = entry.summary;
+    if (entry.data && Object.keys(entry.data).length) {
+      const details = document.createElement('details'); details.className = 'aw-event-details';
+      const summary = document.createElement('summary'); summary.textContent = 'নিরাপদ event details';
+      const pre = document.createElement('pre'); pre.textContent = JSON.stringify(entry.data, null, 2);
+      details.append(summary, pre); body.append(details);
+    }
+    row.append(at, type, body); root.append(row);
+  }
+  // Only follow the log when it was already at its latest edge; do not disrupt review.
+  if (followLatest) root.scrollTop = root.scrollHeight;
+}
+
+function restoreEventLog() {
+  const stored = parseJson(workspaceStorage()?.getItem(EVENT_LOG_STORAGE_KEY), []);
+  state.eventLog = Array.isArray(stored) ? stored
+    .filter((entry) => entry && typeof entry.type === 'string' && Number.isFinite(Number(entry.at)))
+    .slice(0, EVENT_LOG_LIMIT) : [];
+  renderEventLog();
+}
+
+function recordEventLog(type, payload = {}, tone = eventTone(type, payload)) {
+  const entry = {
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    at: Date.now(),
+    type: safeText(type || 'unknown.event', 90),
+    tone,
+    summary: eventSummary(type, payload),
+    data: safeLogValue(payload),
+  };
+  state.eventLog.unshift(entry);
+  state.eventLog = state.eventLog.slice(0, EVENT_LOG_LIMIT);
+  persistEventLog(); renderEventLog();
+  return entry;
+}
+
+function recordStreamLog(payload = {}) {
+  const chunk = String(payload?.text ?? payload?.delta ?? '');
+  const sessionKey = payload?.sessionKey ?? payload?.session_key ?? state.sessionKey;
+  const existing = state.eventLog.find((entry) => entry.id === state.streamLogEntryId && entry.data?.sessionKey === sessionKey);
+  if (!existing) {
+    const entry = recordEventLog('assistant.stream', { sessionKey, chunkCount: 1, streamedCharacters: chunk.length });
+    entry.summary = `উত্তর stream হচ্ছে · ${chunk.length} characters`;
+    persistEventLog(); renderEventLog();
+    state.streamLogEntryId = entry.id;
+    return;
+  }
+  existing.at = Date.now();
+  existing.summary = `উত্তর stream হচ্ছে · ${Number(existing.data.streamedCharacters || 0) + chunk.length} characters`;
+  existing.data.chunkCount = Number(existing.data.chunkCount || 0) + 1;
+  existing.data.streamedCharacters = Number(existing.data.streamedCharacters || 0) + chunk.length;
+  renderEventLog();
+}
+
+function recordThinkingProgress(payload = {}) {
+  const text = String(payload?.text ?? payload?.delta ?? payload?.thinking ?? '');
+  const sessionKey = payload?.sessionKey ?? payload?.session_key ?? state.sessionKey;
+  const existing = state.eventLog.find((entry) => entry.id === state.thinkingLogEntryId && entry.data?.sessionKey === sessionKey);
+  if (!existing) {
+    const entry = recordEventLog('agent.thinking', { sessionKey, chunkCount: 1, thinkingCharacters: text.length });
+    entry.summary = `Provider reasoning stream · ${text.length} characters`;
+    persistEventLog(); renderEventLog();
+    state.thinkingLogEntryId = entry.id;
+    return;
+  }
+  existing.at = Date.now();
+  existing.data.chunkCount = Number(existing.data.chunkCount || 0) + 1;
+  existing.data.thinkingCharacters = Number(existing.data.thinkingCharacters || 0) + text.length;
+  existing.summary = `Provider reasoning stream · ${existing.data.thinkingCharacters} characters`;
+  renderEventLog();
+}
+
+function clearThinking() {
+  state.thinking = { sessionKey: null, text: '', chunks: 0, characters: 0 };
+  state.thinkingLogEntryId = null;
+  const panel = $('aw-thinking-panel');
+  const text = $('aw-thinking-text');
+  const meta = $('aw-thinking-meta');
+  if (text) text.textContent = '';
+  if (meta) meta.textContent = 'Provider-এর progress আসছে…';
+  if (panel) panel.hidden = true;
+}
+
+function appendThinking(payload = {}) {
+  const piece = String(payload?.text ?? payload?.delta ?? payload?.thinking ?? '');
+  if (!piece) return;
+  const sessionKey = payload?.sessionKey ?? payload?.session_key ?? state.sessionKey;
+  if (state.thinking.sessionKey !== sessionKey) clearThinking();
+  state.thinking.sessionKey = sessionKey;
+  state.thinking.text += piece;
+  state.thinking.chunks += 1;
+  state.thinking.characters += piece.length;
+  const panel = $('aw-thinking-panel');
+  const text = $('aw-thinking-text');
+  const meta = $('aw-thinking-meta');
+  if (panel) panel.hidden = false;
+  if (text) {
+    const shouldFollow = text.scrollHeight - text.scrollTop - text.clientHeight < 40;
+    text.textContent = state.thinking.text;
+    if (shouldFollow) text.scrollTop = text.scrollHeight;
+  }
+  if (meta) meta.textContent = `${state.thinking.chunks}টি update · ${state.thinking.characters} characters`;
+}
+
+function classifyAgentError(error) {
+  const raw = String(error?.message ?? error ?? '').trim();
+  const rules = [
+    ['cancelled', /\b(?:cancel(?:led|ed)?|abort(?:ed)?)\b/i, 'কাজটি বন্ধ করা হয়েছে।'],
+    ['auth', /\b(?:401|403)\b|unauthori[sz]ed|invalid[\s_-]*(?:api[\s_-]*key|token|credential)|authentication/i, 'Provider-এর API key বা অনুমতি ঠিক নেই। Settings থেকে key যাচাই করুন।'],
+    ['rate_limit', /\b429\b|rate[\s_-]*limit|too many requests|quota(?:\s+exceeded)?/i, 'Provider-এর rate limit/কোটা শেষ হয়েছে। একটু পরে আবার চেষ্টা করুন বা অন্য route নিন।'],
+    ['context_limit', /context(?:\s+window|\s+length)?|too many tokens?|max(?:imum)?[\s_-]*(?:token|context)|input.*(?:too large|length)/i, 'এই conversation-এর context limit ছুঁয়েছে। নতুন chat নিন বা আগের অংশ সংক্ষেপ করুন।'],
+    ['stream_protocol', /(?:invalid|malformed|incomplete|unexpected).*(?:sse|stream|json)|(?:sse|stream).*(?:invalid|malformed|incomplete)|\bparse\b/i, 'Provider-এর streaming data অসম্পূর্ণ বা ভুল ছিল; উত্তরটির অংশ বাদ পড়তে পারে। আবার চেষ্টা করুন।'],
+    ['timeout', /timed?\s*out|timeout|deadline exceeded/i, 'Provider সময়মতো উত্তর দেয়নি। নেটওয়ার্ক বা provider retry করুন।'],
+    ['network', /network|dns|connection|socket|transport|fetch failed|connect(?:ion)? refused/i, 'নেটওয়ার্ক বা provider connection পাওয়া যায়নি। সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।'],
+    ['tool', /tool.*(?:failed|error)|approval|permission denied/i, 'Agent tool কাজটি সম্পন্ন করতে পারেনি। নিচের log থেকে tool ও অনুমতি দেখুন।'],
+  ];
+  const matched = rules.find(([, matcher]) => matcher.test(raw));
+  return { code: matched?.[0] ?? 'provider_error', message: matched?.[2] ?? 'Provider বা agent-এর একটি সমস্যা হয়েছে। নিচের log-এর error category দেখুন।' };
+}
+
+function clearEventLog() {
+  state.eventLog = [];
+  state.streamLogEntryId = null;
+  state.thinkingLogEntryId = null;
+  try { workspaceStorage()?.removeItem(EVENT_LOG_STORAGE_KEY); } catch { /* no-op */ }
+  renderEventLog();
+}
+
 
 function toast(message, tone = 'muted') {
   const node = $('aw-toast');
@@ -255,6 +476,7 @@ function clearChat() {
   feed.replaceChildren();
   state.currentAssistant = null;
   state.activity = [];
+  clearThinking();
   state.chatAutoScroll = true;
   const empty = document.createElement('div');
   empty.id = 'aw-empty-chat';
@@ -301,10 +523,14 @@ async function answerApproval(approved) {
   if (!request) return;
   try {
     await nativeAgent().respondToApproval(request.id, approved, approved ? undefined : 'User denied this action in AI Workspace');
+    recordEventLog('approval.responded', { toolName: request.toolName, approved, sessionKey: state.sessionKey }, approved ? '' : 'warn');
     appendActivity(`${approved ? 'অনুমোদিত' : 'বাতিল'} · ${request.toolName}`, approved ? '' : 'warn');
     state.pendingApproval = null;
     renderApproval();
-  } catch (error) { toast(`অনুমতি পাঠানো যায়নি: ${error.message ?? error}`, 'err'); }
+  } catch (error) {
+    recordEventLog('approval.response_failed', { toolName: request.toolName, error: String(error?.message ?? error) }, 'err');
+    toast(`অনুমতি পাঠানো যায়নি: ${error.message ?? error}`, 'err');
+  }
 }
 
 async function initialize() {
@@ -323,8 +549,10 @@ async function initialize() {
       return;
     }
     status('Agent engine প্রস্তুত হচ্ছে…', 'busy');
+    recordEventLog('engine.initialize_requested', {});
     const probe = await nativeAgent().checkAvailability();
     if (!probe.available) throw new Error(probe.reason || `এই device ABI (${probe.abi}) supported নয়`);
+    recordEventLog('engine.available', { abi: probe.abi });
     await nativeAgent().initialize(AGENT_INIT);
     globalThis.__nativeKitAgentInitialized = true;
     state.initialized = true;
@@ -332,6 +560,7 @@ async function initialize() {
     status('Agent প্রস্তুত। এখন চ্যাট শুরু করুন।', 'ok');
     toast('Private workspace, local memory ও scheduler প্রস্তুত।', 'ok');
   } catch (error) {
+    recordEventLog('engine.initialize_failed', { error: String(error?.message ?? error) }, 'err');
     status(`Agent চালু হয়নি: ${error.message ?? error}`, 'err');
     toast(`Agent চালু হয়নি: ${error.message ?? error}`, 'err');
   } finally {
@@ -341,12 +570,19 @@ async function initialize() {
 
 async function afterInitialize() {
   await wireEvents();
-  // The engine is ready at this point. Do not make chat wait for optional
-  // settings/history refreshes: that made a healthy agent look unsendable.
+  // A local SQLite session list/load is fast and is the one prerequisite for a
+  // safe follow-up. Restore it before enabling Send, otherwise a fast tap after
+  // a WebView restart could create a fresh one-turn transcript over the user's
+  // existing conversation.
+  await refreshSessions();
+  await restoreActiveSession();
   setComposerAvailability(true);
-  await Promise.allSettled([
-    refreshSettings(), refreshSessions(), refreshAutomations(), refreshSkills(),
-    refreshMemory(), refreshFiles(), loadMcpConfigs(), loadPersona(),
+  recordEventLog('workspace.ready', { sessionKey: state.sessionReady ? state.sessionKey : null, restored: state.sessionReady });
+  // Everything below is auxiliary UI. It must never block an already-restored
+  // conversation from being usable.
+  void Promise.allSettled([
+    refreshSettings(), refreshAutomations(), refreshSkills(), refreshMemory(),
+    refreshFiles(), loadMcpConfigs(), loadPersona(),
   ]);
 }
 
@@ -356,7 +592,27 @@ async function wireEvents() {
     const type = event?.eventType ?? event?.type;
     let payload = event?.payloadJson ?? event?.payload ?? {};
     if (typeof payload === 'string') payload = parseJson(payload, { raw: payload });
-    if (type === 'text_delta' || type === 'assistant_delta') {
+    // Every native event is auditable in the bottom panel. Text/reasoning
+    // chunks are aggregated there, while their live body is rendered separately
+    // so a long stream cannot flood hundreds of audit rows.
+    const textDelta = type === 'text_delta' || type === 'assistant_delta';
+    const thinkingDelta = type === 'thinking' || type === 'thinking_delta' || type === 'reasoning_delta';
+    if (textDelta) recordStreamLog(payload ?? {});
+    else if (!thinkingDelta) recordEventLog(type || 'unknown.event', payload ?? {});
+    if (thinkingDelta) {
+      // Reasoning from a Skill/cron belongs to its own session just like text.
+      if (payload?.sessionKey && payload.sessionKey !== state.sessionKey) {
+        recordThinkingProgress(payload ?? {});
+        return;
+      }
+      appendThinking(payload ?? {});
+      recordThinkingProgress(payload ?? {});
+      return;
+    }
+    if (textDelta) {
+      // Background cron/skill deltas are logged above but belong to their own
+      // transcript; never splice them into the open user chat.
+      if (payload?.sessionKey && payload.sessionKey !== state.sessionKey) return;
       const text = payload?.text ?? payload?.delta ?? '';
       if (!state.currentAssistant) state.currentAssistant = makeMessage('assistant', '', Date.now(), true);
       state.currentAssistant.textContent += text;
@@ -380,6 +636,7 @@ async function wireEvents() {
     }
     if (type === 'mcp_tool_call') { appendActivity(`MCP tool চলছে · ${payload?.toolName ?? payload?.tool_name ?? 'unknown'}`); return; }
     if (type === 'provider.selected' || type === 'provider.route') {
+      if (payload?.sessionKey && payload.sessionKey !== state.sessionKey) { appendActivity('Background route update'); return; }
       const name = payload?.provider ?? payload?.selectedProvider;
       const model = payload?.model ?? payload?.selectedModel;
       if (name) $('aw-model-label').textContent = `${name}${model ? ` / ${model}` : ''}`;
@@ -388,23 +645,36 @@ async function wireEvents() {
       return;
     }
     if (type === 'provider.fallback') {
+      if (payload?.sessionKey && payload.sessionKey !== state.sessionKey) { appendActivity('Background provider fallback', 'warn'); return; }
       recordRouteEvent('fallback', payload ?? {});
       appendActivity(`Provider fallback · ${payload?.toProvider ?? payload?.provider ?? 'unknown'}`, 'warn'); return;
     }
     if (type === 'context.compacted' || type === 'context.trimmed') { appendActivity('পুরোনো context সংক্ষেপ করা হয়েছে', 'warn'); return; }
     if (type === 'agent.completed') {
+      const isForeground = !payload?.sessionKey || payload.sessionKey === state.sessionKey;
+      // A cron/skill can finish while the user is composing. It must never mark
+      // that foreground conversation as ready or replace its streaming state.
+      if (!isForeground) { appendActivity('Background কাজ শেষ'); void refreshSessions(); return; }
       state.currentAssistant?.removeAttribute('data-pending');
       state.currentAssistant = null;
+      persistEventLog();
+      state.streamLogEntryId = null;
       // The native side has now stored this exact session in current_session,
       // so subsequent prompts can preserve context through followUp().
-      if (!payload?.sessionKey || payload.sessionKey === state.sessionKey) state.sessionReady = true;
+      state.sessionReady = true;
+      rememberActiveSession(state.sessionKey);
       setRunning(false, 'উত্তর প্রস্তুত।'); void refreshSessions(); return;
     }
     if (type === 'agent.error' || type === 'agent.background_timeout') {
+      const isForeground = !payload?.sessionKey || payload.sessionKey === state.sessionKey;
       const message = payload?.error ?? payload?.message ?? (type === 'agent.background_timeout' ? 'Background সময়সীমা শেষ' : 'Agent error');
-      if (!state.currentAssistant?.textContent) state.currentAssistant = makeMessage('assistant', `⚠ ${message}`);
+      const diagnosis = classifyAgentError(message);
+      if (!isForeground) { appendActivity(`Background সমস্যা · ${diagnosis.code}`, 'warn'); void refreshSessions(); return; }
+      if (!state.currentAssistant?.textContent) state.currentAssistant = makeMessage('assistant', `⚠ ${diagnosis.message}`);
       state.currentAssistant?.removeAttribute('data-pending'); state.currentAssistant = null;
-      setRunning(false, `সমস্যা: ${safeText(message)}`); toast(String(message), 'err'); return;
+      persistEventLog();
+      state.streamLogEntryId = null;
+      setRunning(false, `সমস্যা: ${diagnosis.code}`); toast(diagnosis.message, 'err'); return;
     }
     if (/^(cron\.|heartbeat\.|wake\.)/.test(type ?? '')) { appendActivity(`${type}: ${safeText(payload?.summary ?? payload?.error ?? 'update')}`, type.includes('error') ? 'warn' : ''); void refreshAutomations(); }
   });
@@ -422,8 +692,10 @@ async function sendMessage(event) {
   const model = clean($('aw-model').value);
   const systemPrompt = clean($('aw-persona-system')?.value);
   makeMessage('user', prompt); input.value = '';
+  clearThinking();
   state.currentAssistant = makeMessage('assistant', '', Date.now(), true);
   setRunning(true, 'Agent ভাবছে…'); appendActivity('নতুন কাজ শুরু');
+  recordEventLog('chat.submit', { sessionKey: state.sessionKey, continuation: state.sessionReady, provider, model: model || null, promptCharacters: prompt.length });
   try {
     if (state.sessionReady) {
       // Re-load the selected main session immediately before every follow-up.
@@ -432,15 +704,19 @@ async function sendMessage(event) {
       // accidentally continuing a Skill transcript. resumeSession restores raw
       // tool calls/results, not merely the display text shown in the DOM.
       await nativeAgent().resumeSession({ sessionKey: state.sessionKey, agentId: 'main' });
+      recordEventLog('session.resumed_for_follow_up', { sessionKey: state.sessionKey });
       await nativeAgent().followUp({ prompt });
     } else {
       const options = { prompt, sessionKey: state.sessionKey, provider, ...(model ? { model } : {}), ...(systemPrompt ? { systemPrompt } : {}) };
       await nativeAgent().sendMessage(options);
+      recordEventLog('session.started', { sessionKey: state.sessionKey, provider, model: model || null });
     }
   } catch (error) {
-    state.currentAssistant.textContent = `⚠ পাঠানো যায়নি: ${error.message ?? error}`;
+    const diagnosis = classifyAgentError(error);
+    recordEventLog('chat.send_failed', { sessionKey: state.sessionKey, errorCategory: diagnosis.code }, 'err');
+    state.currentAssistant.textContent = `⚠ ${diagnosis.message}`;
     state.currentAssistant.removeAttribute('data-pending'); state.currentAssistant = null;
-    setRunning(false, 'বার্তা পাঠানো যায়নি।'); toast(String(error.message ?? error), 'err');
+    setRunning(false, `বার্তা পাঠানো যায়নি: ${diagnosis.code}`); toast(diagnosis.message, 'err');
   }
 }
 
@@ -448,6 +724,8 @@ async function abortRun() {
   if (!state.running) return;
   await nativeAgent().abort();
   state.currentAssistant?.removeAttribute('data-pending'); state.currentAssistant = null;
+  persistEventLog(); state.streamLogEntryId = null;
+  recordEventLog('chat.aborted', { sessionKey: state.sessionKey }, 'warn');
   setRunning(false, 'বর্তমান কাজ থামানো হয়েছে।'); appendActivity('User কাজ থামিয়েছেন', 'warn');
 }
 
@@ -507,9 +785,40 @@ async function refreshSessions() {
   if (summary) summary.textContent = state.sessions.length
     ? `${state.sessions.length}টি private conversation · এই device-এ সংরক্ষিত`
     : 'এখনো কোনো conversation সংরক্ষিত নেই';
+  return state.sessions;
 }
 
-async function openSession(sessionKey) {
+async function restoreActiveSession() {
+  const requested = readStoredActiveSession();
+  // First launch: use the most recently updated durable transcript. Later
+  // launches honor the user's explicit “new chat” pointer even though it does
+  // not have a DB row until its first completed turn.
+  const candidate = requested
+    ? state.sessions.find((item) => item.sessionKey === requested)
+    : state.sessions[0];
+  if (!candidate) {
+    if (requested) {
+      state.sessionKey = requested;
+      state.sessionReady = false;
+      $('aw-session-label').textContent = 'নতুন চ্যাট';
+    }
+    return false;
+  }
+  try {
+    await openSession(candidate.sessionKey, { refresh: false });
+    recordEventLog('session.restored', { sessionKey: candidate.sessionKey, updatedAt: candidate.updatedAt, provider: candidate.provider, model: candidate.model });
+    return true;
+  } catch (error) {
+    // Keep the saved transcript untouched. The user can still select another
+    // history row; never “recover” by silently creating a replacement session.
+    state.sessionReady = false;
+    recordEventLog('session.restore_failed', { sessionKey: candidate.sessionKey, error: String(error?.message ?? error) }, 'err');
+    toast(`পূর্বের চ্যাট খোলা যায়নি: ${error?.message ?? error}`, 'err');
+    return false;
+  }
+}
+
+async function openSession(sessionKey, { refresh = true } = {}) {
   requireInit();
   if (state.running) throw new Error('চলমান কাজ শেষ বা থামানোর আগে অন্য চ্যাট খোলা যাবে না।');
   const response = await nativeAgent().loadSession(sessionKey, 'main');
@@ -519,9 +828,14 @@ async function openSession(sessionKey) {
   // so the next message is a genuine continuation rather than a history wipe.
   await nativeAgent().resumeSession({ sessionKey, agentId: 'main' });
   state.sessionKey = sessionKey;
-  state.sessionReady = messages.length > 0;
+  // resumeSession succeeded, so the native handle has the authoritative raw
+  // transcript even when this legacy session has no displayable text rows.
+  // Always follow it up; calling sendMessage here could replace that raw state.
+  state.sessionReady = true;
+  rememberActiveSession(sessionKey);
+  recordEventLog('session.opened', { sessionKey, messageCount: messages.length });
   $('aw-session-label').textContent = sessionKey;
-  const feed = $('aw-chat-feed'); feed.replaceChildren(); state.currentAssistant = null;
+  const feed = $('aw-chat-feed'); feed.replaceChildren(); state.currentAssistant = null; clearThinking();
   for (const message of messages) {
     const normalized = normalizeMessage(message);
     if (normalized.text) makeMessage(normalized.role, normalized.text, normalized.at);
@@ -530,7 +844,7 @@ async function openSession(sessionKey) {
   state.chatAutoScroll = true;
   scrollChatToBottom(true);
   closeHistory();
-  await refreshSessions();
+  if (refresh) await refreshSessions();
   showTab('chat');
 }
 
@@ -538,6 +852,8 @@ function newChat() {
   if (state.running) { toast('চলমান কাজ শেষ বা বন্ধ হওয়ার পর নতুন চ্যাট খুলুন।', 'warn'); return; }
   state.sessionKey = `chat-${Date.now()}`;
   state.sessionReady = false;
+  rememberActiveSession(state.sessionKey);
+  recordEventLog('session.new', { sessionKey: state.sessionKey });
   $('aw-session-label').textContent = 'নতুন চ্যাট';
   clearChat();
   closeHistory();
@@ -646,12 +962,24 @@ async function refreshSkills() {
   }
 }
 async function createSkill(event) { event.preventDefault(); requireInit(); const toolText = clean($('aw-skill-tools').value); const allowedTools = toolText ? toolText.split(',').map((name) => name.trim()).filter(Boolean) : []; await nativeAgent().addSkill({ name: clean($('aw-skill-name').value), systemPrompt: clean($('aw-skill-prompt').value), allowedTools, maxTurns: Number($('aw-skill-turns').value), timeoutMs: Number($('aw-skill-timeout').value) * 1000 }); event.target.reset(); $('aw-skill-turns').value = '5'; $('aw-skill-timeout').value = '60'; toast('Skill সংরক্ষণ হয়েছে।', 'ok'); await refreshSkills(); }
-async function startSkill(skill) { const result = await nativeAgent().startSkill(skill.id, {}, clean($('aw-provider').value) || undefined); state.sessionKey = result.sessionKey; $('aw-session-label').textContent = result.sessionKey; toast(`“${skill.name}” skill session শুরু হয়েছে।`, 'ok'); showTab('chat'); await refreshSessions(); }
+async function startSkill(skill) {
+  const result = await nativeAgent().startSkill(skill.id, {}, clean($('aw-provider').value) || undefined);
+  // Skills run in an isolated transcript. Do not overwrite the foreground
+  // session pointer: doing so previously made the next user message follow a
+  // skill (or a fresh native handle) instead of their visible conversation.
+  recordEventLog('skill.started', { skillId: skill.id, skillName: skill.name, sessionKey: result.sessionKey });
+  appendActivity(`Skill শুরু · ${skill.name}`);
+  toast(`“${skill.name}” আলাদা background session-এ শুরু হয়েছে। ফলাফল history ও log-এ থাকবে।`, 'ok');
+  await refreshSessions();
+}
 async function removeSkill(skill) { if (!confirm(`“${skill.name}” মুছবেন?`)) return; await nativeAgent().removeSkill(skill.id); await refreshSkills(); }
 
 async function invokeMemory(name, args) {
+  recordEventLog('workspace.tool.invoke', { toolName: name, args, sessionKey: state.sessionKey });
   const response = await nativeAgent().invokeTool(name, args); const result = parseJson(response?.resultJson, response);
-  if (result?.error) throw new Error(result.error); return result;
+  if (result?.error) { recordEventLog('workspace.tool.failed', { toolName: name, error: String(result.error) }, 'err'); throw new Error(result.error); }
+  recordEventLog('workspace.tool.completed', { toolName: name });
+  return result;
 }
 async function refreshMemory() { requireInit(); const result = await invokeMemory('memory_list', { prefix: '', limit: 100 }); state.memoryKeys = Array.isArray(result) ? result : parseJson(result?.keys, Array.isArray(result?.keys) ? result.keys : []); renderMemoryList(); }
 function renderMemoryList() { const root = $('aw-memory-list'); root.replaceChildren(); for (const key of state.memoryKeys) { const row = document.createElement('div'); row.className = 'aw-list-item'; const copy = document.createElement('div'); copy.className = 'aw-list-copy'; const title = document.createElement('strong'); title.textContent = key; const sub = document.createElement('span'); sub.textContent = 'Local long-term memory'; copy.append(title, sub); const actions = document.createElement('div'); actions.className = 'aw-list-actions'; const forget = document.createElement('button'); forget.type = 'button'; forget.className = 'aw-danger'; forget.textContent = 'ভুলে যাও'; forget.addEventListener('click', () => void forgetMemory(key)); actions.append(forget); row.append(copy, actions); root.append(row); } }
@@ -659,7 +987,13 @@ async function storeMemory(event) { event.preventDefault(); requireInit(); const
 async function searchMemory(event) { event.preventDefault(); requireInit(); const query = clean($('aw-memory-query').value); const root = $('aw-memory-search-results'); root.replaceChildren(); if (!query) return; const result = await invokeMemory('memory_search', { query, limit: 10 }); const records = Array.isArray(result) ? result : (result?.results ?? []); for (const item of records) { const row = document.createElement('div'); row.className = 'aw-list-item'; const copy = document.createElement('div'); copy.className = 'aw-list-copy'; const title = document.createElement('strong'); title.textContent = item.key ?? 'মেমোরি'; const sub = document.createElement('span'); sub.textContent = item.text ?? safeText(JSON.stringify(item)); copy.append(title, sub); row.append(copy); root.append(row); } }
 async function forgetMemory(key) { if (!confirm(`“${key}” মেমোরি থেকে মুছবেন?`)) return; await invokeMemory('memory_forget', { key }); await refreshMemory(); }
 
-async function invokeFile(name, args) { const response = await nativeAgent().invokeTool(name, args); const result = parseJson(response?.resultJson, response); if (result?.error) throw new Error(result.error); return result; }
+async function invokeFile(name, args) {
+  recordEventLog('workspace.file_tool.invoke', { toolName: name, args, sessionKey: state.sessionKey });
+  const response = await nativeAgent().invokeTool(name, args); const result = parseJson(response?.resultJson, response);
+  if (result?.error) { recordEventLog('workspace.file_tool.failed', { toolName: name, error: String(result.error) }, 'err'); throw new Error(result.error); }
+  recordEventLog('workspace.file_tool.completed', { toolName: name });
+  return result;
+}
 // ── Private workspace file browser ──────────────────────────────────────────
 // This deliberately uses the same built-in tools as the agent. There is no
 // second browser-only store: an upload is written into files://agent/workspace
@@ -1092,7 +1426,19 @@ async function refreshKeyStatus() {
 async function saveProviderKey() { requireInit(); const provider = clean($('aw-key-provider').value); const key = $('aw-provider-key').value; if (!provider || provider === 'webllm') throw new Error('Key সংরক্ষণের জন্য একটি নির্দিষ্ট provider বাছুন।'); if (!key) throw new Error('API key/token লিখুন।'); await nativeAgent().setAuthKey(key, provider); $('aw-provider-key').value = ''; await refreshKeyStatus(); toast('Key নিরাপদ auth store-এ সংরক্ষণ হয়েছে।', 'ok'); }
 async function saveRuntime(event) { event.preventDefault(); requireInit(); const patch = { defaultMaxTurns: Number($('aw-max-turns').value), maxTokens: Number($('aw-max-tokens').value), temperature: Number($('aw-temperature').value), contextCharBudget: Number($('aw-context-budget').value), defaultProvider: clean($('aw-provider').value) || 'auto' }; state.runtimeConfig = await nativeAgent().setRuntimeConfig(patch); toast('Runtime settings সংরক্ষণ হয়েছে।', 'ok'); }
 
-async function guarded(label, task) { try { await task(); } catch (error) { const message = String(error?.message ?? error); toast(message, 'err'); status(`${label}: ${safeText(message)}`, 'err'); } }
+async function guarded(label, task) {
+  recordEventLog('ui.action.started', { action: label });
+  try {
+    const result = await task();
+    recordEventLog('ui.action.completed', { action: label });
+    return result;
+  } catch (error) {
+    const message = String(error?.message ?? error);
+    recordEventLog('ui.action.failed', { action: label, error: message }, 'err');
+    toast(message, 'err'); status(`${label}: ${safeText(message)}`, 'err');
+    return undefined;
+  }
+}
 
 function bind() {
   document.querySelectorAll('[data-aw-tab]').forEach((button) => button.addEventListener('click', () => showTab(button.dataset.awTab)));
@@ -1100,6 +1446,7 @@ function bind() {
   $('aw-composer').addEventListener('submit', (event) => void guarded('বার্তা', () => sendMessage(event)));
   $('aw-chat-input').addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); $('aw-composer').requestSubmit(); } });
   $('aw-abort').addEventListener('click', () => void guarded('থামানো', abortRun));
+  $('aw-log-clear').addEventListener('click', clearEventLog);
   $('aw-new-chat').addEventListener('click', newChat);
   $('aw-refresh-sessions').addEventListener('click', () => void guarded('চ্যাট ইতিহাস', openHistory));
   $('aw-history-close').addEventListener('click', closeHistory);
@@ -1125,6 +1472,7 @@ function bind() {
 function start() {
   if (!$('agent-workspace')) return;
   bind();
+  restoreEventLog();
   wireViewportAndChatScroll();
   setComposerAvailability(false);
   updateFileManagerControls();

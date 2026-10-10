@@ -112,6 +112,45 @@ describe('owner-facing AI Workspace', () => {
     expect(iconCss).toContain('.aw-icon-sprite');
   });
 
+  it('restores the latest durable conversation before Send and preserves an explicit new-chat choice', () => {
+    expect(ui).toContain("const ACTIVE_SESSION_STORAGE_KEY = 'nativekit.agent.workspace.active-session.v1'");
+    expect(ui).toContain('async function restoreActiveSession()');
+    expect(ui).toContain('await refreshSessions();\n  await restoreActiveSession();\n  setComposerAvailability(true);');
+    expect(ui).toContain('await openSession(candidate.sessionKey, { refresh: false });');
+    expect(ui).toContain('rememberActiveSession(sessionKey);');
+    expect(ui).toContain('rememberActiveSession(state.sessionKey);');
+    expect(ui).toContain('session.restored');
+    const lab = read('www/agent-lab.js');
+    expect(lab).toContain('sessionReady: false');
+    expect(lab).toContain("await window.NativeKit.agent.resumeSession({ sessionKey: state.sessionKey, agentId: 'main' });");
+    expect(lab).toContain('res = await window.NativeKit.agent.followUp({ prompt });');
+  });
+
+  it('renders a redacted, persistent and complete runtime audit log below the composer', () => {
+    expect(agent).toContain('id="aw-event-log"');
+    expect(agent).toContain('id="aw-log-clear"');
+    expect(css).toContain('.aw-event-log-panel');
+    expect(css).toContain('.aw-event-log{max-height:240px;overflow:auto');
+    expect(ui).toContain("const EVENT_LOG_STORAGE_KEY = 'nativekit.agent.workspace.event-log.v1'");
+    expect(ui).toContain('function recordEventLog(');
+    expect(ui).toContain('function safeLogValue(');
+    expect(ui).toContain('function recordStreamLog(');
+    expect(ui).toContain("else if (!thinkingDelta) recordEventLog(type || 'unknown.event', payload ?? {});");
+    expect(agent).toContain('Sensitive prompt, file-content ও token');
+  });
+
+  it('shows provider reasoning separately and classifies opaque provider failures with regexes', () => {
+    expect(agent).toContain('id="aw-thinking-panel"');
+    expect(agent).toContain('id="aw-thinking-text"');
+    expect(css).toContain('.aw-thinking-panel');
+    expect(ui).toContain("type === 'thinking' || type === 'thinking_delta' || type === 'reasoning_delta'");
+    expect(ui).toContain('function appendThinking(');
+    expect(ui).toContain('function classifyAgentError(');
+    expect(ui).toContain("['rate_limit', /\\b429\\b|rate[\\s_-]*limit");
+    expect(ui).toContain("['stream_protocol', /(?:invalid|malformed|incomplete|unexpected)");
+    expect(ui).toContain('error category: ${classifyAgentError(error).code}');
+  });
+
   it('removes decorative startup chrome and keeps touch scrolling owned by the active view', () => {
     for (const obsoleteCopy of ['PRIVATE ON-DEVICE AGENT', 'আমার AI Workspace', 'Agent শুরু হচ্ছে']) {
       expect(agent).not.toContain(obsoleteCopy);

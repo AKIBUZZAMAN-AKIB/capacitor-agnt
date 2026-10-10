@@ -73,6 +73,11 @@
                 </section>
               </div>
               <div id="aw-approval-queue" class="aw-approval-queue" aria-live="assertive"></div>
+              <details id="aw-thinking-panel" class="aw-thinking-panel" open hidden>
+                <summary><span>Agent-এর live reasoning</span><small id="aw-thinking-meta">Provider-এর progress আসছে…</small></summary>
+                <p>এটি provider পাঠানো working text; চূড়ান্ত উত্তর নয় এবং এই অংশটি persistent log-এ সংরক্ষিত হয় না।</p>
+                <pre id="aw-thinking-text" aria-live="polite"></pre>
+              </details>
               <div class="aw-chat-feed" id="aw-chat-feed" aria-live="polite">
                 <div class="aw-empty-chat" id="aw-empty-chat"><div><p class="aw-empty-lead">কী করতে চান?</p><div class="aw-suggestions"><button type="button" data-aw-prompt="আজকের কাজগুলো সাজিয়ে একটি পরিকল্পনা দাও।">আজকের পরিকল্পনা</button><button type="button" data-aw-prompt="আমার পছন্দের ভাষা বাংলা—এটি মেমোরিতে রাখো।">বাংলা পছন্দ মনে রাখো</button><button type="button" data-aw-prompt="workspace-এর গুরুত্বপূর্ণ ফাইলগুলো দেখে সংক্ষেপে বলো।">ফাইলগুলো দেখো</button></div></div></div>
               </div>
@@ -80,6 +85,10 @@
                 <textarea id="aw-chat-input" rows="3" placeholder="যেমন: প্রতি সকাল ৮টায় আমার কাজের তালিকা তৈরি করো…" aria-label="Agent message" disabled></textarea>
                 <div class="aw-composer-bottom"><span class="aw-composer-note"><svg class="aw-icon" aria-hidden="true"><use href="#aw-icon-shield"/></svg>Agent প্রস্তুত হলে Enter পাঠাবে · Shift + Enter নতুন লাইন · সংবেদনশীল কাজ অনুমতি চাইবে</span><div class="aw-send-row"><button id="aw-abort" type="button" class="ghost" hidden>থামাও</button><button class="aw-send" type="submit" disabled>পাঠান <svg class="aw-icon" aria-hidden="true"><use href="#aw-icon-send"/></svg></button></div></div>
               </form>
+              <section class="aw-event-log-panel" aria-labelledby="aw-event-log-title">
+                <header><div><h3 id="aw-event-log-title">Live activity log</h3><p>Chat, route, tool, approval, retry, context, cron ও error event এখানে দেখা যায়। Sensitive prompt, file-content ও token log-এ দেখানো হয় না।</p></div><div class="aw-actions"><span id="aw-event-log-count" class="aw-help">0 events</span><button id="aw-log-clear" type="button" class="ghost">Log মুছুন</button></div></header>
+                <div id="aw-event-log" class="aw-event-log" role="log" aria-live="polite" aria-label="Agent activity log"></div>
+              </section>
             </div>
           </section>
 
