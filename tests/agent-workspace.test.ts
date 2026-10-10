@@ -33,7 +33,9 @@ describe('owner-facing AI Workspace', () => {
       'aw-skill-form', 'aw-memory-form', 'aw-persona-editor', 'aw-mcp-form',
       'aw-provider-key', 'aw-key-provider', 'aw-tool-list', 'aw-router-form',
       'aw-router-list', 'aw-router-check', 'aw-router-live-test', 'aw-heartbeat-form',
-      'aw-cron-skill', 'aw-heartbeat-skill',
+      'aw-cron-skill', 'aw-heartbeat-skill', 'aw-tab-files', 'aw-files-list',
+      'aw-files-picker', 'aw-files-include-skipped', 'aw-file-content', 'aw-file-save',
+      'aw-file-delete', 'aw-file-insert-chat',
     ]) {
       expect(agent, `workspace is missing #${id}`).toContain(`id="${id}"`);
     }
@@ -54,6 +56,19 @@ describe('owner-facing AI Workspace', () => {
     expect(ui).toContain("const provider = clean($('aw-provider').value || 'auto');");
     expect(ui).toContain("const provider = clean($('aw-key-provider').value);");
     expect(ui).toContain('Route choice and key management are intentionally separate');
+  });
+
+  it('makes the native private workspace auditable, including uploads and hidden folders', () => {
+    expect(agent).toContain('data-aw-tab="files"');
+    expect(agent).toContain('uploads/');
+    expect(agent).toContain('hidden/system folder');
+    expect(ui).toContain("invokeFile('list_files'");
+    expect(ui).toContain("invokeFile('find_files'");
+    expect(ui).toContain("invokeFile('write_file'");
+    expect(ui).toContain("invokeFile('delete_file'");
+    expect(ui).toContain('uploadWorkspaceFiles');
+    expect(ui).toContain('include_skipped');
+    expect(ui).toContain('data-aw-approval-queue');
   });
 
   it('keeps one native handle across the user workspace and the diagnostic Lab', () => {

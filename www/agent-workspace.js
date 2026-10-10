@@ -54,6 +54,7 @@ const state = {
   mcpConfigs: [],
   mcp: null,
   personaFile: 'AGENTS.md',
+  files: { directory: '.', entries: [], mode: 'directory', selectedPath: null, originalContent: null, originalBytes: 0, isNew: false, editable: false, dirty: false, busy: false, truncated: false },
   activity: [],
   routerDraft: null,
   routeEvents: [],
@@ -116,6 +117,7 @@ function showTab(name) {
   if (name === 'automations' && state.initialized) void refreshAutomations();
   if (name === 'skills' && state.initialized) void refreshSkills();
   if (name === 'memory' && state.initialized) void refreshMemory();
+  if (name === 'files' && state.initialized) void refreshFiles();
   if (name === 'mcp' && state.initialized) void renderMcp();
   if (name === 'settings' && state.initialized) void refreshSettings();
 }
@@ -195,26 +197,30 @@ function redactArgs(value) {
 }
 
 function renderApproval() {
-  const root = $('aw-approval-queue');
-  if (!root) return;
-  root.replaceChildren();
+  const roots = [...document.querySelectorAll('[data-aw-approval-queue]')];
+  const chatRoot = $('aw-approval-queue');
+  if (chatRoot && !roots.includes(chatRoot)) roots.push(chatRoot);
+  if (!roots.length) return;
   const request = state.pendingApproval;
-  if (!request) return;
-  const card = document.createElement('div');
-  card.className = 'aw-approval';
-  const copy = document.createElement('div');
-  const title = document.createElement('strong');
-  title.textContent = `অনুমতি প্রয়োজন: ${request.toolName}`;
-  const detail = document.createElement('span');
-  detail.textContent = redactArgs(request.args) || 'Agent এই tool চালাতে চায়।';
-  copy.append(title, detail);
-  const actions = document.createElement('div');
-  actions.className = 'aw-actions';
-  const deny = document.createElement('button'); deny.type = 'button'; deny.className = 'ghost'; deny.textContent = 'না, বাতিল';
-  deny.addEventListener('click', () => void answerApproval(false));
-  const approve = document.createElement('button'); approve.type = 'button'; approve.textContent = 'অনুমতি দিন';
-  approve.addEventListener('click', () => void answerApproval(true));
-  actions.append(deny, approve); card.append(copy, actions); root.append(card);
+  for (const root of roots) {
+    root.replaceChildren();
+    if (!request) continue;
+    const card = document.createElement('div');
+    card.className = 'aw-approval';
+    const copy = document.createElement('div');
+    const title = document.createElement('strong');
+    title.textContent = `অনুমতি প্রয়োজন: ${request.toolName}`;
+    const detail = document.createElement('span');
+    detail.textContent = redactArgs(request.args) || 'Agent এই tool চালাতে চায়।';
+    copy.append(title, detail);
+    const actions = document.createElement('div');
+    actions.className = 'aw-actions';
+    const deny = document.createElement('button'); deny.type = 'button'; deny.className = 'ghost'; deny.textContent = 'না, বাতিল';
+    deny.addEventListener('click', () => void answerApproval(false));
+    const approve = document.createElement('button'); approve.type = 'button'; approve.textContent = 'অনুমতি দিন';
+    approve.addEventListener('click', () => void answerApproval(true));
+    actions.append(deny, approve); card.append(copy, actions); root.append(card);
+  }
 }
 
 async function answerApproval(approved) {
@@ -270,7 +276,7 @@ async function afterInitialize() {
   $('aw-start').textContent = '✓ Agent প্রস্তুত';
   await Promise.allSettled([
     refreshSettings(), refreshSessions(), refreshAutomations(), refreshSkills(),
-    refreshMemory(), loadMcpConfigs(), loadPersona(),
+    refreshMemory(), refreshFiles(), loadMcpConfigs(), loadPersona(),
   ]);
 }
 
@@ -515,6 +521,316 @@ async function searchMemory(event) { event.preventDefault(); requireInit(); cons
 async function forgetMemory(key) { if (!confirm(`“${key}” মেমোরি থেকে মুছবেন?`)) return; await invokeMemory('memory_forget', { key }); await refreshMemory(); }
 
 async function invokeFile(name, args) { const response = await nativeAgent().invokeTool(name, args); const result = parseJson(response?.resultJson, response); if (result?.error) throw new Error(result.error); return result; }
+// ── Private workspace file browser ──────────────────────────────────────────
+// This deliberately uses the same built-in tools as the agent. There is no
+// second browser-only store: an upload is written into files://agent/workspace
+// so the agent, personas, scheduler and user see one auditable file tree.
+const WORKSPACE_TEXT_LIMIT = 10_000_000;
+const TEXT_UPLOAD_EXTENSIONS = /\.(?:txt|md|markdown|json|csv|js|mjs|cjs|ts|tsx|jsx|py|html?|css|xml|ya?ml|toml|ini|log|svg|sh)$/i;
+
+function humanFileSize(value) {
+  const bytesValue = Number(value ?? 0);
+  if (!Number.isFinite(bytesValue) || bytesValue < 1024) return `${Math.max(0, Math.round(bytesValue || 0))} B`;
+  if (bytesValue < 1024 ** 2) return `${(bytesValue / 1024).toFixed(1)} KB`;
+  return `${(bytesValue / 1024 ** 2).toFixed(1)} MB`;
+}
+
+function normalizeWorkspacePath(value) {
+  const raw = clean(value).replace(/\\/g, '/');
+  if (!raw || raw === '.') return '.';
+  if (raw.startsWith('/') || /^[A-Za-z]:/.test(raw)) throw new Error('শুধু workspace-relative path ব্যবহার করুন।');
+  const parts = raw.split('/').filter((part) => part && part !== '.');
+  if (parts.some((part) => part === '..' || part.includes('\0'))) throw new Error('.. বা invalid path ব্যবহার করা যাবে না।');
+  return parts.join('/') || '.';
+}
+
+function parentWorkspacePath(path) {
+  const parts = normalizeWorkspacePath(path).split('/');
+  parts.pop();
+  return parts.filter((part) => part && part !== '.').join('/') || '.';
+}
+
+function baseWorkspaceName(path) {
+  const parts = normalizeWorkspacePath(path).split('/');
+  return parts.at(-1) === '.' ? '' : parts.at(-1);
+}
+
+function childWorkspacePath(directory, name) {
+  const safeName = clean(name);
+  if (!safeName || safeName === '.' || safeName === '..' || /[\\/\0]/.test(safeName)) throw new Error('একটি বৈধ file name দিন; /, \\ ও .. ব্যবহার করা যাবে না।');
+  if (bytes(safeName) > 255) throw new Error('File name সর্বোচ্চ 255 UTF-8 bytes হতে পারে।');
+  const parent = normalizeWorkspacePath(directory);
+  return parent === '.' ? safeName : `${parent}/${safeName}`;
+}
+
+function fileManagerState() { return state.files; }
+function setFilesStatus(message, tone = 'muted') {
+  const node = $('aw-files-status');
+  if (!node) return;
+  node.textContent = message;
+  node.dataset.tone = tone;
+}
+
+function currentFilePath() {
+  const files = fileManagerState();
+  if (files.selectedPath) return files.selectedPath;
+  if (files.isNew && clean($('aw-file-name')?.value)) return childWorkspacePath(files.directory, $('aw-file-name').value);
+  return null;
+}
+
+function clearFileEditor() {
+  const files = fileManagerState();
+  files.selectedPath = null;
+  files.originalContent = null;
+  files.originalBytes = 0;
+  files.isNew = false;
+  files.editable = false;
+  files.dirty = false;
+  const name = $('aw-file-name'); if (name) name.value = '';
+  const content = $('aw-file-content'); if (content) content.value = '';
+  updateFileManagerControls();
+}
+
+function confirmDiscardFileDraft() {
+  const files = fileManagerState();
+  return !(files.isNew || files.dirty) || window.confirm('এই file editor-এ unsaved পরিবর্তন আছে। পরিবর্তন বাদ দেবেন?');
+}
+
+function updateFileManagerControls() {
+  const files = fileManagerState();
+  const disabled = !state.initialized || state.running || files.busy;
+  const hasEditor = Boolean(files.selectedPath || files.isNew);
+  const name = $('aw-file-name');
+  const content = $('aw-file-content');
+  if (name) name.disabled = disabled || !files.isNew;
+  if (content) content.disabled = disabled || !hasEditor || !files.editable;
+  for (const id of ['aw-files-dir', 'aw-files-search', 'aw-files-include-skipped']) {
+    const node = $(id); if (node) node.disabled = disabled;
+  }
+  for (const id of ['aw-files-open-dir', 'aw-files-up', 'aw-files-refresh', 'aw-files-open-uploads', 'aw-files-find', 'aw-files-new', 'aw-files-choose']) {
+    const node = $(id); if (node) node.disabled = disabled;
+  }
+  const canSave = files.isNew ? Boolean(clean(name?.value)) : Boolean(files.selectedPath && files.editable && files.dirty);
+  if ($('aw-file-save')) $('aw-file-save').disabled = disabled || !canSave;
+  if ($('aw-file-revert')) $('aw-file-revert').disabled = disabled || !hasEditor || (!files.isNew && (!files.editable || !files.dirty));
+  if ($('aw-file-delete')) $('aw-file-delete').disabled = disabled || !files.selectedPath;
+  if ($('aw-file-insert-chat')) $('aw-file-insert-chat').disabled = disabled || !files.selectedPath;
+  const stateNode = $('aw-file-state');
+  if (stateNode) stateNode.textContent = !hasEditor ? 'কোনো ফাইল খোলা নেই'
+    : files.isNew ? (files.dirty ? 'নতুন draft · unsaved' : 'নতুন file draft')
+      : files.editable ? (files.dirty ? 'Unsaved changes' : 'Saved') : 'Read-only · binary/বড় file';
+  const pathNode = $('aw-file-path'); if (pathNode) pathNode.textContent = currentFilePath() ?? '—';
+  const sizeNode = $('aw-file-size');
+  if (sizeNode) sizeNode.textContent = !hasEditor ? 'সর্বোচ্চ 10 MB UTF-8 text'
+    : files.isNew ? `Draft · ${humanFileSize(bytes(content?.value ?? ''))}` : humanFileSize(files.originalBytes);
+}
+
+function renderFileEntries(items, mode) {
+  const root = $('aw-files-list');
+  if (!root) return;
+  root.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'agent-file-empty';
+    empty.textContent = mode === 'search' ? 'কোনো matching file/folder পাওয়া যায়নি।' : 'এই folder খালি।';
+    root.append(empty);
+    return;
+  }
+  const files = fileManagerState();
+  for (const entry of items) {
+    const type = String(entry?.type ?? 'unknown');
+    const path = mode === 'search'
+      ? normalizeWorkspacePath(entry?.path ?? '')
+      : childWorkspacePath(files.directory, String(entry?.name ?? ''));
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `agent-file-entry${files.selectedPath === path ? ' selected' : ''}`;
+    button.disabled = !state.initialized || files.busy || state.running || !['file', 'directory'].includes(type);
+    button.title = path;
+    const icon = document.createElement('span'); icon.setAttribute('aria-hidden', 'true'); icon.textContent = type === 'directory' ? '📁' : type === 'file' ? '▤' : '↗';
+    const label = document.createElement('span'); label.className = 'agent-file-entry-name'; label.textContent = mode === 'search' ? baseWorkspaceName(path) : String(entry?.name ?? path);
+    const meta = document.createElement('span'); meta.className = 'agent-file-entry-meta';
+    meta.textContent = type === 'directory' ? 'folder' : type === 'file' ? humanFileSize(entry?.size) : type === 'symlink' ? 'symlink · blocked' : 'unavailable';
+    button.append(icon, label, meta);
+    if (type === 'file') button.addEventListener('click', () => void guardFileOperation(() => openWorkspaceFile(path, entry)));
+    if (type === 'directory') button.addEventListener('click', () => void guardFileOperation(() => openWorkspaceDirectory(path)));
+    root.append(button);
+  }
+}
+
+async function refreshFiles(path = $('aw-files-dir')?.value ?? fileManagerState().directory) {
+  if (!state.initialized) return;
+  const directory = normalizeWorkspacePath(path);
+  const files = fileManagerState();
+  setFilesStatus(`Folder পড়া হচ্ছে: ${directory}`, 'busy');
+  const result = await invokeFile('list_files', { path: directory, include_skipped: Boolean($('aw-files-include-skipped')?.checked) });
+  const entries = Array.isArray(result?.entries) ? result.entries : [];
+  entries.sort((a, b) => {
+    const rank = (item) => item?.type === 'directory' ? 0 : item?.type === 'file' ? 1 : 2;
+    return rank(a) - rank(b) || String(a?.name ?? '').localeCompare(String(b?.name ?? ''), undefined, { sensitivity: 'base' });
+  });
+  files.directory = directory; files.entries = entries; files.mode = 'directory'; files.truncated = Boolean(result?.truncated);
+  if ($('aw-files-dir')) $('aw-files-dir').value = directory;
+  if ($('aw-files-count')) $('aw-files-count').textContent = `${entries.length}${files.truncated ? '+' : ''} items`;
+  renderFileEntries(entries, 'directory');
+  setFilesStatus(`Workspace/${directory === '.' ? '' : directory} · ${entries.length}টি item${files.truncated ? ' · তালিকা সীমিত, search ব্যবহার করুন' : ''}`, files.truncated ? 'warn' : 'ok');
+  updateFileManagerControls();
+}
+
+async function openWorkspaceDirectory(path) {
+  if (!confirmDiscardFileDraft()) return;
+  clearFileEditor();
+  await refreshFiles(path);
+}
+
+async function searchWorkspaceFiles() {
+  const pattern = clean($('aw-files-search')?.value);
+  if (!pattern) throw new Error('Filename search-এর জন্য pattern দিন; যেমন *.md।');
+  const files = fileManagerState();
+  setFilesStatus(`খোঁজা হচ্ছে: ${pattern}`, 'busy');
+  const result = await invokeFile('find_files', { path: files.directory, pattern, include_skipped: Boolean($('aw-files-include-skipped')?.checked) });
+  const matches = Array.isArray(result?.files) ? result.files : [];
+  files.entries = matches; files.mode = 'search'; files.truncated = Boolean(result?.truncated);
+  if ($('aw-files-count')) $('aw-files-count').textContent = `${matches.length}${files.truncated ? '+' : ''} matches`;
+  renderFileEntries(matches, 'search');
+  setFilesStatus(`${matches.length}টি match${files.truncated ? ' · scan/result limit-এ কাটা হয়েছে; pattern আরও নির্দিষ্ট করুন' : ''}`, files.truncated ? 'warn' : 'ok');
+}
+
+async function readWorkspaceText(path) {
+  let offset = 0; let content = ''; let expectedBytes = null; let expectedModifiedMs = null;
+  while (true) {
+    const part = await invokeFile('read_file', { path, offset_bytes: offset, limit_bytes: 50_000 });
+    if (typeof part?.content !== 'string' || !Number.isSafeInteger(part?.fileBytes)) throw new Error('File-এর বৈধ UTF-8 text metadata পাওয়া যায়নি।');
+    if (expectedBytes === null) { expectedBytes = part.fileBytes; expectedModifiedMs = part.modifiedMs ?? null; }
+    else if (part.fileBytes !== expectedBytes || (expectedModifiedMs !== null && part.modifiedMs !== expectedModifiedMs)) throw new Error('ফাইল পড়ার সময় বদলে গেছে; আবার Refresh/Open করুন।');
+    content += part.content;
+    if (!part.truncated) return { content, bytes: expectedBytes ?? 0 };
+    const next = Number(part.nextOffsetBytes);
+    if (!Number.isSafeInteger(next) || next <= offset || next > expectedBytes) throw new Error('File read cursor নিরাপদ নয়; আবার Refresh করুন।');
+    offset = next;
+  }
+}
+
+async function openWorkspaceFile(path, entry = {}) {
+  if (!confirmDiscardFileDraft()) return;
+  const files = fileManagerState();
+  const safePath = normalizeWorkspacePath(path);
+  setFilesStatus(`খোলা হচ্ছে: ${safePath}`, 'busy');
+  let text = null; let reason = '';
+  try { text = await readWorkspaceText(safePath); }
+  catch (error) {
+    const message = String(error?.message ?? error);
+    if (/utf-8|File exceeds|tool limit/i.test(message)) reason = /exceeds|limit/i.test(message) ? '10 MB-এর বেশি' : 'binary/non-UTF-8';
+    else throw error;
+  }
+  files.directory = parentWorkspacePath(safePath); files.selectedPath = safePath; files.isNew = false; files.dirty = false;
+  files.editable = Boolean(text); files.originalContent = text?.content ?? null; files.originalBytes = text?.bytes ?? Number(entry?.size ?? 0);
+  if ($('aw-files-dir')) $('aw-files-dir').value = files.directory;
+  if ($('aw-file-name')) $('aw-file-name').value = baseWorkspaceName(safePath);
+  if ($('aw-file-content')) $('aw-file-content').value = text?.content ?? '';
+  await refreshFiles(files.directory);
+  setFilesStatus(reason ? `${safePath} তালিকায় আছে, তবে ${reason} হওয়ায় editor read-only।` : `${safePath} খোলা হয়েছে · ${humanFileSize(files.originalBytes)}`, reason ? 'warn' : 'ok');
+  updateFileManagerControls();
+}
+
+function createWorkspaceFile() {
+  if (!confirmDiscardFileDraft()) return;
+  clearFileEditor();
+  const files = fileManagerState();
+  files.isNew = true; files.editable = true; files.originalContent = ''; files.originalBytes = 0; files.dirty = false;
+  updateFileManagerControls();
+  setFilesStatus(`Workspace/${files.directory === '.' ? '' : files.directory}-এ নতুন draft। Save create-only; existing file overwrite হবে না।`, 'muted');
+  $('aw-file-name')?.focus();
+}
+
+function updateWorkspaceFileDraft() {
+  const files = fileManagerState();
+  const content = $('aw-file-content')?.value ?? '';
+  files.dirty = files.isNew ? Boolean(clean($('aw-file-name')?.value) || content) : Boolean(files.selectedPath && content !== files.originalContent);
+  updateFileManagerControls();
+}
+
+async function saveWorkspaceFile() {
+  const files = fileManagerState();
+  if (!files.selectedPath && !files.isNew) throw new Error('আগে file নির্বাচন করুন বা নতুন file তৈরি করুন।');
+  const path = files.isNew ? childWorkspacePath(files.directory, $('aw-file-name').value) : files.selectedPath;
+  const content = $('aw-file-content')?.value ?? '';
+  if (bytes(content) > WORKSPACE_TEXT_LIMIT) throw new Error('File 10 MB UTF-8 limit ছাড়িয়েছে।');
+  if (!files.isNew && content === files.originalContent) return;
+  if (!files.isNew) {
+    const latest = await readWorkspaceText(path);
+    if (latest.content !== files.originalContent) throw new Error('File editor-এ খোলার পর disk-এ বদলেছে। Draft রাখা আছে; আবার Open করে পরিবর্তন মিলিয়ে নিন।');
+  }
+  setFilesStatus(files.isNew ? 'নতুন file তৈরি হচ্ছে; approval চাইতে পারে…' : 'পরিবর্তন সংরক্ষণ হচ্ছে; approval চাইতে পারে…', 'busy');
+  await invokeFile('write_file', { path, content, ...(files.isNew ? { create_only: true } : {}) });
+  files.selectedPath = path; files.directory = parentWorkspacePath(path); files.isNew = false; files.editable = true; files.dirty = false;
+  files.originalContent = content; files.originalBytes = bytes(content);
+  if ($('aw-file-name')) $('aw-file-name').value = baseWorkspaceName(path);
+  await refreshFiles(files.directory);
+  setFilesStatus(`${path} সংরক্ষিত · ${humanFileSize(files.originalBytes)}`, 'ok');
+}
+
+function revertWorkspaceFile() {
+  const files = fileManagerState();
+  if (files.isNew) { clearFileEditor(); setFilesStatus('নতুন file draft বাতিল হয়েছে।', 'muted'); return; }
+  if (!files.selectedPath || !files.editable) throw new Error('Revert করার মতো editable file নেই।');
+  $('aw-file-content').value = files.originalContent ?? ''; files.dirty = false;
+  updateFileManagerControls(); setFilesStatus('Editor-কে সর্বশেষ load করা content-এ ফিরিয়ে দেওয়া হয়েছে।', 'muted');
+}
+
+async function deleteWorkspaceFile() {
+  const files = fileManagerState();
+  const path = files.selectedPath;
+  if (!path) throw new Error('মুছতে আগে একটি file নির্বাচন করুন।');
+  if (!window.confirm(`“${path}” স্থায়ীভাবে মুছবেন? এরপর native approval-ও লাগতে পারে।`)) return;
+  setFilesStatus(`${path} মুছতে approval অপেক্ষা করছে…`, 'busy');
+  await invokeFile('delete_file', { path });
+  clearFileEditor(); await refreshFiles(files.directory);
+  setFilesStatus(`${path} স্থায়ীভাবে মুছে ফেলা হয়েছে।`, 'ok');
+}
+
+function isSupportedTextUpload(file) {
+  return TEXT_UPLOAD_EXTENSIONS.test(file.name) || /^text\//.test(file.type) || ['application/json', 'application/xml', 'image/svg+xml'].includes(file.type);
+}
+
+async function uploadWorkspaceFiles(list) {
+  const selected = [...list].slice(0, 8);
+  if (!selected.length) return;
+  const rejected = selected.filter((file) => !isSupportedTextUpload(file) || file.size > WORKSPACE_TEXT_LIMIT);
+  const accepted = selected.filter((file) => !rejected.includes(file));
+  if (rejected.length) toast(`${rejected.map((file) => file.name).join(', ')} text/10 MB limit পূরণ করে না; binary file এই private text workspace-এ upload করা যায় না।`, 'warn');
+  for (const file of accepted) {
+    const name = baseWorkspaceName(file.name.replace(/\\/g, '/'));
+    const path = childWorkspacePath('uploads', name);
+    setFilesStatus(`${name} upload হচ্ছে; approval চাইতে পারে…`, 'busy');
+    const content = await file.text();
+    if (bytes(content) > WORKSPACE_TEXT_LIMIT) throw new Error(`${name} 10 MB UTF-8 limit ছাড়িয়েছে।`);
+    await invokeFile('write_file', { path, content, create_only: true });
+  }
+  await refreshFiles('uploads');
+  setFilesStatus(`${accepted.length}টি text file uploads/-এ সংরক্ষিত। চ্যাটে path দিন button দিয়ে Agent-কে পড়তে বলুন।`, 'ok');
+}
+
+function insertFilePathIntoChat() {
+  const path = fileManagerState().selectedPath;
+  if (!path) return;
+  showTab('chat');
+  const input = $('aw-chat-input');
+  const instruction = `workspace-এর ফাইল “${path}” পড়ো এবং সংক্ষেপে বলো।`;
+  input.value = input.value ? `${input.value.trim()}\n${instruction}` : instruction;
+  input.focus();
+}
+
+async function guardFileOperation(operation) {
+  requireInit();
+  const files = fileManagerState();
+  if (files.busy) throw new Error('একটি file operation চলছে—শেষ হওয়া পর্যন্ত অপেক্ষা করুন।');
+  files.busy = true; updateFileManagerControls();
+  try { return await operation(); }
+  catch (error) { setFilesStatus(String(error?.message ?? error), 'err'); throw error; }
+  finally { files.busy = false; updateFileManagerControls(); }
+}
+
 async function loadPersona() { if (!state.initialized) return; const result = await invokeFile('read_file', { path: state.personaFile, offset_bytes: 0, limit_bytes: 50_000 }); $('aw-persona-editor').value = result?.content ?? ''; $('aw-persona-hint').textContent = PERSONA_HINTS[state.personaFile] || ''; }
 async function savePersona() { requireInit(); const content = $('aw-persona-editor').value; if (bytes(content) > 10_000_000) throw new Error('ফাইলটি ১০ MB সীমার বেশি।'); await invokeFile('write_file', { path: state.personaFile, content }); toast(`${state.personaFile} সংরক্ষণ হয়েছে।`, 'ok'); }
 
@@ -649,7 +965,15 @@ function bind() {
   $('aw-cron-form').addEventListener('submit', (event) => void guarded('Automation', () => createCron(event))); $('aw-heartbeat-form').addEventListener('submit', (event) => void guarded('Heartbeat', () => saveHeartbeat(event))); $('aw-refresh-automations').addEventListener('click', () => void guarded('Automation', refreshAutomations)); $('aw-schedule-wake').addEventListener('click', () => void guarded('Wake', scheduleWake)); $('aw-cancel-wake').addEventListener('click', () => void guarded('Wake', cancelWake)); $('aw-refresh-inbox').addEventListener('click', () => void guarded('Inbox', refreshAutomations)); $('aw-clear-inbox').addEventListener('click', () => void guarded('Inbox', async () => { await nativeAgent().clearSurfacedMessages(); await refreshAutomations(); }));
   $('aw-skill-form').addEventListener('submit', (event) => void guarded('Skill', () => createSkill(event))); $('aw-refresh-skills').addEventListener('click', () => void guarded('Skills', refreshSkills));
   $('aw-memory-form').addEventListener('submit', (event) => void guarded('মেমোরি', () => storeMemory(event))); $('aw-memory-search-form').addEventListener('submit', (event) => void guarded('মেমোরি খোঁজা', () => searchMemory(event))); $('aw-refresh-memory').addEventListener('click', () => void guarded('মেমোরি', refreshMemory));
-  document.querySelectorAll('[data-aw-persona-file]').forEach((button) => button.addEventListener('click', () => { state.personaFile = button.dataset.awPersonaFile; document.querySelectorAll('[data-aw-persona-file]').forEach((node) => node.classList.toggle('active', node === button)); void guarded('Persona file', loadPersona); })); $('aw-load-persona').addEventListener('click', () => void guarded('Persona file', loadPersona)); $('aw-save-persona').addEventListener('click', () => void guarded('Persona save', savePersona)); $('aw-open-file-manager').addEventListener('click', () => { document.querySelector('#aw-persona-files')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); document.querySelector('#aw-persona-files button')?.focus(); });
+  document.querySelectorAll('[data-aw-persona-file]').forEach((button) => button.addEventListener('click', () => { state.personaFile = button.dataset.awPersonaFile; document.querySelectorAll('[data-aw-persona-file]').forEach((node) => node.classList.toggle('active', node === button)); void guarded('Persona file', loadPersona); })); $('aw-load-persona').addEventListener('click', () => void guarded('Persona file', loadPersona)); $('aw-save-persona').addEventListener('click', () => void guarded('Persona save', savePersona)); $('aw-open-file-manager').addEventListener('click', () => showTab('files'));
+  $('aw-files-refresh').addEventListener('click', () => void guarded('Files', () => guardFileOperation(refreshFiles)));
+  $('aw-files-open-dir').addEventListener('click', () => void guarded('Files', () => guardFileOperation(() => openWorkspaceDirectory($('aw-files-dir').value))));
+  $('aw-files-up').addEventListener('click', () => void guarded('Files', () => guardFileOperation(() => openWorkspaceDirectory(parentWorkspacePath(fileManagerState().directory)))));
+  $('aw-files-open-uploads').addEventListener('click', () => void guarded('Files', () => guardFileOperation(() => openWorkspaceDirectory('uploads'))));
+  $('aw-files-find').addEventListener('click', () => void guarded('Files', () => guardFileOperation(searchWorkspaceFiles)));
+  $('aw-files-new').addEventListener('click', () => void guarded('Files', () => guardFileOperation(createWorkspaceFile)));
+  $('aw-files-choose').addEventListener('click', () => $('aw-files-picker').click());
+  $('aw-files-picker').addEventListener('change', (event) => { const list = event.target.files; event.target.value = ''; void guarded('Upload', () => guardFileOperation(() => uploadWorkspaceFiles(list))); }); $('aw-files-include-skipped').addEventListener('change', () => void guarded('Files', () => guardFileOperation(refreshFiles))); $('aw-files-dir').addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); $('aw-files-open-dir').click(); } }); $('aw-files-search').addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); $('aw-files-find').click(); } }); $('aw-file-name').addEventListener('input', updateWorkspaceFileDraft); $('aw-file-content').addEventListener('input', updateWorkspaceFileDraft); $('aw-file-save').addEventListener('click', () => void guarded('File save', () => guardFileOperation(saveWorkspaceFile))); $('aw-file-revert').addEventListener('click', () => void guarded('File revert', revertWorkspaceFile)); $('aw-file-delete').addEventListener('click', () => void guarded('File delete', () => guardFileOperation(deleteWorkspaceFile))); $('aw-file-insert-chat').addEventListener('click', insertFilePathIntoChat);
   $('aw-mcp-form').addEventListener('submit', (event) => void guarded('MCP', () => addMcp(event))); $('aw-reconnect-mcp').addEventListener('click', () => void guarded('MCP', connectAllMcp));
   $('aw-load-settings').addEventListener('click', () => void guarded('Settings', refreshSettings)); $('aw-provider').addEventListener('change', () => { $('aw-model-label').textContent = $('aw-provider').value === 'auto' ? 'Auto provider' : $('aw-provider').value; }); $('aw-key-provider').addEventListener('change', () => void guarded('Key status', refreshKeyStatus)); $('aw-router-form').addEventListener('submit', (event) => void guarded('AI Router', () => saveRouter(event))); $('aw-router-check').addEventListener('click', () => void guarded('AI Router', checkRouterConfig)); $('aw-router-live-test').addEventListener('click', () => void guarded('AI Router live test', runLiveRouterTest)); $('aw-router-refresh').addEventListener('click', () => void guarded('AI Router', refreshSettings)); $('aw-refresh-models').addEventListener('click', () => void guarded('Model catalog', refreshModels)); $('aw-save-key').addEventListener('click', () => void guarded('API key', saveProviderKey)); $('aw-runtime-form').addEventListener('submit', (event) => void guarded('Runtime settings', () => saveRuntime(event))); $('aw-seed-tools').addEventListener('click', () => void guarded('Tool defaults', seedTools)); $('aw-refresh-tools').addEventListener('click', () => void guarded('Tools', refreshSettings));
 }
@@ -658,6 +982,7 @@ function start() {
   if (!$('agent-workspace')) return;
   bind();
   setComposerAvailability(false);
+  updateFileManagerControls();
   if (!featureReady()) {
     status('Web preview-এ agent চলে না; Android/iOS build-এ ব্যবহার করুন।', 'warn');
     $('aw-start').disabled = true;

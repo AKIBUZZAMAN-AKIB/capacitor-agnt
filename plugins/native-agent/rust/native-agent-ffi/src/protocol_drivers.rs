@@ -124,15 +124,23 @@ pub struct OpenAiResponsesDriver {
     base_url: String,
     client: reqwest::Client,
     streaming_supported: bool,
+    // Some OpenAI-compatible Responses gateways reject this field outright.
+    // Keep sequential calls where supported, but omit it for those gateways.
+    parallel_tool_calls_supported: bool,
 }
 
 impl OpenAiResponsesDriver {
     pub fn new(api_key: String, base_url: String) -> Self {
-        Self { api_key, base_url, client: client(), streaming_supported: true }
+        Self { api_key, base_url, client: client(), streaming_supported: true, parallel_tool_calls_supported: true }
     }
 
     pub fn with_streaming_support(mut self, supported: bool) -> Self {
         self.streaming_supported = supported;
+        self
+    }
+
+    pub fn without_parallel_tool_calls(mut self) -> Self {
+        self.parallel_tool_calls_supported = false;
         self
     }
 
@@ -183,7 +191,7 @@ impl OpenAiResponsesDriver {
         (input, instructions)
     }
 
-    fn build_body(req: &CompletionRequest, stream: bool) -> Value {
+    fn build_body(&self, req: &CompletionRequest, stream: bool) -> Value {
         let (input, instructions) = Self::input_items(req);
         let tools: Vec<Value> = req.tools.iter().map(|tool| json!({
             "type":"function",
@@ -198,8 +206,8 @@ impl OpenAiResponsesDriver {
             "max_output_tokens":req.max_tokens,
             "stream":stream,
             "store":false,
-            "parallel_tool_calls":false,
         });
+        if self.parallel_tool_calls_supported { body["parallel_tool_calls"] = json!(false); }
         if !instructions.is_empty() { body["instructions"] = json!(instructions); }
         if !tools.is_empty() {
             body["tools"] = json!(tools);
@@ -217,7 +225,7 @@ impl OpenAiResponsesDriver {
         if !self.api_key.is_empty() {
             builder = builder.bearer_auth(&self.api_key);
         }
-        builder.json(&Self::build_body(req, stream))
+        builder.json(&self.build_body(req, stream))
     }
 }
 
@@ -833,12 +841,21 @@ mod protocol_tests {
 
     #[test]
     fn responses_function_tools_use_flat_schema_and_no_chat_shape() {
-        let body = OpenAiResponsesDriver::build_body(&request("gpt-5"), false);
+        let body = OpenAiResponsesDriver::new("key".into(), "https://example.invalid/v1".into()).build_body(&request("gpt-5"), false);
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "lookup");
         assert!(body["tools"][0].get("function").is_none());
         assert_eq!(body["max_output_tokens"], 512);
         assert_eq!(body["store"], false);
+    }
+
+    #[test]
+    fn responses_gateway_can_omit_unsupported_parallel_tool_calls() {
+        let body = OpenAiResponsesDriver::new("key".into(), "https://example.invalid/v1".into())
+            .without_parallel_tool_calls()
+            .build_body(&request("gpt-oss-20b"), false);
+        assert!(body.get("parallel_tool_calls").is_none());
+        assert_eq!(body["tools"][0]["type"], "function");
     }
 
     #[test]

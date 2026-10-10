@@ -1685,8 +1685,16 @@ fn create_driver(
             let endpoint = base_url.ok_or_else(|| NativeAgentError::Agent {
                 msg: format!("No Responses API endpoint configured for '{}'", route.provider),
             })?;
-            Box::new(OpenAiResponsesDriver::new(route.api_key.clone(), endpoint)
-                .with_streaming_support(route.streaming_supported))
+            let driver = OpenAiResponsesDriver::new(route.api_key.clone(), endpoint)
+                .with_streaming_support(route.streaming_supported);
+            // OVHcloud's GPT-OSS Responses endpoint rejects the otherwise valid
+            // OpenAI field `parallel_tool_calls: false` with HTTP 400. Omitting
+            // it preserves compatible sequential tool handling in our loop.
+            if route.provider == "ovhcloud" {
+                Box::new(driver.without_parallel_tool_calls())
+            } else {
+                Box::new(driver)
+            }
         }
         ProviderProtocol::GeminiGenerateContent => {
             let endpoint = base_url.ok_or_else(|| NativeAgentError::Agent {
