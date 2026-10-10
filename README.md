@@ -4,6 +4,13 @@
 
 > **তিনটি কঠোর trust tier:** (১) `www/`/framework output trusted host—এটি পূর্ণ `window.NativeKit` সরাসরি ব্যবহার করে, mini-app policy prompt-এর মধ্যে পড়ে না; (২) installed ZIP/static/Web Component mini app—এটি ergonomic `window.NativeKit` façade পেলেও raw Capacitor/plugin access পায় না, এবং প্রতিটি native call native-held session/app identity-সহ main-app broker, call-time consent/stored decision ও audit দিয়ে যায়; (৩) remote HTTPS URL—এটি browser-only, তাই কোনো NativeKit object, RPC transport, injected bootstrap/script handler বা native API consent prompt পায় না। Third-party code কখনো trusted `www/`-তে merge করবেন না।
 
+## সর্বশেষ (v1.4.13)
+
+- **UI/UX রিফ্রেশ** — নতুন ডিজাইন-সিস্টেম (মিডনাইট গ্লাস), বাংলা-ফার্স্ট টাইপোগ্রাফি, মোবাইলে একটাই সৎ স্ক্রল-অক্ষ, ≥৪০px টাচ টার্গেট।
+- **CI এরর ফিক্স** — iOS signing এখন capability-gated: সিক্রেট না থাকলে ট্যাগ push-এ আর লাল হয় না, বরং সিমুলেটর কম্পাইল-গেট সবুজ রেখে কোন সিক্রেট দরকার তা summary-তে বলে দেয়।
+
+বিস্তারিত: [docs/ci-and-ui-refresh.bn.md](./docs/ci-and-ui-refresh.bn.md) · স্ক্রিনশট: [docs/screenshots](./docs/screenshots)
+
 ## কী আছে
 
 - একমাত্র app-specific configuration: [`app.config.json`](./app.config.json)
