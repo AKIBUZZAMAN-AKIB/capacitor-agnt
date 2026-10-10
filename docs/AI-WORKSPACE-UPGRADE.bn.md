@@ -123,19 +123,18 @@ MCP server external/untrusted capability। তাই:
 
 ### ৪.৩ AI Router cockpit
 
-নতুন **AI Router** card থেকে user এখন:
+নতুন **Free Router** card থেকে user এখন:
 
-- provider-কে enable/disable ও priority অনুযায়ী উপর-নিচে সাজাতে পারেন;
-- প্রতিটি provider-এর default model নির্ধারণ বা catalog default-এ ফিরতে পারেন;
-- transient failure-এ failover এবং সর্বোচ্চ fallback সংখ্যা ঠিক করতে পারেন;
-- API key ও model configuration-ভিত্তিক **non-billable Config যাচাই** চালাতে পারেন;
-- নিজের সম্মতিতে একটি ছোট **বাস্তব পরীক্ষা** চালাতে পারেন। সেটি `Auto router` দিয়ে `ROUTER_HEALTHCHECK` পাঠায় এবং live `trying → selected/fallback` event দেখায়। বাস্তব পরীক্ষায় provider usage/billing হতে পারে, তাই এটি কখনো automatic নয়।
+- Kilo Auto Free → OpenRouter Free Models Router-এর locked, no-cost ক্রম দেখতে পারেন;
+- transient failure-এ fallback এবং সর্বোচ্চ fallback সংখ্যা ঠিক করতে পারেন;
+- API key/rate-limit readiness-ভিত্তিক **non-billable Config যাচাই** চালাতে পারেন;
+- নিজের সম্মতিতে একটি ছোট **বাস্তব পরীক্ষা** চালাতে পারেন। সেটি `Free Router` দিয়ে `ROUTER_HEALTHCHECK` পাঠায়; native admission boundary paid/default/unknown-price model reject করে, তাই free mode-এ billable model ব্যবহার হয় না।
 
-Native engine source audit-এ আচরণটি নিশ্চিত করা হয়েছে: `provider='auto'` হলে `autoRouting.providerOrder` থেকে eligible route তৈরি হয়; retryable failure এবং user-visible streaming শুরু হওয়ার আগেই শুধু পরের route চেষ্টা হয়। ফলে partial answer বা side-effect পুনরায় চলার ঝুঁকি কমে। Explicit provider কখনো silent cross-provider fallback করে না।
+Native engine source audit-এ আচরণটি নিশ্চিত করা হয়েছে: `provider='auto'` হলে পুরোনো বা হাতে-edit-করা `autoRouting.providerOrder` নয়, আগে Kilo `kilo-auto/free`, তারপর OpenRouter `openrouter/free` তৈরি হয়। Kilo-এর virtual router live curated free set থেকে নিজে নির্বাচন করে; তাই stale hard-coded model inventory রাখা হয় না। Retryable failure এবং user-visible streaming শুরু হওয়ার আগেই শুধু দ্বিতীয় route চেষ্টা হয়। ফলে partial answer বা side-effect পুনরায় চলার ঝুঁকি কমে। Explicit provider কখনো silent cross-provider fallback করে না।
 
-AI Horde, LLM7 ও Pollinations-এর built-in default model নেই; router UI ওই route-এ আলাদা model দিতে মনে করায়। WebLLM foreground WebView/WebGPU-নির্ভর, তাই এটি background automatic fallback হিসেবে preflight-এ ready বলা হয় না।
+Free Router model picker-এ কেবল এই দুই provider-maintained virtual free router দেখানো হয়। নির্দিষ্ট provider বাছলে তার catalog আলাদা করে দেখা/পরীক্ষা করা যায়; সেটি Free Router-এর price boundary বদলায় না। Kilo Auto Free anonymous/rate-limited হতে পারে এবং Kilo catalog-এ prompt-data-use warning থাকলে sensitive data না পাঠানো উচিত; OpenRouter fallback-এ OpenRouter key লাগে।
 
-**OpenRouter আলাদা স্তর:** app-এর `autoRouting` হলো app-level cross-provider router। OpenRouter-কে যখন provider হিসেবে বাছা হয়, তার নিজের upstream provider-routing (`order`, `only`, `zdr`, `data_collection`, `max_price`) আলাদা API feature। বর্তমান native request contract-এ ওই fields নেই, তাই UI-তে ভুয়া control যোগ করা হয়নি। ভবিষ্যতে যুক্ত হলে strict allow-list, zero-retention ও cost-limit policy native request layer-এই enforce করতে হবে, শুধু UI-তে নয়। Reference: [OpenRouter Provider Routing](https://openrouter.ai/docs/guides/routing/provider-selection)।
+**OpenRouter আলাদা স্তর:** OpenRouter-এর `openrouter/free` তার নিজের live free-model router। নির্দিষ্ট OpenRouter provider mode-এ upstream provider-routing (`order`, `only`, `zdr`, `data_collection`, `max_price`) আলাদা API feature। বর্তমান native request contract-এ ওই fields নেই, তাই UI-তে ভুয়া control যোগ করা হয়নি। ভবিষ্যতে যুক্ত হলে strict allow-list, zero-retention ও cost-limit policy native request layer-এই enforce করতে হবে, শুধু UI-তে নয়। Reference: [OpenRouter Provider Routing](https://openrouter.ai/docs/guides/routing/provider-selection)।
 
 ### ৪.৪ OAuth: বর্তমান সত্য
 
