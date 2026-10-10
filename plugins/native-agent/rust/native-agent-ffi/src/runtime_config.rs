@@ -320,9 +320,11 @@ mod tests {
         assert_eq!(config.max_retry_delay_ms, 30_000);
         assert_eq!(config.default_cron_max_turns, 10);
         assert_eq!(config.default_heartbeat_max_turns, 5);
-        assert_eq!(config.default_provider, "anthropic");
-        assert!(config.default_models.is_empty());
-        assert_eq!(config.auto_routing.provider_order.first().map(String::as_str), Some("anthropic"));
+        // A new workspace starts on the no-cost "auto" router (Kilo-first free routing).
+        assert_eq!(config.default_provider, "auto");
+        assert_eq!(config.default_models.get("kilo").map(String::as_str), Some("kilo-auto/free"));
+        assert_eq!(config.default_models.get("openrouter").map(String::as_str), Some("openrouter/free"));
+        assert_eq!(config.auto_routing.provider_order.first().map(String::as_str), Some("kilo"));
     }
 
     #[test]

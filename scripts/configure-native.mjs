@@ -460,11 +460,21 @@ def nativeKitSigningReady = nativeKitKeystorePath && System.getenv("ANDROID_KEYS
   // Do this after replacing the generated signing preamble. Otherwise a
   // previously interrupted file can have the flatDir text captured by the
   // broad preamble-repair range and break Gradle syntax on the next sync.
-  if (!build.includes('@capacitor/background-runner/android/src/main/libs')) {
-    build = build.replace(
-      "dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'",
-      "dirs '../capacitor-cordova-android-plugins/src/main/libs', '../../node_modules/@capacitor/background-runner/android/src/main/libs', 'libs'"
-    );
+  // The @capacitor/background-runner postinstall (scripts/install_libs.js) looks
+  // for the Capacitor flatDir line *exactly* and expects the background-runner
+  // path on its own line directly below it (`\n\t\tdirs '<bg>', 'libs'`). If the
+  // two shapes disagree, that postinstall cannot find its anchor, inserts at a
+  // random offset (indexOf === -1) and corrupts build.gradle on every `npm ci`.
+  // So we always write the exact shape install_libs.js checks for, which makes
+  // it a no-op on every later install.
+  const bgRunnerLibs = '../../node_modules/@capacitor/background-runner/android/src/main/libs';
+  const capacitorFlatDir = "dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'";
+  const legacyInlineFlatDir = `dirs '../capacitor-cordova-android-plugins/src/main/libs', '${bgRunnerLibs}', 'libs'`;
+  const bgRunnerFlatDir = `dirs '${bgRunnerLibs}', 'libs'`;
+  if (build.includes(legacyInlineFlatDir)) {
+    build = build.replace(legacyInlineFlatDir, `${capacitorFlatDir}\n\t\t${bgRunnerFlatDir}`);
+  } else if (!build.includes(`\n\t\t${bgRunnerFlatDir}`)) {
+    build = build.replace(capacitorFlatDir, `${capacitorFlatDir}\n\t\t${bgRunnerFlatDir}`);
   }
 
   if (!build.includes('NATIVEKIT_SIGNING_START')) {
