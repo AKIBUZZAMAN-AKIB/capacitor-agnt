@@ -20,6 +20,14 @@
     <h1>NativeKit Universal Shell</h1>
     <p>একটি replaceable web UI, একটি স্থায়ী <code>window.NativeKit</code> native façade।</p>
     <div id="platform" class="platform">Bridge loading…</div>
+    <nav class="hero-chips" aria-label="দ্রুত navigation">
+      <a href="#agent-lab">🧠 AI Workspace</a>
+      <a href="#widget-lab">🧩 Widgets</a>
+      <a href="#app-browser-manager">📦 App Browser</a>
+      <a href="#blend-test">🎨 Appearance</a>
+      <a href="#full-api-lab">🔌 Native API</a>
+      <a href="#host-log">📜 Live log</a>
+    </nav>
   </header>
 
   <main>
@@ -469,7 +477,7 @@
       <pre id="bt-diag" style="margin-top:14px;font-size:11px;max-height:200px">ডায়াগনোস্টিক আসছে…</pre>
     </section>
 
-    <section class="panel log-panel">
+    <section class="panel log-panel" id="host-log">
       <div class="log-heading"><div><p class="eyebrow">HOST EVENT LOG</p><h2>Live output</h2></div><button id="clear" class="ghost">Clear</button></div>
       <pre id="log" aria-live="polite"></pre>
     </section>
