@@ -3,6 +3,21 @@
 // task-oriented interface a real user uses every day.
 
 const $ = (id) => document.getElementById(id);
+
+// Icons are in agent.html's inline SVG sprite. Do not use emoji/icon-font
+// glyphs here: Android WebView font fallback made several of them disappear.
+function icon(name, label = '') {
+  const ns = 'http://www.w3.org/2000/svg';
+  const node = document.createElementNS(ns, 'svg');
+  node.setAttribute('class', 'aw-icon');
+  node.setAttribute('aria-hidden', label ? 'false' : 'true');
+  if (label) node.setAttribute('aria-label', label);
+  const use = document.createElementNS(ns, 'use');
+  use.setAttribute('href', `#aw-icon-${name}`);
+  node.append(use);
+  return node;
+}
+
 const AGENT_INIT = Object.freeze({
   dbPath: 'files://agent/agent.db',
   workspacePath: 'files://agent/workspace',
@@ -37,12 +52,27 @@ const PROVIDER_LABELS = Object.freeze({
   ovhcloud: 'OVHcloud', opencode_zen: 'OpenCode Zen', llm7: 'LLM7', kilo: 'Kilo',
   pollinations: 'Pollinations', aihorde: 'AI Horde', webllm: 'WebLLM (local)',
 });
+// `auto` is a locked, no-cost policy rather than a generic provider roulette.
+// These provider-maintained virtual routers track live free capacity server-side.
+const FREE_ROUTER_ROUTES = Object.freeze([
+  { provider: 'kilo', model: 'kilo-auto/free', label: 'Kilo Auto Free', note: 'বর্তমান Kilo curated free set থেকে dynamic নির্বাচন · key ছাড়া সীমিত ব্যবহার · prompt data provider ব্যবহার করতে পারে' },
+  { provider: 'openrouter', model: 'openrouter/free', label: 'OpenRouter Free Models Router', note: 'বর্তমান OpenRouter free model set থেকে feature-aware fallback · OpenRouter key দরকার' },
+]);
 
 const state = {
   initialized: false,
   initializing: false,
   listening: false,
+  viewportWired: false,
   running: false,
+  // Never pull a reader back to the bottom while they are reviewing an older
+  // response; only auto-follow when they were already near the latest turn.
+  chatAutoScroll: true,
+  // True only when the native engine has this conversation's complete raw
+  // transcript loaded. Follow-up turns must use followUp(), not a fresh
+  // sendMessage(), otherwise the engine receives no prior messages and writes
+  // the new one-turn snapshot over saved history.
+  sessionReady: false,
   sessionKey: `chat-${Date.now()}`,
   runtimeConfig: null,
   pendingApproval: null,
@@ -85,8 +115,46 @@ function status(message, tone = 'muted') {
   const node = $('aw-status');
   if (!node) return;
   node.dataset.tone = tone;
+  // A ready state needs no permanent banner. Surface only active work, warnings
+  // and failures as a compact toolbar chip.
+  node.hidden = !['busy', 'warn', 'err'].includes(tone);
   const text = node.querySelector('span');
   if (text) text.textContent = message;
+}
+
+function chatDistanceFromBottom(feed = $('aw-chat-feed')) {
+  if (!feed) return 0;
+  return Math.max(0, feed.scrollHeight - feed.scrollTop - feed.clientHeight);
+}
+
+function scrollChatToBottom(force = false) {
+  const feed = $('aw-chat-feed');
+  if (!feed || (!force && !state.chatAutoScroll)) return;
+  requestAnimationFrame(() => {
+    if (force || state.chatAutoScroll) feed.scrollTop = feed.scrollHeight;
+  });
+}
+
+function syncViewportHeight() {
+  const viewport = window.visualViewport;
+  const height = Math.max(1, Math.round(viewport?.height || window.innerHeight));
+  document.documentElement.style.setProperty('--aw-viewport-height', `${height}px`);
+  const header = document.querySelector('.agent-page-header');
+  if (header) document.documentElement.style.setProperty('--aw-header-height', `${Math.ceil(header.getBoundingClientRect().height)}px`);
+}
+
+function wireViewportAndChatScroll() {
+  if (state.viewportWired) return;
+  state.viewportWired = true;
+  const update = () => requestAnimationFrame(syncViewportHeight);
+  window.addEventListener('resize', update, { passive: true });
+  window.visualViewport?.addEventListener('resize', update, { passive: true });
+  window.visualViewport?.addEventListener('scroll', update, { passive: true });
+  const feed = $('aw-chat-feed');
+  if (feed) {
+    feed.addEventListener('scroll', () => { state.chatAutoScroll = chatDistanceFromBottom(feed) < 72; }, { passive: true });
+  }
+  syncViewportHeight();
 }
 
 function requireInit() {
@@ -155,13 +223,17 @@ function recordRouteEvent(kind, payload = {}) {
 }
 
 function makeMessage(role, text, when = Date.now(), pending = false) {
+  // A submitted user prompt should reveal the new turn. Incoming deltas obey
+  // the reader's current scroll position instead of fighting their finger.
+  const revealLatest = role === 'user' || state.chatAutoScroll;
   $('aw-empty-chat')?.remove();
   const wrap = document.createElement('article');
   wrap.className = `aw-message ${role === 'user' ? 'user' : 'assistant'}`;
   wrap.dataset.role = role;
   const avatar = document.createElement('div');
   avatar.className = 'aw-avatar';
-  avatar.textContent = role === 'user' ? 'আপনি' : '✦';
+  if (role === 'user') avatar.textContent = 'আপনি';
+  else avatar.append(icon('spark'));
   const body = document.createElement('div');
   const bubble = document.createElement('div');
   bubble.className = 'aw-bubble';
@@ -173,7 +245,7 @@ function makeMessage(role, text, when = Date.now(), pending = false) {
   body.append(bubble, stamp);
   wrap.append(avatar, body);
   $('aw-chat-feed')?.append(wrap);
-  $('aw-chat-feed').scrollTop = $('aw-chat-feed').scrollHeight;
+  scrollChatToBottom(revealLatest);
   return bubble;
 }
 
@@ -183,10 +255,11 @@ function clearChat() {
   feed.replaceChildren();
   state.currentAssistant = null;
   state.activity = [];
+  state.chatAutoScroll = true;
   const empty = document.createElement('div');
   empty.id = 'aw-empty-chat';
   empty.className = 'aw-empty-chat';
-  empty.innerHTML = '<div><div class="aw-empty-icon">✦</div><h3>নতুন কথোপকথন</h3><p>আপনার লক্ষ্য লিখুন। Agent জটিল কাজ হলে আগে একটি পরিকল্পনা দেখাতে পারে এবং tool চালানোর আগে অনুমতি চাইবে।</p></div>';
+  empty.innerHTML = '<div><p class="aw-empty-lead">কী করতে চান?</p></div>';
   feed.append(empty);
 }
 
@@ -238,11 +311,10 @@ async function initialize() {
   if (state.initializing) return;
   state.initializing = true;
   setComposerAvailability(false);
-  $('aw-start').disabled = true;
   try {
     if (!featureReady()) {
-      status('Web preview-এ native agent চলে না; Android/iOS build চালান।', 'warn');
-      toast('Native build ছাড়া AI engine চালু করা যাবে না।', 'warn');
+      // The web canvas intentionally stays quiet. It is a layout preview, not a
+      // fake agent state; the real engine initializes automatically in-app.
       return;
     }
     if (state.initialized || globalThis.__nativeKitAgentInitialized) {
@@ -264,7 +336,6 @@ async function initialize() {
     toast(`Agent চালু হয়নি: ${error.message ?? error}`, 'err');
   } finally {
     state.initializing = false;
-    $('aw-start').disabled = false;
   }
 }
 
@@ -273,7 +344,6 @@ async function afterInitialize() {
   // The engine is ready at this point. Do not make chat wait for optional
   // settings/history refreshes: that made a healthy agent look unsendable.
   setComposerAvailability(true);
-  $('aw-start').textContent = '✓ Agent প্রস্তুত';
   await Promise.allSettled([
     refreshSettings(), refreshSessions(), refreshAutomations(), refreshSkills(),
     refreshMemory(), refreshFiles(), loadMcpConfigs(), loadPersona(),
@@ -290,7 +360,7 @@ async function wireEvents() {
       const text = payload?.text ?? payload?.delta ?? '';
       if (!state.currentAssistant) state.currentAssistant = makeMessage('assistant', '', Date.now(), true);
       state.currentAssistant.textContent += text;
-      $('aw-chat-feed').scrollTop = $('aw-chat-feed').scrollHeight;
+      scrollChatToBottom();
       return;
     }
     if (type === 'approval_request') {
@@ -324,7 +394,11 @@ async function wireEvents() {
     if (type === 'context.compacted' || type === 'context.trimmed') { appendActivity('পুরোনো context সংক্ষেপ করা হয়েছে', 'warn'); return; }
     if (type === 'agent.completed') {
       state.currentAssistant?.removeAttribute('data-pending');
-      state.currentAssistant = null; setRunning(false, 'উত্তর প্রস্তুত।'); void refreshSessions(); return;
+      state.currentAssistant = null;
+      // The native side has now stored this exact session in current_session,
+      // so subsequent prompts can preserve context through followUp().
+      if (!payload?.sessionKey || payload.sessionKey === state.sessionKey) state.sessionReady = true;
+      setRunning(false, 'উত্তর প্রস্তুত।'); void refreshSessions(); return;
     }
     if (type === 'agent.error' || type === 'agent.background_timeout') {
       const message = payload?.error ?? payload?.message ?? (type === 'agent.background_timeout' ? 'Background সময়সীমা শেষ' : 'Agent error');
@@ -351,8 +425,18 @@ async function sendMessage(event) {
   state.currentAssistant = makeMessage('assistant', '', Date.now(), true);
   setRunning(true, 'Agent ভাবছে…'); appendActivity('নতুন কাজ শুরু');
   try {
-    const options = { prompt, sessionKey: state.sessionKey, provider, ...(model ? { model } : {}), ...(systemPrompt ? { systemPrompt } : {}) };
-    await nativeAgent().sendMessage(options);
+    if (state.sessionReady) {
+      // Re-load the selected main session immediately before every follow-up.
+      // A concurrent Skill completion also uses the native handle and can make
+      // its own session current; this prevents the foreground composer from
+      // accidentally continuing a Skill transcript. resumeSession restores raw
+      // tool calls/results, not merely the display text shown in the DOM.
+      await nativeAgent().resumeSession({ sessionKey: state.sessionKey, agentId: 'main' });
+      await nativeAgent().followUp({ prompt });
+    } else {
+      const options = { prompt, sessionKey: state.sessionKey, provider, ...(model ? { model } : {}), ...(systemPrompt ? { systemPrompt } : {}) };
+      await nativeAgent().sendMessage(options);
+    }
   } catch (error) {
     state.currentAssistant.textContent = `⚠ পাঠানো যায়নি: ${error.message ?? error}`;
     state.currentAssistant.removeAttribute('data-pending'); state.currentAssistant = null;
@@ -375,35 +459,90 @@ function normalizeMessage(message) {
   return { role, text: content, at: Number(message?.createdAt ?? message?.timestamp ?? Date.now()) };
 }
 
+function renderSessionList(root, limit) {
+  if (!root) return;
+  root.replaceChildren();
+  for (const item of state.sessions.slice(0, limit)) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `aw-session ${item.sessionKey === state.sessionKey ? 'active' : ''}`;
+    const title = document.createElement('strong');
+    title.textContent = item.sessionKey === state.sessionKey ? 'বর্তমান চ্যাট' : (item.model || item.sessionKey);
+    const sub = document.createElement('span');
+    sub.textContent = `${item.provider || 'default'} · ${item.updatedAt ? dateTime(item.updatedAt) : 'সময় অজানা'}`;
+    button.append(title, sub);
+    button.addEventListener('click', () => void guarded('চ্যাট খোলা', () => openSession(item.sessionKey)));
+    root.append(button);
+  }
+  if (!state.sessions.length) {
+    const empty = document.createElement('p');
+    empty.className = 'aw-help';
+    empty.textContent = 'এখনো কোনো সংরক্ষিত চ্যাট নেই';
+    root.append(empty);
+  }
+}
+
+function closeHistory() {
+  const drawer = $('aw-history-drawer');
+  if (!drawer || drawer.hidden) return;
+  drawer.hidden = true;
+  $('aw-refresh-sessions')?.focus();
+}
+
+async function openHistory() {
+  requireInit();
+  await refreshSessions();
+  const drawer = $('aw-history-drawer');
+  drawer.hidden = false;
+  $('aw-history-close')?.focus();
+}
+
 async function refreshSessions() {
   requireInit();
   const response = await nativeAgent().listSessions('main');
   state.sessions = parseJson(response?.sessionsJson, []);
-  const root = $('aw-session-list'); root.replaceChildren();
-  for (const item of state.sessions.slice(0, 12)) {
-    const button = document.createElement('button'); button.type = 'button'; button.className = `aw-session ${item.sessionKey === state.sessionKey ? 'active' : ''}`;
-    const title = document.createElement('strong'); title.textContent = item.sessionKey === state.sessionKey ? '● বর্তমান চ্যাট' : (item.model || item.sessionKey);
-    const sub = document.createElement('span'); sub.textContent = `${item.provider || 'default'} · ${item.updatedAt ? dateTime(item.updatedAt) : ''}`;
-    button.append(title, sub); button.addEventListener('click', () => void openSession(item.sessionKey)); root.append(button);
-  }
-  if (!state.sessions.length) root.innerHTML = '<span class="aw-help">এখনো কোনো সংরক্ষিত চ্যাট নেই</span>';
+  renderSessionList($('aw-session-list'), 12);
+  renderSessionList($('aw-history-list'), 100);
+  const summary = $('aw-history-summary');
+  if (summary) summary.textContent = state.sessions.length
+    ? `${state.sessions.length}টি private conversation · এই device-এ সংরক্ষিত`
+    : 'এখনো কোনো conversation সংরক্ষিত নেই';
 }
 
 async function openSession(sessionKey) {
   requireInit();
-  if (state.running && !confirm('একটি কাজ চলছে। তবু অন্য চ্যাট খুলবেন?')) return;
+  if (state.running) throw new Error('চলমান কাজ শেষ বা থামানোর আগে অন্য চ্যাট খোলা যাবে না।');
   const response = await nativeAgent().loadSession(sessionKey, 'main');
   const messages = parseJson(response?.messagesJson, []);
-  state.sessionKey = sessionKey; $('aw-session-label').textContent = sessionKey;
+  // This is essential: loadSession only returns display data. resumeSession
+  // restores the complete native transcript (including tool call IDs/results)
+  // so the next message is a genuine continuation rather than a history wipe.
+  await nativeAgent().resumeSession({ sessionKey, agentId: 'main' });
+  state.sessionKey = sessionKey;
+  state.sessionReady = messages.length > 0;
+  $('aw-session-label').textContent = sessionKey;
   const feed = $('aw-chat-feed'); feed.replaceChildren(); state.currentAssistant = null;
-  for (const message of messages) { const normalized = normalizeMessage(message); if (normalized.text) makeMessage(normalized.role, normalized.text, normalized.at); }
+  for (const message of messages) {
+    const normalized = normalizeMessage(message);
+    if (normalized.text) makeMessage(normalized.role, normalized.text, normalized.at);
+  }
   if (!feed.children.length) clearChat();
-  await refreshSessions(); showTab('chat');
+  state.chatAutoScroll = true;
+  scrollChatToBottom(true);
+  closeHistory();
+  await refreshSessions();
+  showTab('chat');
 }
 
 function newChat() {
   if (state.running) { toast('চলমান কাজ শেষ বা বন্ধ হওয়ার পর নতুন চ্যাট খুলুন।', 'warn'); return; }
-  state.sessionKey = `chat-${Date.now()}`; $('aw-session-label').textContent = 'নতুন চ্যাট'; clearChat(); $('aw-chat-input').focus(); void refreshSessions();
+  state.sessionKey = `chat-${Date.now()}`;
+  state.sessionReady = false;
+  $('aw-session-label').textContent = 'নতুন চ্যাট';
+  clearChat();
+  closeHistory();
+  $('aw-chat-input').focus();
+  void refreshSessions();
 }
 
 async function refreshAutomations() {
@@ -647,11 +786,14 @@ function renderFileEntries(items, mode) {
     button.className = `agent-file-entry${files.selectedPath === path ? ' selected' : ''}`;
     button.disabled = !state.initialized || files.busy || state.running || !['file', 'directory'].includes(type);
     button.title = path;
-    const icon = document.createElement('span'); icon.setAttribute('aria-hidden', 'true'); icon.textContent = type === 'directory' ? '📁' : type === 'file' ? '▤' : '↗';
+    const typeIcon = document.createElement('span');
+    typeIcon.className = 'agent-file-entry-icon';
+    typeIcon.setAttribute('aria-hidden', 'true');
+    typeIcon.append(icon(type === 'directory' ? 'folder' : type === 'file' ? 'skill' : 'history'));
     const label = document.createElement('span'); label.className = 'agent-file-entry-name'; label.textContent = mode === 'search' ? baseWorkspaceName(path) : String(entry?.name ?? path);
     const meta = document.createElement('span'); meta.className = 'agent-file-entry-meta';
     meta.textContent = type === 'directory' ? 'folder' : type === 'file' ? humanFileSize(entry?.size) : type === 'symlink' ? 'symlink · blocked' : 'unavailable';
-    button.append(icon, label, meta);
+    button.append(typeIcon, label, meta);
     if (type === 'file') button.addEventListener('click', () => void guardFileOperation(() => openWorkspaceFile(path, entry)));
     if (type === 'directory') button.addEventListener('click', () => void guardFileOperation(() => openWorkspaceDirectory(path)));
     root.append(button);
@@ -853,65 +995,47 @@ async function removeMcp(name) { if (!confirm(`“${name}” MCP server এব�
 
 function routerDraftFrom(config) {
   const auto = config?.autoRouting ?? {};
-  const order = Array.isArray(auto.providerOrder) && auto.providerOrder.length ? auto.providerOrder.filter((id) => ROUTABLE_PROVIDERS.includes(id)) : [...ROUTABLE_PROVIDERS];
-  return { order: [...new Set(order)], models: { ...(config?.defaultModels ?? {}) } };
-}
-function moveRoute(provider, delta) {
-  const draft = state.routerDraft; if (!draft) return;
-  const at = draft.order.indexOf(provider); const next = at + delta;
-  if (at < 0 || next < 0 || next >= draft.order.length) return;
-  [draft.order[at], draft.order[next]] = [draft.order[next], draft.order[at]];
-  renderRouter();
+  // Ignore stale paid rows from older app versions. Free Router's execution
+  // guard independently enforces the same two provider-maintained free routes.
+  return {
+    order: FREE_ROUTER_ROUTES.map((route) => route.provider),
+    models: Object.fromEntries(FREE_ROUTER_ROUTES.map((route) => [route.provider, route.model])),
+    failoverOnTransient: auto.failoverOnTransient !== false,
+    maxFallbacks: auto.maxFallbacks ?? 3,
+  };
 }
 function renderRouter(config = state.runtimeConfig) {
   const root = $('aw-router-list'); if (!root) return;
   if (!state.routerDraft) state.routerDraft = routerDraftFrom(config ?? {});
   const draft = state.routerDraft; root.replaceChildren();
-  const display = [...draft.order, ...ROUTABLE_PROVIDERS.filter((provider) => !draft.order.includes(provider))];
-  for (const provider of display) {
-    const enabled = draft.order.includes(provider); const index = draft.order.indexOf(provider);
-    const row = document.createElement('div'); row.className = `aw-route-row${enabled ? '' : ' disabled'}`;
-    const toggle = document.createElement('input'); toggle.type = 'checkbox'; toggle.checked = enabled; toggle.title = `${PROVIDER_LABELS[provider]} route enable/disable`;
-    toggle.addEventListener('change', () => { if (toggle.checked) draft.order.push(provider); else draft.order = draft.order.filter((item) => item !== provider); renderRouter(); });
-    const position = document.createElement('span'); position.className = 'aw-route-position'; position.textContent = enabled ? String(index + 1) : '—';
-    const label = document.createElement('strong'); label.textContent = PROVIDER_LABELS[provider] ?? provider;
-    const model = document.createElement('input'); model.type = 'text'; model.placeholder = 'catalog default'; model.value = draft.models[provider] ?? ''; model.setAttribute('aria-label', `${provider} default model`);
-    model.addEventListener('input', () => { draft.models[provider] = clean(model.value); });
-    const up = document.createElement('button'); up.type = 'button'; up.className = 'ghost'; up.textContent = '↑'; up.disabled = !enabled || index === 0; up.title = 'উপরে নিন'; up.addEventListener('click', () => moveRoute(provider, -1));
-    const down = document.createElement('button'); down.type = 'button'; down.className = 'ghost'; down.textContent = '↓'; down.disabled = !enabled || index === draft.order.length - 1; down.title = 'নিচে নিন'; down.addEventListener('click', () => moveRoute(provider, 1));
-    row.append(toggle, position, label, model, up, down); root.append(row);
+  for (const [index, route] of FREE_ROUTER_ROUTES.entries()) {
+    const row = document.createElement('div'); row.className = 'aw-route-row';
+    const position = document.createElement('span'); position.className = 'aw-route-position'; position.textContent = String(index + 1);
+    const label = document.createElement('strong'); label.textContent = route.label;
+    const model = document.createElement('input'); model.type = 'text'; model.readOnly = true; model.value = route.model; model.title = 'Provider-maintained verified free router'; model.setAttribute('aria-label', `${route.label} verified free router`);
+    const protectedRoute = document.createElement('span'); protectedRoute.className = 'aw-help'; protectedRoute.textContent = 'Verified free · locked';
+    row.append(position, label, model, protectedRoute); root.append(row);
   }
-  const auto = config?.autoRouting ?? {};
-  $('aw-router-failover').checked = draft.failoverOnTransient ?? auto.failoverOnTransient !== false;
-  $('aw-router-max-fallbacks').value = draft.maxFallbacks ?? auto.maxFallbacks ?? 3;
-  $('aw-router-summary').textContent = draft.order.length
-    ? `${draft.order.length}টি route enabled · প্রথম eligible provider-ই আগে চেষ্টা হবে। Model খালি রাখলে verified catalog default ব্যবহার হবে।`
-    : 'কোনো route নেই। Auto router ব্যবহার করতে অন্তত একটি provider চালু করুন।';
+  $('aw-router-failover').checked = draft.failoverOnTransient !== false;
+  $('aw-router-max-fallbacks').value = draft.maxFallbacks ?? 3;
+  $('aw-router-summary').textContent = 'Free Router: আগে Kilo Auto Free, তারপর OpenRouter Free Models Router। Paid/default model deny করা হয়; unknown price-ও fallback নয়।';
 }
 async function checkRouterConfig() {
-  requireInit(); const draft = state.routerDraft ?? routerDraftFrom(state.runtimeConfig ?? {});
-  if (!draft.order.length) throw new Error('Auto router-এ অন্তত একটি provider চালু করুন।');
-  const statuses = await Promise.all(draft.order.map(async (provider) => {
-    const model = clean(draft.models[provider]);
-    if (provider === 'webllm') return { provider, ready: false, note: 'শুধু foreground WebView/WebGPU; auto background fallback নয়' };
-    const auth = await nativeAgent().getAuthStatus(provider).catch(() => null);
-    const needsModel = MODEL_REQUIRED_FOR_ROUTE.has(provider) && !model;
-    const anonymous = provider === 'aihorde';
-    const ready = (Boolean(auth?.hasKey) || anonymous) && !needsModel;
-    const modelNote = needsModel ? ' · আগে default model দিন' : (model ? ` · ${model}` : ' · catalog default');
-    return { provider, ready, note: auth?.hasKey ? `key আছে${modelNote}` : (anonymous ? `anonymous route${modelNote}` : `key নেই${modelNote}`) };
+  requireInit();
+  const statuses = await Promise.all(FREE_ROUTER_ROUTES.map(async (route) => {
+    if (route.provider === 'kilo') return { ...route, ready: true, note: 'anonymous free route প্রস্তুত (Kilo rate limit প্রযোজ্য)' };
+    const auth = await nativeAgent().getAuthStatus(route.provider).catch(() => null);
+    return { ...route, ready: Boolean(auth?.hasKey), note: auth?.hasKey ? 'key আছে · free-only router প্রস্তুত' : 'OpenRouter key নেই · fallback প্রয়োজনে skip হবে' };
   }));
   const ready = statuses.filter((item) => item.ready);
-  const compact = statuses.map((item) => `${PROVIDER_LABELS[item.provider]}: ${item.note}`).join(' | ');
-  $('aw-router-summary').textContent = ready.length
-    ? `Config check: ${ready.length}/${statuses.length}টি সম্ভাব্য route প্রস্তুত। এটি কোনো billable LLM call নয়। Live যাচাইয়ের জন্য Auto router বেছে একটি message পাঠান; নিচে চেষ্টা/selected/fallback event দেখা যাবে। ${compact}`
-    : `Config check: কোনো eligible route পাওয়া যায়নি। অন্তত প্রথম পছন্দের cloud provider-এর API key সংরক্ষণ করুন। ${compact}`;
-  toast(ready.length ? 'Router configuration যাচাই শেষ।' : 'Router-এর জন্য কোনো API key পাওয়া যায়নি।', ready.length ? 'ok' : 'warn');
+  const compact = statuses.map((item) => `${item.label}: ${item.note}`).join(' | ');
+  $('aw-router-summary').textContent = `Config check: ${ready.length}/${statuses.length}টি free-only route প্রস্তুত। কোনো paid model এই router-এ eligible নয়। ${compact}`;
+  toast(ready.length ? 'Free Router configuration যাচাই শেষ।' : 'Free Router-এর কোনো route প্রস্তুত নেই।', ready.length ? 'ok' : 'warn');
 }
 async function runLiveRouterTest() {
   requireInit();
   if (state.running) throw new Error('বর্তমান কাজ শেষ বা থামার পর router test চালান।');
-  if (!confirm('এটি নির্বাচিত Auto router দিয়ে একটি ছোট বাস্তব LLM request চালাবে এবং provider usage/billing হতে পারে। চালাবেন?')) return;
+  if (!confirm('এটি Free Router দিয়ে একটি ছোট বাস্তব no-cost request চালাবে। Provider-এর rate limit প্রযোজ্য; কোনো paid model ব্যবহার হবে না। চালাবেন?')) return;
   $('aw-provider').value = 'auto'; $('aw-model').value = '';
   $('aw-chat-input').value = 'ROUTER_HEALTHCHECK: কোনো tool ব্যবহার না করে শুধু এক লাইনে ROUTER_OK লিখুন।';
   state.routeEvents = []; const root = $('aw-route-live'); if (root) root.replaceChildren();
@@ -920,11 +1044,10 @@ async function runLiveRouterTest() {
 
 async function saveRouter(event) {
   event.preventDefault(); requireInit(); const draft = state.routerDraft ?? routerDraftFrom(state.runtimeConfig ?? {});
-  if (!draft.order.length) throw new Error('Auto router-এ অন্তত একটি provider রাখতে হবে।');
-  const models = Object.fromEntries(ROUTABLE_PROVIDERS.map((provider) => [provider, clean(draft.models[provider]) || null]));
-  const autoRouting = { providerOrder: draft.order, failoverOnTransient: $('aw-router-failover').checked, maxFallbacks: Number($('aw-router-max-fallbacks').value) };
-  state.runtimeConfig = await nativeAgent().setRuntimeConfig({ defaultModels: models, autoRouting });
-  state.routerDraft = routerDraftFrom(state.runtimeConfig); renderRouter(); toast('AI Router policy সংরক্ষণ হয়েছে।', 'ok');
+  const models = Object.fromEntries(FREE_ROUTER_ROUTES.map((route) => [route.provider, route.model]));
+  const autoRouting = { providerOrder: FREE_ROUTER_ROUTES.map((route) => route.provider), failoverOnTransient: $('aw-router-failover').checked, maxFallbacks: Number($('aw-router-max-fallbacks').value) };
+  state.runtimeConfig = await nativeAgent().setRuntimeConfig({ defaultModels: models, autoRouting, defaultProvider: 'auto' });
+  state.routerDraft = routerDraftFrom(state.runtimeConfig); renderRouter(); toast('Free Router policy সংরক্ষণ হয়েছে।', 'ok');
 }
 
 async function refreshSettings() {
@@ -932,7 +1055,7 @@ async function refreshSettings() {
   $('aw-max-turns').value = config.defaultMaxTurns ?? 25; $('aw-max-tokens').value = config.maxTokens ?? 8192; $('aw-temperature').value = config.temperature ?? 0; $('aw-context-budget').value = config.contextCharBudget ?? 150000;
   // Route choice and key management are intentionally separate: leaving the
   // route untouched means every chat uses native Auto Router.
-  const selected = clean($('aw-provider').value) || 'auto'; $('aw-provider').value = selected; $('aw-model-label').textContent = selected === 'auto' ? 'Auto provider' : selected;
+  const selected = clean($('aw-provider').value) || 'auto'; $('aw-provider').value = selected; $('aw-model-label').textContent = selected === 'auto' ? 'Free Router · verified free only' : selected;
   await refreshKeyStatus();
   renderRouter(config);
   const perms = await nativeAgent().listToolPermissions(); renderTools(parseJson(perms?.permissionsJson, []));
@@ -941,7 +1064,24 @@ async function refreshSettings() {
 function renderTools(rows) { const root = $('aw-tool-list'); root.replaceChildren(); for (const row of rows) { const name = row.toolName ?? row.tool_name ?? row.name; if (!name) continue; const item = document.createElement('div'); item.className = 'aw-tool-item'; const code = document.createElement('code'); code.textContent = name; const controls = document.createElement('div'); const select = document.createElement('select'); for (const [value, label] of [['always_allow', 'Allow'], ['always_ask', 'Ask'], ['always_ask_biometric', 'Biometric']]) { const opt = document.createElement('option'); opt.value = value; opt.textContent = label; opt.selected = (row.permission ?? row.policy) === value; select.append(opt); } const enabled = document.createElement('input'); enabled.type = 'checkbox'; enabled.checked = row.enabled !== false; enabled.title = 'Tool enabled'; enabled.addEventListener('change', () => void saveTool(name, select.value, enabled.checked)); select.addEventListener('change', () => void saveTool(name, select.value, enabled.checked)); controls.append(select, enabled); item.append(code, controls); root.append(item); } }
 async function saveTool(name, permission, enabled) { try { await nativeAgent().setToolPermission(name, permission, enabled); toast(`${name} policy সংরক্ষণ হয়েছে।`, 'ok'); } catch (error) { toast(String(error.message ?? error), 'err'); } }
 async function seedTools() { requireInit(); await nativeAgent().seedToolPermissions(TOOL_DEFAULTS.map(([toolName, permission]) => ({ toolName, permission, enabled: true }))); toast('নিরাপদ tool defaults যোগ হয়েছে; আগের সিদ্ধান্ত বদলানো হয়নি।', 'ok'); await refreshSettings(); }
-async function refreshModels() { requireInit(); const provider = clean($('aw-provider').value); if (provider === 'auto' || provider === 'webllm') { toast('নির্দিষ্ট cloud provider বাছলে তার model catalog আনা যাবে।', 'warn'); return; } const response = await nativeAgent().getModels(provider); const models = parseJson(response?.modelsJson, []); const list = $('aw-model-list'); list.replaceChildren(...models.slice(0, 500).map((model) => { const opt = document.createElement('option'); opt.value = model.id; opt.label = `${model.name ?? model.id}${model.toolCalling === true ? ' · tools' : ''}`; return opt; })); toast(`${models.length}টি model পাওয়া গেছে।`, 'ok'); }
+async function refreshModels() {
+  requireInit(); const provider = clean($('aw-provider').value); const list = $('aw-model-list');
+  if (provider === 'auto') {
+    // Do not hard-code or mirror Kilo's changing individual free inventory in
+    // a picker. These two vendor-maintained routers are the verified model
+    // choices; Kilo Auto Free dynamically draws from its live curated set.
+    list.replaceChildren(...FREE_ROUTER_ROUTES.map((route) => {
+      const opt = document.createElement('option'); opt.value = `${route.provider}/${route.model}`;
+      opt.label = `${route.label} · VERIFIED FREE · ${route.note}`;
+      return opt;
+    }));
+    toast('২টি verified free router পাওয়া গেছে। Kilo Auto Free বর্তমান Kilo free model set থেকে নিজে নির্বাচন করে; paid বা unknown-price model দেখানো হয়নি।', 'ok'); return;
+  }
+  if (provider === 'webllm') { toast('WebLLM-এর local model তালিকা এই Free Router picker-এ নেই।', 'warn'); return; }
+  const response = await nativeAgent().getModels(provider); const models = parseJson(response?.modelsJson, []);
+  list.replaceChildren(...models.slice(0, 500).map((model) => { const opt = document.createElement('option'); opt.value = model.id; opt.label = `${model.name ?? model.id}${model.isFree === true ? ' · FREE' : ''}${model.toolCalling === true ? ' · tools' : ''}`; return opt; }));
+  toast(`${models.length}টি model পাওয়া গেছে।`, 'ok');
+}
 async function refreshKeyStatus() {
   const provider = clean($('aw-key-provider')?.value) || 'anthropic';
   const auth = await nativeAgent().getAuthStatus(provider).catch(() => null);
@@ -955,12 +1095,16 @@ async function saveRuntime(event) { event.preventDefault(); requireInit(); const
 async function guarded(label, task) { try { await task(); } catch (error) { const message = String(error?.message ?? error); toast(message, 'err'); status(`${label}: ${safeText(message)}`, 'err'); } }
 
 function bind() {
-  $('aw-start').addEventListener('click', () => void initialize());
   document.querySelectorAll('[data-aw-tab]').forEach((button) => button.addEventListener('click', () => showTab(button.dataset.awTab)));
   document.querySelectorAll('[data-aw-prompt]').forEach((button) => button.addEventListener('click', () => { $('aw-chat-input').value = button.dataset.awPrompt; $('aw-chat-input').focus(); }));
   $('aw-composer').addEventListener('submit', (event) => void guarded('বার্তা', () => sendMessage(event)));
   $('aw-chat-input').addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); $('aw-composer').requestSubmit(); } });
-  $('aw-abort').addEventListener('click', () => void guarded('থামানো', abortRun)); $('aw-new-chat').addEventListener('click', newChat); $('aw-refresh-sessions').addEventListener('click', () => void guarded('চ্যাট ইতিহাস', refreshSessions));
+  $('aw-abort').addEventListener('click', () => void guarded('থামানো', abortRun));
+  $('aw-new-chat').addEventListener('click', newChat);
+  $('aw-refresh-sessions').addEventListener('click', () => void guarded('চ্যাট ইতিহাস', openHistory));
+  $('aw-history-close').addEventListener('click', closeHistory);
+  $('aw-history-backdrop').addEventListener('click', closeHistory);
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeHistory(); });
   $('aw-cron-kind').addEventListener('change', () => { const at = $('aw-cron-kind').value === 'at'; $('aw-at-wrap').hidden = !at; $('aw-every-wrap').hidden = at; });
   $('aw-cron-form').addEventListener('submit', (event) => void guarded('Automation', () => createCron(event))); $('aw-heartbeat-form').addEventListener('submit', (event) => void guarded('Heartbeat', () => saveHeartbeat(event))); $('aw-refresh-automations').addEventListener('click', () => void guarded('Automation', refreshAutomations)); $('aw-schedule-wake').addEventListener('click', () => void guarded('Wake', scheduleWake)); $('aw-cancel-wake').addEventListener('click', () => void guarded('Wake', cancelWake)); $('aw-refresh-inbox').addEventListener('click', () => void guarded('Inbox', refreshAutomations)); $('aw-clear-inbox').addEventListener('click', () => void guarded('Inbox', async () => { await nativeAgent().clearSurfacedMessages(); await refreshAutomations(); }));
   $('aw-skill-form').addEventListener('submit', (event) => void guarded('Skill', () => createSkill(event))); $('aw-refresh-skills').addEventListener('click', () => void guarded('Skills', refreshSkills));
@@ -975,21 +1119,18 @@ function bind() {
   $('aw-files-choose').addEventListener('click', () => $('aw-files-picker').click());
   $('aw-files-picker').addEventListener('change', (event) => { const list = event.target.files; event.target.value = ''; void guarded('Upload', () => guardFileOperation(() => uploadWorkspaceFiles(list))); }); $('aw-files-include-skipped').addEventListener('change', () => void guarded('Files', () => guardFileOperation(refreshFiles))); $('aw-files-dir').addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); $('aw-files-open-dir').click(); } }); $('aw-files-search').addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); $('aw-files-find').click(); } }); $('aw-file-name').addEventListener('input', updateWorkspaceFileDraft); $('aw-file-content').addEventListener('input', updateWorkspaceFileDraft); $('aw-file-save').addEventListener('click', () => void guarded('File save', () => guardFileOperation(saveWorkspaceFile))); $('aw-file-revert').addEventListener('click', () => void guarded('File revert', revertWorkspaceFile)); $('aw-file-delete').addEventListener('click', () => void guarded('File delete', () => guardFileOperation(deleteWorkspaceFile))); $('aw-file-insert-chat').addEventListener('click', insertFilePathIntoChat);
   $('aw-mcp-form').addEventListener('submit', (event) => void guarded('MCP', () => addMcp(event))); $('aw-reconnect-mcp').addEventListener('click', () => void guarded('MCP', connectAllMcp));
-  $('aw-load-settings').addEventListener('click', () => void guarded('Settings', refreshSettings)); $('aw-provider').addEventListener('change', () => { $('aw-model-label').textContent = $('aw-provider').value === 'auto' ? 'Auto provider' : $('aw-provider').value; }); $('aw-key-provider').addEventListener('change', () => void guarded('Key status', refreshKeyStatus)); $('aw-router-form').addEventListener('submit', (event) => void guarded('AI Router', () => saveRouter(event))); $('aw-router-check').addEventListener('click', () => void guarded('AI Router', checkRouterConfig)); $('aw-router-live-test').addEventListener('click', () => void guarded('AI Router live test', runLiveRouterTest)); $('aw-router-refresh').addEventListener('click', () => void guarded('AI Router', refreshSettings)); $('aw-refresh-models').addEventListener('click', () => void guarded('Model catalog', refreshModels)); $('aw-save-key').addEventListener('click', () => void guarded('API key', saveProviderKey)); $('aw-runtime-form').addEventListener('submit', (event) => void guarded('Runtime settings', () => saveRuntime(event))); $('aw-seed-tools').addEventListener('click', () => void guarded('Tool defaults', seedTools)); $('aw-refresh-tools').addEventListener('click', () => void guarded('Tools', refreshSettings));
+  $('aw-load-settings').addEventListener('click', () => void guarded('Settings', refreshSettings)); $('aw-provider').addEventListener('change', () => { $('aw-model-label').textContent = $('aw-provider').value === 'auto' ? 'Free Router · verified free only' : $('aw-provider').value; }); $('aw-key-provider').addEventListener('change', () => void guarded('Key status', refreshKeyStatus)); $('aw-router-form').addEventListener('submit', (event) => void guarded('AI Router', () => saveRouter(event))); $('aw-router-check').addEventListener('click', () => void guarded('AI Router', checkRouterConfig)); $('aw-router-live-test').addEventListener('click', () => void guarded('AI Router live test', runLiveRouterTest)); $('aw-router-refresh').addEventListener('click', () => void guarded('AI Router', refreshSettings)); $('aw-refresh-models').addEventListener('click', () => void guarded('Model catalog', refreshModels)); $('aw-save-key').addEventListener('click', () => void guarded('API key', saveProviderKey)); $('aw-runtime-form').addEventListener('submit', (event) => void guarded('Runtime settings', () => saveRuntime(event))); $('aw-seed-tools').addEventListener('click', () => void guarded('Tool defaults', seedTools)); $('aw-refresh-tools').addEventListener('click', () => void guarded('Tools', refreshSettings));
 }
 
 function start() {
   if (!$('agent-workspace')) return;
   bind();
+  wireViewportAndChatScroll();
   setComposerAvailability(false);
   updateFileManagerControls();
-  if (!featureReady()) {
-    status('Web preview-এ agent চলে না; Android/iOS build-এ ব্যবহার করুন।', 'warn');
-    $('aw-start').disabled = true;
-    return;
-  }
-  // Native initialization is automatic; the visible button remains a retry
-  // control if availability or initialization fails.
+  // This page is a quiet layout preview in a browser; native initialization is
+  // automatic in Android/iOS and needs no "start agent" card or tap target.
+  if (!featureReady()) return;
   void initialize();
 }
 

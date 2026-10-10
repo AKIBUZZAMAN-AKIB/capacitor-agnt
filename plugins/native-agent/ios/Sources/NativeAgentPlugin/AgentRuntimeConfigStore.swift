@@ -12,10 +12,9 @@ enum AgentRuntimeConfigStore {
         "anthropic", "openai", "gemini", "openrouter", "ovhcloud", "aihorde",
         "llm7", "opencode_zen", "kilo", "pollinations", "webllm",
     ]
-    private static let defaultProviderOrder = [
-        "anthropic", "openai", "gemini", "openrouter", "ovhcloud", "opencode_zen",
-        "llm7", "kilo", "aihorde",
-    ]
+    // `auto` is deliberately a free-only router: Kilo's live Free router runs
+    // first, then OpenRouter's live Free Models Router.
+    private static let defaultProviderOrder = ["kilo", "openrouter"]
     private static let stringMapFields: Set<String> = ["defaultModels", "providerBaseUrls"]
     private static let modelMapFields: Set<String> = [
         "providerModelProtocols", "providerToolCapabilities",
@@ -44,8 +43,11 @@ enum AgentRuntimeConfigStore {
             "defaultHeartbeatMaxTurns": 5,
             "defaultCronTimeoutMs": 25_000,
             "defaultHeartbeatTimeoutMs": 25_000,
-            "defaultProvider": "anthropic",
-            "defaultModels": [String: String](),
+            "defaultProvider": "auto",
+            "defaultModels": [
+                "kilo": "kilo-auto/free",
+                "openrouter": "openrouter/free",
+            ],
             "providerBaseUrls": [String: String](),
             "providerModelProtocols": [String: [String: String]](),
             "providerToolCapabilities": [String: [String: Bool]](),

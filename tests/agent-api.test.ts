@@ -124,18 +124,23 @@ describe('agent plugin — cross-platform contract', () => {
     const defs = read(DEFS);
     const template = read(NATIVEKIT_TYPES);
 
-    expect(rust).toContain('default_provider: "anthropic".into()');
-    expect(rust).toContain('default_models: HashMap::new()');
+    expect(rust).toContain('default_provider: "auto".into()');
+    expect(rust).toContain('("kilo".into(), "kilo-auto/free".into())');
+    expect(rust).toContain('("openrouter".into(), "openrouter/free".into())');
     expect(rust).toContain('self.default_models.len() > providers.len()');
     expect(loop).toContain('.unwrap_or(runtime_config.default_provider.as_str())');
     expect(loop).toContain('runtime.default_models.get(&provider)');
 
-    expect(android).toContain('.put("defaultProvider", "anthropic")');
-    expect(android).toContain('.put("defaultModels", JSONObject())');
+    expect(android).toContain('.put("defaultProvider", "auto")');
+    expect(android).toContain('.put("kilo", "kilo-auto/free")');
+    expect(android).toContain('.put("openrouter", "openrouter/free")');
+    expect(android).toContain('.put("defaultModels", JSONObject()');
     expect(android).toContain('validateStringMap(value, "defaultModels")');
     expect(android).toContain('$field.$provider');
-    expect(ios).toContain('"defaultProvider": "anthropic"');
-    expect(ios).toContain('"defaultModels": [String: String]()');
+    expect(ios).toContain('"defaultProvider": "auto"');
+    expect(ios).toContain('"kilo": "kilo-auto/free"');
+    expect(ios).toContain('"openrouter": "openrouter/free"');
+    expect(ios).toContain('"defaultModels": [');
     expect(ios).toContain('validateStringMap(value, field: "defaultModels")');
     expect(ios).toContain('\\(field).\\(provider)');
 

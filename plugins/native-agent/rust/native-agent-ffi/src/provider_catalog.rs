@@ -127,8 +127,10 @@ const PROVIDERS: [ProviderSpec; 11] = [
         models_path: Some("models"),
         tools_supported_by_api: Some(true),
         // The prior Mistral Nemo default is now marked unavailable in OVH's live
-        // catalog. gpt-oss-20b is currently live and has documented Responses
-        // API function calling support.
+        // catalog. gpt-oss-20b is currently live. Although OVH exposes both
+        // Responses and Chat Completions, agent tool turns deliberately use the
+        // documented Chat Completions function-calling lifecycle (assistant
+        // tool_calls followed by role:"tool" results).
         default_model: Some("gpt-oss-20b"),
     },
     ProviderSpec {
@@ -249,13 +251,25 @@ pub fn resolved_base_url(provider: &str, runtime: &AgentRuntimeConfig, workspace
 }
 
 pub fn protocol_for_model(provider: &str, model: &str, runtime: &AgentRuntimeConfig) -> Option<ProviderProtocol> {
+    // OVH's Responses implementation documents message `content` as a plain
+    // string. Our generic Responses driver correctly uses the richer OpenAI
+    // item-array shape (`input_text`, `function_call_output`, ...), but that
+    // shape is rejected by OVH as `ResponseInput` (HTTP 422). More importantly,
+    // OVH documents function tools on Chat Completions with assistant
+    // `tool_calls` and follow-up `role: "tool"` messages — exactly the wire
+    // lifecycle our OpenAiDriver implements. This compatibility rule takes
+    // precedence over old persisted model-protocol mappings so upgrading the
+    // app repairs existing gpt-oss sessions instead of replaying the broken
+    // Responses route.
+    if provider == "ovhcloud" && is_ovh_gpt_oss_model(model) {
+        return Some(ProviderProtocol::OpenAiChatCompletions);
+    }
     if let Some(protocol) = runtime.provider_model_protocols.get(provider).and_then(|models| models.get(model)) {
         return Some(*protocol);
     }
     match provider {
         "opencode_zen" => zen_protocol_for_model(model),
         "openai" if is_openai_responses_model(model) => Some(ProviderProtocol::OpenAiResponses),
-        "ovhcloud" if is_ovh_responses_model(model) => Some(ProviderProtocol::OpenAiResponses),
         "webllm" => Some(ProviderProtocol::WebLlmChatCompletions),
         _ => provider_spec(provider).map(|profile| profile.default_protocol),
     }
@@ -305,12 +319,18 @@ fn is_openai_responses_model(model: &str) -> bool {
     id.starts_with("gpt-5") || id.starts_with("gpt-6") || id.starts_with("o1") || id.starts_with("o3") || id.starts_with("o4")
 }
 
-fn is_ovh_responses_model(model: &str) -> bool {
+fn is_ovh_gpt_oss_model(model: &str) -> bool {
     let id = model.rsplit('/').next().unwrap_or(model).to_ascii_lowercase();
     id.starts_with("gpt-oss-")
 }
 
 pub fn tool_capability(provider: &str, model: &str, runtime: &AgentRuntimeConfig) -> (Option<bool>, &'static str) {
+    // Both first-choice virtual free routers explicitly select only models that
+    // support the request's features, including tool calling. Treat this as
+    // vendor documentation rather than an unverified provider-wide default.
+    if matches!((provider, model), ("kilo", "kilo-auto/free") | ("openrouter", "openrouter/free")) {
+        return (Some(true), "vendor_documentation");
+    }
     if let Some(value) = runtime.provider_tool_capabilities.get(provider).and_then(|models| models.get(model)) {
         return (Some(*value), "user_or_catalog_config");
     }
@@ -392,6 +412,12 @@ pub struct ProviderModelInfo {
     pub streaming_supported: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub streaming_capability_source: Option<String>,
+    /// Explicit zero-cost eligibility from the live provider catalog. `None`
+    /// is deliberately unknown, not a free-price guess.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_free: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub free_price_source: Option<String>,
     /// Kilo catalog flag; true means prompts may be logged or used for training.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub may_train_on_your_prompts: Option<bool>,
@@ -411,6 +437,12 @@ pub struct ProviderModelInfo {
 /// provider's conservative default rather than accidentally attempting a paid
 /// endpoint without credentials.
 pub fn model_auth_required(provider: &str, model: &str, runtime: &AgentRuntimeConfig) -> bool {
+    // Kilo documents all `:free` variants and `kilo-auto/free` as anonymous
+    // free routes. This must work before a user has refreshed the catalog and
+    // persisted any catalog metadata.
+    if provider == "kilo" && is_verified_free_route(provider, model) {
+        return false;
+    }
     runtime.provider_model_auth_requirements.get(provider)
         .and_then(|models| models.get(model)).copied()
         .or_else(|| provider_spec(provider).map(|spec| spec.chat_requires_auth))
@@ -434,6 +466,42 @@ fn catalog_auth_requirement(provider: &str, entry: &Value) -> Option<bool> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// Whether a live catalog entry is explicitly priced at zero. Unknown pricing
+/// stays `None`; a missing field is never converted into a free claim.
+fn catalog_free_price(provider: &str, entry: &Value) -> Option<bool> {
+    match provider {
+        "kilo" => entry.get("isFree").and_then(Value::as_bool),
+        "openrouter" => {
+            let pricing = entry.get("pricing")?;
+            let is_zero = |key: &str| -> Option<bool> {
+                let value = pricing.get(key)?;
+                value.as_str()
+                    .and_then(|raw| raw.trim().parse::<f64>().ok())
+                    .or_else(|| value.as_f64())
+                    .map(|number| number == 0.0)
+            };
+            match (is_zero("prompt"), is_zero("completion")) {
+                (Some(true), Some(true)) => Some(true),
+                (Some(_), Some(_)) => Some(false),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// A model ID is eligible for the Free Router only when its provider documents
+/// the ID as a no-cost virtual router or a `:free` catalog variant. This is a
+/// deny-by-default execution boundary: unknown, ordinary, and paid defaults
+/// cannot enter automatic routing.
+pub fn is_verified_free_route(provider: &str, model: &str) -> bool {
+    match provider {
+        "kilo" => model == "kilo-auto/free" || model.ends_with(":free"),
+        "openrouter" => model == "openrouter/free" || model.ends_with(":free"),
+        _ => false,
     }
 }
 
@@ -624,10 +692,16 @@ fn is_text_model(provider: &str, entry: &Value) -> bool {
 
 fn protocol_source(provider: &str, model: &str, protocol: Option<ProviderProtocol>, runtime: &AgentRuntimeConfig) -> Option<String> {
     protocol?;
+    // Keep the diagnostics truthful when a legacy runtime mapping says
+    // "responses": gpt-oss is intentionally pinned to the documented OVH Chat
+    // Completions tool loop above.
+    if provider == "ovhcloud" && is_ovh_gpt_oss_model(model) {
+        return Some("vendor_documentation".into());
+    }
     if runtime.provider_model_protocols.get(provider).and_then(|m| m.get(model)).is_some() {
         return Some("runtime_config".into());
     }
-    if provider == "opencode_zen" || (provider == "openai" && is_openai_responses_model(model)) || (provider == "ovhcloud" && is_ovh_responses_model(model)) {
+    if provider == "opencode_zen" || (provider == "openai" && is_openai_responses_model(model)) {
         return Some("vendor_documentation".into());
     }
     Some("provider_default".into())
@@ -662,6 +736,7 @@ pub fn parse_model_catalog(provider: &str, root: &Value, runtime: &AgentRuntimeC
             .or_else(|| runtime.provider_model_streaming_capabilities.get(provider)
                 .and_then(|models| models.get(&id)).copied().map(|value| (value, "runtime_config".to_string())))
             .unwrap_or((provider != "aihorde", "provider_default".to_string()));
+        let free_price = catalog_free_price(provider, entry);
         let may_train_on_your_prompts = model_may_train_on_your_prompts(provider, &id, entry);
         let name = entry.get("name").and_then(Value::as_str)
             .or_else(|| entry.get("title").and_then(Value::as_str))
@@ -683,6 +758,8 @@ pub fn parse_model_catalog(provider: &str, root: &Value, runtime: &AgentRuntimeC
             auth_requirement_source: Some(auth_requirement.1),
             streaming_supported: Some(streaming_requirement.0),
             streaming_capability_source: Some(streaming_requirement.1),
+            is_free: free_price,
+            free_price_source: free_price.map(|_| "provider_catalog".to_string()),
             may_train_on_your_prompts,
             protocol_source: protocol_source(provider, &id, protocol, runtime),
             protocol,
@@ -712,6 +789,10 @@ fn webllm_models(runtime: &AgentRuntimeConfig) -> Vec<ProviderModelInfo> {
             tool_calling: tools, tool_calling_source: source.to_string(),
             auth_required: Some(false), auth_requirement_source: Some("provider_default".into()),
             streaming_supported: Some(true), streaming_capability_source: Some("provider_default".into()),
+            // Local WebGPU has no provider-metered request price, but it is
+            // intentionally not a Free Router fallback because it needs a
+            // foreground WebView and downloaded device resources.
+            is_free: None, free_price_source: None,
             may_train_on_your_prompts: None,
             protocol: Some(ProviderProtocol::WebLlmChatCompletions), protocol_source: Some("webllm_runtime".into()),
             context_length: None, health: None,
@@ -895,11 +976,41 @@ mod tests {
         let config = AgentRuntimeConfig::default();
         assert_eq!(tool_capability("anthropic", "claude-sonnet-4-6", &config).0, Some(true));
         assert_eq!(tool_capability("ovhcloud", "gpt-oss-20b", &config).0, Some(true));
-        assert_eq!(protocol_for_model("ovhcloud", "gpt-oss-20b", &config), Some(ProviderProtocol::OpenAiResponses));
+        assert_eq!(protocol_for_model("ovhcloud", "gpt-oss-20b", &config), Some(ProviderProtocol::OpenAiChatCompletions));
         assert_eq!(tool_capability("aihorde", "llama", &config).0, Some(false));
         assert_eq!(tool_capability("opencode_zen", "claude-sonnet-5-5", &config).0, Some(true));
         assert_eq!(tool_capability("opencode_zen", "gemini-3.8-flash", &config).0, Some(true));
         assert_eq!(tool_capability("opencode_zen", "new-model", &config).0, None);
+    }
+
+    #[test]
+    fn ovh_gpt_oss_ignores_legacy_responses_override_and_uses_chat_tools() {
+        let mut config = AgentRuntimeConfig::default();
+        config.provider_model_protocols
+            .entry("ovhcloud".into())
+            .or_default()
+            .insert("gpt-oss-20b".into(), ProviderProtocol::OpenAiResponses);
+
+        // A mapping persisted by an older app must not trap an upgraded user on
+        // the Responses request shape that OVH rejects with ResponseInput 422.
+        assert_eq!(
+            protocol_for_model("ovhcloud", "gpt-oss-20b", &config),
+            Some(ProviderProtocol::OpenAiChatCompletions)
+        );
+        assert_eq!(
+            protocol_source("ovhcloud", "gpt-oss-20b", protocol_for_model("ovhcloud", "gpt-oss-20b", &config), &config).as_deref(),
+            Some("vendor_documentation")
+        );
+
+        // Explicit protocol mappings remain useful for non-GPT-OSS OVH models.
+        config.provider_model_protocols
+            .entry("ovhcloud".into())
+            .or_default()
+            .insert("another-compatible-model".into(), ProviderProtocol::OpenAiResponses);
+        assert_eq!(
+            protocol_for_model("ovhcloud", "another-compatible-model", &config),
+            Some(ProviderProtocol::OpenAiResponses)
+        );
     }
 
     #[test]
@@ -938,6 +1049,8 @@ mod tests {
         let free = models.iter().find(|model| model.id == "kilo-auto/free").unwrap();
         assert_eq!(free.auth_required, Some(false));
         assert_eq!(free.tool_calling, Some(true));
+        assert_eq!(free.is_free, Some(true));
+        assert_eq!(free.free_price_source.as_deref(), Some("provider_catalog"));
         assert_eq!(free.may_train_on_your_prompts, Some(true));
 
         let gemini = serde_json::json!([
@@ -996,6 +1109,24 @@ mod tests {
         assert_eq!(models[0].tool_calling_source, "provider_catalog");
         assert_eq!(models[0].streaming_supported, Some(true));
         assert_eq!(models[0].streaming_capability_source.as_deref(), Some("provider_catalog"));
+    }
+
+    #[test]
+    fn free_price_is_explicit_and_unknown_pricing_is_not_promoted() {
+        let runtime = AgentRuntimeConfig::default();
+        let openrouter = serde_json::json!({"data": [
+            {"id":"vendor/free:free","name":"Free","architecture":{"input_modalities":["text"],"output_modalities":["text"]},"pricing":{"prompt":"0","completion":"0"}},
+            {"id":"vendor/paid","name":"Paid","architecture":{"input_modalities":["text"],"output_modalities":["text"]},"pricing":{"prompt":"0.000001","completion":"0.000002"}},
+            {"id":"vendor/unknown","name":"Unknown","architecture":{"input_modalities":["text"],"output_modalities":["text"]}}
+        ]});
+        let models = parse_model_catalog("openrouter", &openrouter, &runtime);
+        assert_eq!(models.iter().find(|model| model.id == "vendor/free:free").unwrap().is_free, Some(true));
+        assert_eq!(models.iter().find(|model| model.id == "vendor/paid").unwrap().is_free, Some(false));
+        assert_eq!(models.iter().find(|model| model.id == "vendor/unknown").unwrap().is_free, None);
+        assert!(is_verified_free_route("kilo", "kilo-auto/free"));
+        assert!(is_verified_free_route("openrouter", "vendor/free:free"));
+        assert!(!is_verified_free_route("openrouter", "vendor/paid"));
+        assert!(!is_verified_free_route("anthropic", "claude-sonnet-5-5"));
     }
 
     #[test]

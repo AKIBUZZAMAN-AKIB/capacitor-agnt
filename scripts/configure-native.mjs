@@ -444,17 +444,20 @@ async function configureAndroid() {
     .replace(/versionCode\s+\d+/, `versionCode ${config.app.versionCode}`)
     .replace(/versionName\s+"[^"]+"/, `versionName "${config.app.versionName}"`);
 
+  const signingPreamble = `def nativeKitKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
+def nativeKitSigningReady = nativeKitKeystorePath && System.getenv("ANDROID_KEYSTORE_PASSWORD") && System.getenv("ANDROID_KEY_ALIAS") && System.getenv("ANDROID_KEY_PASSWORD")`;
+  // Rebuild this generated preamble on every sync so interrupted/older mutations cannot corrupt Gradle syntax.
+  build = build.replace(/^(apply plugin: 'com\.android\.application')[\s\S]*?^android \{/m, `$1\n\n${signingPreamble}\n\nandroid {`);
+
+  // Do this after replacing the generated signing preamble. Otherwise a
+  // previously interrupted file can have the flatDir text captured by the
+  // broad preamble-repair range and break Gradle syntax on the next sync.
   if (!build.includes('@capacitor/background-runner/android/src/main/libs')) {
     build = build.replace(
       "dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'",
       "dirs '../capacitor-cordova-android-plugins/src/main/libs', '../../node_modules/@capacitor/background-runner/android/src/main/libs', 'libs'"
     );
   }
-
-  const signingPreamble = `def nativeKitKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
-def nativeKitSigningReady = nativeKitKeystorePath && System.getenv("ANDROID_KEYSTORE_PASSWORD") && System.getenv("ANDROID_KEY_ALIAS") && System.getenv("ANDROID_KEY_PASSWORD")`;
-  // Rebuild this generated preamble on every sync so interrupted/older mutations cannot corrupt Gradle syntax.
-  build = build.replace(/^(apply plugin: 'com\.android\.application')[\s\S]*?^android \{/m, `$1\n\n${signingPreamble}\n\nandroid {`);
 
   if (!build.includes('NATIVEKIT_SIGNING_START')) {
     build = build.replace("android {", `android {

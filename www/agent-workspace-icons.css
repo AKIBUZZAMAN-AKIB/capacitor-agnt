@@ -1,0 +1,38 @@
+/* Stable inline SVG icons and history drawer for the owner-facing workspace.
+   Kept local: no icon font or network resource is required by Android WebView. */
+.aw-icon-sprite{position:absolute;width:0;height:0;overflow:hidden;pointer-events:none}
+.aw-icon{display:inline-block;width:1.1em;height:1.1em;flex:0 0 auto;vertical-align:-.18em;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.aw-nav-icon{display:grid;place-items:center}.aw-nav-icon .aw-icon{width:18px;height:18px}.aw-actions button,.aw-send,.aw-composer-note{display:inline-flex;align-items:center;gap:6px}.aw-actions button .aw-icon,.aw-send .aw-icon{width:15px;height:15px}.aw-composer-note .aw-icon{width:14px;height:14px;color:#67e8f9}.aw-live-dot{width:8px;height:8px;flex:0 0 8px;border-radius:50%;background:#34d399;box-shadow:0 0 0 4px rgba(52,211,153,.12)}
+.aw-empty-icon .aw-icon{width:30px;height:30px;color:#6ee7f5}.aw-avatar .aw-icon{width:17px;height:17px;color:#8ef3ed}.agent-file-entry-icon{display:grid;place-items:center;color:#78d9ed}.agent-file-entry-icon .aw-icon{width:18px;height:18px}.agent-file-manager-heading .icon .aw-icon{width:24px;height:24px;color:#79e7f3}
+.icon-only{display:grid!important;place-items:center;width:36px;height:36px;padding:0!important}.icon-only .aw-icon{width:18px;height:18px}
+
+/* Keep status informative but ephemeral: it lives beside the actions only while
+   the engine is busy or needs attention, never as a permanent hero card. */
+.aw-toolbar-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0}.aw-status{max-width:260px;padding:6px 9px;border:1px solid #284c68;border-radius:999px;background:#091d30;color:#a9c9da;font-size:.7rem;white-space:nowrap;overflow:hidden}.aw-status span{overflow:hidden;text-overflow:ellipsis}.aw-status[data-tone="busy"]{border-color:#276c83;color:#baf4ff}.aw-status[data-tone="warn"]{border-color:#806724;color:#ffe29b}.aw-status[data-tone="err"]{border-color:#91435b;color:#ffd2dc}
+
+/* The old mobile breakpoint hid the only session list. The drawer is always
+   reachable from the chat toolbar, at every viewport width. */
+.aw-history-drawer{position:fixed;z-index:80;inset:0;display:grid;align-items:end;justify-items:end}.aw-history-backdrop{position:absolute;inset:0;width:100%;height:100%;border:0;border-radius:0;background:rgba(1,8,16,.69);cursor:default}.aw-history-panel{position:relative;z-index:1;display:grid;grid-template-rows:auto minmax(0,1fr);width:min(510px,100%);height:min(78dvh,740px);padding:17px;border:1px solid #356886;border-radius:20px 20px 0 0;background:linear-gradient(145deg,#0d263c,#071624);box-shadow:0 -18px 50px rgba(0,0,0,.4)}.aw-history-panel header{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;padding:0 0 14px;border-bottom:1px solid #274862}.aw-history-panel header p{margin:0 0 3px;color:#5eead4;font-size:.65rem;letter-spacing:.13em;font-weight:800}.aw-history-panel h3{margin:0;color:#effbff;font-size:1.05rem}.aw-history-panel header span{display:block;margin-top:4px;color:#90aabd;font-size:.72rem}.aw-history-list{max-height:none!important;min-height:0;overflow:auto;padding:12px 2px 4px;-webkit-overflow-scrolling:touch;touch-action:pan-y pinch-zoom}.aw-history-list .aw-session{padding:12px;text-align:left}.aw-history-list .aw-session strong{font-size:.82rem}.aw-history-list .aw-session span{font-size:.69rem}
+
+/* Mobile uses one deliberate vertical scroller for the current tab. Chat gives
+   that scroll ownership to its transcript, while configuration pages use the
+   main content scroller. This prevents nested-scroll dead ends in Android
+   WebView and keeps the composer visible when the soft keyboard changes the
+   visual viewport. */
+@media(max-width:900px){
+  html{height:var(--aw-viewport-height,100dvh)}
+  body.agent-page{height:var(--aw-viewport-height,100dvh);min-height:0;overflow:hidden;overscroll-behavior:none;touch-action:pan-y pinch-zoom}
+  .agent-page-header{position:relative;z-index:2}
+  .agent-page-main{height:calc(var(--aw-viewport-height,100dvh) - var(--aw-header-height,52px));min-height:0;padding-bottom:0;overflow:hidden}
+  .agent-page-main .agent-workspace{height:100%;min-height:0;overflow:hidden}
+  .aw-shell{height:100%;min-height:0;grid-template-rows:auto minmax(0,1fr)}
+  .aw-sidebar{min-height:0}
+  .aw-nav{overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch;touch-action:pan-x pinch-zoom;scrollbar-width:none}
+  .aw-nav::-webkit-scrollbar{display:none}
+  .aw-main{height:100%;min-height:0;overflow-x:hidden;overflow-y:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y pinch-zoom}
+  #aw-tab-chat.active{height:100%;min-height:0;overflow:hidden}
+  #aw-tab-chat .aw-chat-layout{height:100%;min-height:0}
+  #aw-tab-chat .aw-chat-feed{overscroll-behavior-y:contain}
+}
+@media(min-width:901px){.aw-history-drawer{align-items:stretch}.aw-history-panel{height:100dvh;max-height:none;border-radius:0;width:min(470px,43vw)}}
+@media(max-width:560px){.aw-toolbar-actions{width:100%;justify-content:space-between}.aw-status{max-width:155px}.aw-chat-toolbar{gap:8px!important}.aw-chat-toolbar .aw-actions{margin-left:auto}.aw-chat-toolbar .aw-actions button{padding:8px}.aw-history-panel{height:min(82dvh,720px);padding:15px 13px}}

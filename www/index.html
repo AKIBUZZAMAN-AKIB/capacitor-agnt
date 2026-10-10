@@ -141,7 +141,7 @@
 
       <div class="input-row" style="margin-top:14px;flex-wrap:wrap;gap:8px">
         <select id="agent-provider" aria-label="এই turn-এর provider" style="flex:1 1 160px">
-          <option value="auto">Auto routing</option>
+          <option value="auto">Free Router · Kilo আগে, verified free only</option>
           <option value="anthropic">Anthropic</option><option value="openai">OpenAI</option>
           <option value="gemini">Google Gemini</option><option value="openrouter">OpenRouter</option>
           <option value="ovhcloud">OVHcloud</option><option value="aihorde" title="No tool calls or SSE; buffered response">AI Horde (buffered, no tools)</option>
@@ -166,7 +166,7 @@
       </div>
       <article class="card" style="margin-top:12px">
         <span class="icon">⇄</span><h3>Provider, model & auto-routing</h3>
-        <p>Model তালিকা live catalog থেকে আনুন। নিচের default model ও base URL provider configuration; উপরের model field শুধু এই turn-এর override। Save করলে model-level tool/protocol/auth/stream capability ও fallback order runtime settings-এ থাকে; API key আলাদা auth store-এ যায়। Auto mode-এ turn override কেবল নির্বাচিত catalog provider-এ যাবে—পূর্ণ auto-routing চাইলে উপরের override ফাঁকা রাখুন। Free-tier model-এর prompt logging/training ঝুঁকি catalog-এ থাকলে এখানে দেখানো হবে।</p>
+        <p>Model তালিকা live catalog থেকে আনুন। নিচের default model ও base URL provider configuration; উপরের model field শুধু এই turn-এর override। Save করলে model-level tool/protocol/auth/stream capability runtime settings-এ থাকে; API key আলাদা auth store-এ যায়। Free Router mode-এ Kilo Auto Free আগে এবং OpenRouter Free Models Router পরে; paid বা unknown-price model native engine reject করে। নির্দিষ্ট paid provider/model ব্যবহার করতে উপরের provider স্পষ্ট করে বাছুন। Free-tier model-এর prompt logging/training ঝুঁকি catalog-এ থাকলে এখানে দেখানো হবে।</p>
         <div class="input-row">
           <label class="hint" for="agent-catalog-provider">Catalog / default model provider</label>
           <select id="agent-catalog-provider" aria-label="Model catalog provider">
@@ -204,7 +204,7 @@
         </div>
         <p class="hint" id="agent-model-capability-summary">Catalog model metadata এখানে দেখানো হবে।</p>
         <div class="input-row">
-          <input id="agent-provider-order" placeholder="Auto order: anthropic,openai,gemini,…" autocomplete="off" style="flex:2 1 320px">
+          <input id="agent-provider-order" placeholder="Free Router order: kilo,openrouter" readonly autocomplete="off" style="flex:2 1 320px">
           <label class="chk"><input id="agent-failover" type="checkbox" checked>transient error-এ failover</label>
           <label class="hint" for="agent-max-fallbacks">Max fallbacks</label>
           <input id="agent-max-fallbacks" type="number" min="0" max="10" value="3" style="width:76px">

@@ -55,7 +55,9 @@ pub struct AgentRuntimeConfig {
     pub provider_model_auth_requirements: HashMap<String, HashMap<String, bool>>,
     /// Per-model streaming capability from the provider catalog. Absent uses provider defaults.
     pub provider_model_streaming_capabilities: HashMap<String, HashMap<String, bool>>,
-    /// Cross-provider order and transient-only fallback controls for `defaultProvider: auto`.
+    /// Free-only cross-provider order and transient-only fallback controls for
+    /// `defaultProvider: auto`. Automatic routing rejects any model that is not
+    /// a provider-documented free route, even if this list was manually edited.
     pub auto_routing: AutoRoutingConfig,
 }
 
@@ -70,11 +72,11 @@ pub struct AutoRoutingConfig {
 impl Default for AutoRoutingConfig {
     fn default() -> Self {
         Self {
-            provider_order: vec![
-                "anthropic".into(), "openai".into(), "gemini".into(), "openrouter".into(),
-                "ovhcloud".into(), "opencode_zen".into(), "llm7".into(), "kilo".into(),
-                "aihorde".into(),
-            ],
+            // `auto` is the Free Router. Keep its order deliberately short and
+            // model-specific: both virtual routers are provider-maintained
+            // free-only sets, so a stale paid catalog default can never leak
+            // into an automatic fallback.
+            provider_order: vec!["kilo".into(), "openrouter".into()],
             failover_on_transient: true,
             max_fallbacks: 3,
         }
@@ -96,8 +98,13 @@ impl Default for AgentRuntimeConfig {
             default_heartbeat_max_turns: 5,
             default_cron_timeout_ms: 25_000,
             default_heartbeat_timeout_ms: 25_000,
-            default_provider: "anthropic".into(),
-            default_models: HashMap::new(),
+            // A new workspace starts on the no-cost router. Paid providers are
+            // still available only when the user selects one explicitly.
+            default_provider: "auto".into(),
+            default_models: HashMap::from([
+                ("kilo".into(), "kilo-auto/free".into()),
+                ("openrouter".into(), "openrouter/free".into()),
+            ]),
             provider_base_urls: HashMap::new(),
             provider_model_protocols: HashMap::new(),
             provider_tool_capabilities: HashMap::new(),

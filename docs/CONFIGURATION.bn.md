@@ -193,12 +193,15 @@ Agent `initialize()` করার পর runtime tuning-এর জন্য `Nat
 পাশের `.native-agent-runtime.json` sidecar-এ atomicভাবে থাকে, workspace sandbox-এর বাইরে; তাই
 পরের foreground/background run একই মান পড়ে। Partial patch merge হয়।
 
-- `defaultProvider`-এর ডিফল্ট `anthropic`; `auto` অথবা `anthropic`, `openai`, `gemini`,
-  `openrouter`, `ovhcloud`, `aihorde`, `llm7`, `opencode_zen`, `kilo`, `pollinations`, `webllm`
-  বেছে নেওয়া যায়। Message/skill-এ দেওয়া provider বা per-turn model override এই default-এর
-  অগ্রাধিকার পায়।
-- `defaultModels` provider-ভিত্তিক model ID রাখে; না দিলে ওই provider-এর built-in default
-  থাকলে সেটি, অন্যথায় নিজে model ID configure করতে হবে। `providerBaseUrls` হলো API root
+- `defaultProvider`-এর ডিফল্ট `auto`—এটি **Free Router**। প্রথমে Kilo-এর
+  `kilo-auto/free` (Kilo-র বর্তমান curated free model set থেকে dynamic নির্বাচন), তারপর
+  OpenRouter-এর `openrouter/free` চেষ্টা হয়। Auto/Free Router paid model, সাধারণ provider
+  default, এবং unknown-price model deny করে; শুধু provider-documented `:free` variant বা ওই
+  দুই virtual free router eligible। Paid provider ব্যবহার করতে তাকে message/skill-এ স্পষ্টভাবে
+  বেছে নিতে হবে।
+- `defaultModels` provider-ভিত্তিক model ID রাখে; নতুন config-এ Kilo ও OpenRouter-এর উপরের
+  virtual free router দুটিই লেখা থাকে। নির্দিষ্ট provider বাছলে তার built-in/default model
+  অথবা model override ব্যবহার করা যায়। `providerBaseUrls` হলো API root
   override (যেমন OpenAI-compatible API-তে `/v1` root), কেবল host-সহ HTTP(S),
   credential/query/fragment-বিহীন URL গ্রহণ করা হয়। `defaultModels`, `providerBaseUrls`,
   `providerModelProtocols`, `providerToolCapabilities` map patch-এ কোনো provider/model-এর মান
@@ -209,8 +212,9 @@ Agent `initialize()` করার পর runtime tuning-এর জন্য `Nat
   ইচ্ছামতো Chat Completions ধরে route করা হয় না।
 - `providerToolCapabilities` model-ভিত্তিক যাচাইকৃত `true`/`false`; অজানা মান auto-route-এ
   tool-সহ task-এর জন্য অযোগ্য। Gateway-এর সামগ্রিক support থেকে প্রতিটি model tool-capable
-  ধরে নেওয়া হয় না। `autoRouting.providerOrder`, `failoverOnTransient`, `maxFallbacks` দিয়ে
-  fallback সাজানো যায়। Timeout/connect/429/নির্বাচিত 5xx-এর মতো transient failure retry/fallback
+  ধরে নেওয়া হয় না। Free Router-এর route order Kilo তারপর OpenRouter এবং paid route যোগ করা
+  যায় না; `failoverOnTransient`, `maxFallbacks` দিয়ে শুধু retry/fallback সীমা ঠিক করা যায়।
+  Timeout/connect/429/নির্বাচিত 5xx-এর মতো transient failure retry/fallback
   পায়; auth/invalid-request error-এ নয়, এবং stream-এ visible text/tool event যাওয়ার পর duplicate
   output এড়াতে retry/fallback বন্ধ থাকে।
 - AI Horde-এর OpenAI shim-এ tool calling ও SSE streaming নেই—agent সেটিকে buffered response

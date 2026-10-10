@@ -803,10 +803,9 @@ const AGENT_PROVIDERS = [
   'anthropic', 'openai', 'gemini', 'openrouter', 'ovhcloud', 'aihorde',
   'llm7', 'opencode_zen', 'kilo', 'pollinations', 'webllm',
 ];
-const DEFAULT_PROVIDER_ORDER = [
-  'anthropic', 'openai', 'gemini', 'openrouter', 'ovhcloud', 'opencode_zen',
-  'llm7', 'kilo', 'aihorde',
-];
+// Auto is the native Free Router. Its Rust admission boundary also ignores
+// stale/manual paid orders, but the diagnostic UI must not suggest otherwise.
+const DEFAULT_PROVIDER_ORDER = ['kilo', 'openrouter'];
 const PROVIDER_PROTOCOLS = {
   anthropic: ['anthropic_messages'],
   openai: ['openai_chat_completions', 'openai_responses'],
@@ -933,7 +932,7 @@ function renderProviderModels(models) {
 async function loadRuntimeConfigIntoUi() {
   const config = await window.NativeKit.agent.getRuntimeConfig();
   state.runtimeConfig = config;
-  const provider = String(config?.defaultProvider ?? 'anthropic');
+  const provider = String(config?.defaultProvider ?? 'auto');
   if (el('agent-provider')) el('agent-provider').value = provider;
   const routing = config?.autoRouting ?? {};
   if (el('agent-provider-order')) el('agent-provider-order').value = (routing.providerOrder ?? DEFAULT_PROVIDER_ORDER).join(',');
@@ -941,7 +940,7 @@ async function loadRuntimeConfigIntoUi() {
   if (el('agent-max-fallbacks')) el('agent-max-fallbacks').value = String(routing.maxFallbacks ?? 3);
   const defaults = config?.defaultModels ?? {};
   const firstConfigured = routing.providerOrder?.find((id) => defaults[id])
-    ?? (provider !== 'auto' ? provider : 'anthropic');
+    ?? (provider !== 'auto' ? provider : 'kilo');
   if (el('agent-catalog-provider')) el('agent-catalog-provider').value = firstConfigured;
   // A request override is distinct from a provider default. In Auto mode it
   // must stay blank unless the user deliberately pins a model for this turn.
@@ -952,14 +951,17 @@ async function loadRuntimeConfigIntoUi() {
 
 async function persistProviderSettings() {
   requireInit();
-  const providerChoice = val('agent-provider', 'anthropic') || 'anthropic';
+  const providerChoice = val('agent-provider', 'auto') || 'auto';
   const selectedCatalogProvider = catalogProvider();
   const model = val('agent-provider-default-model');
   const baseUrl = val('agent-provider-base-url');
   const orderText = val('agent-provider-order');
-  const providerOrder = orderText
+  const requestedOrder = orderText
     ? orderText.split(',').map((entry) => entry.trim()).filter(Boolean)
     : DEFAULT_PROVIDER_ORDER;
+  // Auto is Free Router, not editable paid provider order. Explicit providers
+  // remain configurable through the selected provider/model controls.
+  const providerOrder = providerChoice === 'auto' ? [...DEFAULT_PROVIDER_ORDER] : requestedOrder;
   if (providerOrder.some((provider) => !AGENT_PROVIDERS.includes(provider))) {
     throw new Error('Auto-routing order-এ অজানা provider ID আছে।');
   }

@@ -33,10 +33,9 @@ internal object AgentRuntimeConfigStore {
         "providerModelProtocols", "providerToolCapabilities",
         "providerModelAuthRequirements", "providerModelStreamingCapabilities", "autoRouting",
     )
-    private val defaultProviderOrder = listOf(
-        "anthropic", "openai", "gemini", "openrouter", "ovhcloud", "opencode_zen",
-        "llm7", "kilo", "aihorde",
-    )
+    // `auto` is deliberately a free-only router: Kilo's live Free router runs
+    // first, then OpenRouter's live Free Models Router.
+    private val defaultProviderOrder = listOf("kilo", "openrouter")
 
     fun get(context: Context): JSONObject {
         val file = runtimeFile(context)
@@ -164,8 +163,10 @@ internal object AgentRuntimeConfigStore {
         .put("defaultHeartbeatMaxTurns", 5)
         .put("defaultCronTimeoutMs", 25_000)
         .put("defaultHeartbeatTimeoutMs", 25_000)
-        .put("defaultProvider", "anthropic")
-        .put("defaultModels", JSONObject())
+        .put("defaultProvider", "auto")
+        .put("defaultModels", JSONObject()
+            .put("kilo", "kilo-auto/free")
+            .put("openrouter", "openrouter/free"))
         .put("providerBaseUrls", JSONObject())
         .put("providerModelProtocols", JSONObject())
         .put("providerToolCapabilities", JSONObject())
@@ -195,7 +196,7 @@ internal object AgentRuntimeConfigStore {
         val maxDelay = normalized.getLong("maxRetryDelayMs")
         require(maxDelay >= baseDelay) { "maxRetryDelayMs must be at least baseRetryDelayMs" }
 
-        val defaultProvider = if (value.has("defaultProvider")) value.opt("defaultProvider") else "anthropic"
+        val defaultProvider = if (value.has("defaultProvider")) value.opt("defaultProvider") else "auto"
         require(defaultProvider is String && (defaultProvider == "auto" || defaultProvider in providers)) {
             "defaultProvider must be auto or one of the configured provider ids"
         }

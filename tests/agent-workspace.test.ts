@@ -48,8 +48,11 @@ describe('owner-facing AI Workspace', () => {
     }
   });
 
-  it('initializes automatically and leaves Auto Router as the no-selection default', () => {
-    expect(agent).toContain('<option value="auto">Auto router');
+  it('initializes automatically and leaves Free Router as the no-selection default', () => {
+    expect(agent).toContain('<option value="auto">Free Router');
+    expect(agent).toContain('Kilo আগে, verified free only');
+    expect(ui).toContain('FREE_ROUTER_ROUTES');
+    expect(ui).toContain('VERIFIED FREE');
     expect(agent).toContain('id="aw-chat-input" rows="3"');
     expect(ui).toContain('void initialize();');
     expect(ui).toContain('setComposerAvailability(true);');
@@ -90,6 +93,39 @@ describe('owner-facing AI Workspace', () => {
     expect(css).toContain('.aw-shell{display:grid');
     expect(css).toContain('@media(max-width:900px)');
     expect(css).toContain('@media(max-width:560px)');
+  });
+
+  it('keeps raw conversation context on follow-ups and makes history reachable on phones', () => {
+    expect(agent).toContain('id="aw-history-drawer"');
+    expect(agent).toContain('id="aw-history-list"');
+    expect(agent).toContain('./agent-workspace-icons.css');
+    expect(agent).toContain('aw-icon-sprite');
+    expect(ui).toContain('sessionReady: false');
+    expect(ui).toContain('await nativeAgent().followUp({ prompt });');
+    expect(ui).toContain("await nativeAgent().resumeSession({ sessionKey: state.sessionKey, agentId: 'main' });");
+    expect(ui).toContain("await nativeAgent().resumeSession({ sessionKey, agentId: 'main' });");
+    expect(ui).toContain('async function openHistory()');
+    expect(ui).toContain("$('aw-refresh-sessions').addEventListener('click', () => void guarded('চ্যাট ইতিহাস', openHistory))");
+    expect(ui).toContain('renderSessionList($(\'aw-history-list\'), 100);');
+    const iconCss = read('www/agent-workspace-icons.css');
+    expect(iconCss).toContain('.aw-history-drawer{position:fixed');
+    expect(iconCss).toContain('.aw-icon-sprite');
+  });
+
+  it('removes decorative startup chrome and keeps touch scrolling owned by the active view', () => {
+    for (const obsoleteCopy of ['PRIVATE ON-DEVICE AGENT', 'আমার AI Workspace', 'Agent শুরু হচ্ছে']) {
+      expect(agent).not.toContain(obsoleteCopy);
+    }
+    expect(agent).not.toContain('id="aw-start"');
+    expect(ui).not.toContain('Web preview-এ agent চলে না; Android/iOS build-এ ব্যবহার করুন।');
+    expect(css).toContain('grid-template-rows:auto auto minmax(0,1fr) auto');
+    expect(css).toContain('min-height:0;overflow-x:hidden;overflow-y:auto');
+    expect(ui).toContain('window.visualViewport?.addEventListener(\'resize\'');
+    expect(ui).toContain('chatAutoScroll');
+    expect(ui).toContain('scrollChatToBottom();');
+    const iconCss = read('www/agent-workspace-icons.css');
+    expect(iconCss).toContain('touch-action:pan-y pinch-zoom');
+    expect(iconCss).toContain('body.agent-page{height:var(--aw-viewport-height,100dvh)');
   });
 });
 

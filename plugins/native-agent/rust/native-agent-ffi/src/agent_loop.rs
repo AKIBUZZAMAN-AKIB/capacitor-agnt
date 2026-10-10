@@ -57,6 +57,10 @@ struct ProviderRoute {
 struct RoutePlan {
     candidates: Vec<ProviderRoute>,
     automatic: bool,
+    /// `provider: auto` is the app's Free Router. This stays true even when a
+    /// user pins one provider-qualified model, so an override cannot bypass the
+    /// zero-cost admission check.
+    free_only: bool,
 }
 
 #[derive(Debug)]
@@ -1506,6 +1510,9 @@ fn build_route_plan(
     runtime: &AgentRuntimeConfig,
 ) -> Result<RoutePlan, NativeAgentError> {
     let mut automatic = requested_provider == "auto";
+    // `auto` is not a generic paid fallback: it is the Free Router. Keep this
+    // policy separate from `automatic`, which only controls retry failover.
+    let free_only = requested_provider == "auto";
     let mut pinned_model = requested_model.map(str::trim).filter(|m| !m.is_empty()).map(str::to_string);
     let provider_order: Vec<String>;
 
@@ -1537,7 +1544,11 @@ fn build_route_plan(
                 }
             }
         } else {
-            provider_order = runtime.auto_routing.provider_order.clone();
+            // Free Router policy is intentionally immune to stale/hand-edited
+            // `autoRouting` settings from older paid-default builds. Kilo's
+            // live Auto Free set is always first; OpenRouter's live Free Models
+            // Router is the only cross-provider fallback.
+            provider_order = vec!["kilo".into(), "openrouter".into()];
         }
     } else {
         if !provider_catalog::provider_ids().contains(&requested_provider) {
@@ -1557,13 +1568,44 @@ fn build_route_plan(
     let mut candidates = Vec::new();
     let mut skipped = Vec::new();
     for provider in provider_order {
-        let model = pinned_model.clone()
-            .or_else(|| runtime.default_models.get(&provider).cloned())
-            .or_else(|| provider_catalog::default_model(&provider).map(str::to_string));
+        let model = pinned_model
+            .clone()
+            .or_else(|| {
+                if free_only {
+                    match provider.as_str() {
+                        "kilo" => Some("kilo-auto/free".to_string()),
+                        "openrouter" => Some("openrouter/free".to_string()),
+                        _ => None,
+                    }
+                } else {
+                    runtime.default_models.get(&provider).cloned()
+                }
+            })
+            .or_else(|| {
+                if free_only {
+                    None
+                } else {
+                    provider_catalog::default_model(&provider).map(str::to_string)
+                }
+            });
         let Some(model) = model else {
             skipped.push(format!("{provider}: no default model configured"));
             continue;
         };
+
+        // Never infer price from a provider default. The Free Router accepts
+        // only Kilo/OpenRouter's documented virtual free routers or their
+        // explicit `:free` variants; every other route is deny-by-default.
+        if free_only && !provider_catalog::is_verified_free_route(&provider, &model) {
+            let reason = format!("{provider}/{model}: not a verified free route");
+            if automatic {
+                skipped.push(reason);
+                continue;
+            }
+            return Err(NativeAgentError::Agent {
+                msg: format!("Free Router only accepts verified free models; {reason}. Choose Kilo or OpenRouter with a `:free` variant, or select a paid provider explicitly."),
+            });
+        }
 
         match build_route_candidate(&provider, &model, tools_required, ctx, runtime) {
             Ok(route) => candidates.push(route),
@@ -1584,7 +1626,7 @@ fn build_route_plan(
         });
     }
 
-    Ok(RoutePlan { candidates, automatic })
+    Ok(RoutePlan { candidates, automatic, free_only })
 }
 
 fn build_route_candidate(
@@ -1736,6 +1778,7 @@ async fn call_with_routing(
             "protocol": route.protocol.as_str(),
             "attempt": index + 1,
             "automatic": route_plan.automatic,
+            "freeOnly": route_plan.free_only,
             "sessionKey": sk,
         }));
         let driver = create_driver(route, callback.clone(), webllm_pending.clone(), &sk)?;
@@ -1751,6 +1794,7 @@ async fn call_with_routing(
                     "model": route.model,
                     "protocol": route.protocol.as_str(),
                     "automatic": route_plan.automatic,
+                    "freeOnly": route_plan.free_only,
                     "sessionKey": sk,
                 }));
                 return Ok((response, route.clone()));
