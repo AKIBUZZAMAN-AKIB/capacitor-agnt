@@ -729,6 +729,16 @@ async function wireEvents() {
       recordRouteEvent('fallback', payload ?? {});
       appendActivity(`Provider fallback · ${payload?.toProvider ?? payload?.provider ?? 'unknown'}`, 'warn'); return;
     }
+    if (type === 'provider.route_pinned') {
+      if (payload?.sessionKey && payload.sessionKey !== state.sessionKey) { appendActivity('Background route pinned'); return; }
+      const p = payload?.provider ?? 'unknown';
+      const m = payload?.model ?? 'unknown';
+      const label = $('aw-model-label');
+      if (label) label.textContent = `${p} / ${m}`;
+      recordRouteEvent('selected', payload ?? {});
+      appendActivity(`Free Router নির্বাচন করেছে · ${p} / ${m}`);
+      return;
+    }
     if (type === 'context.limit_resolved') {
       if (payload?.sessionKey && payload.sessionKey !== state.sessionKey) return;
       const length = Number(payload?.contextLimitTokens);

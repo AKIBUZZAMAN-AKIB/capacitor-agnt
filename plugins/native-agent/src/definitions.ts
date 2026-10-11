@@ -410,6 +410,7 @@ export type NativeAgentEventType =
   | 'provider.route'
   | 'provider.selected'
   | 'provider.fallback'
+  | 'provider.route_pinned'
   | 'provider.request'
   | 'provider.bridge.delta'
   // ── Streaming / turn lifecycle ──

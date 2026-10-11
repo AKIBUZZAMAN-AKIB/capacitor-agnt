@@ -46,6 +46,14 @@ pub struct AgentTurnResult {
     pub model: String,
     /// Provider that produced the most recent successful completion.
     pub provider: String,
+    /// True when the turn ran through the Free Router (`provider: "auto"`).
+    /// The concrete model the router resolved is reporting-only here: pinning
+    /// it as the session's persisted route would fail the strict tool gate on
+    /// the next follow-up, because a dynamically selected free model carries
+    /// no static tool-capability evidence. Persist the router identity
+    /// instead and let it re-select; per-turn pinning (which vouches for the
+    /// resolved model) still keeps tool-loop continuity inside one turn.
+    pub free_router: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -301,6 +309,8 @@ pub async fn run_agent_turn(
     let mut turn_count: u32 = 0;
     let mut actual_model = model_override.unwrap_or_default().to_string();
     let mut actual_provider = requested_provider.to_string();
+    // Whether any iteration of this turn routed through the Free Router.
+    let mut free_router_turn = false;
     // Once a Free Router resolves an alias to a concrete `:free` model, pin
     // subsequent tool-follow-up requests to that exact ID so its own catalog
     // context limit is used instead of reusing only the router-level ceiling.
@@ -330,6 +340,7 @@ pub async fn run_agent_turn(
             &ctx,
             &runtime_config,
         )?;
+        free_router_turn |= route_plan.free_only;
         if let Some((provider, model)) = resolved_free_route.as_ref() {
             route_plan = pin_resolved_free_route(
                 route_plan,
@@ -537,11 +548,29 @@ pub async fn run_agent_turn(
             reported_model.unwrap_or_else(|| route.model.clone())
         };
         actual_provider = route.provider.clone();
-        resolved_free_route = if route_plan.free_only {
+        let pinned_route = if route_plan.free_only {
             verified_model.map(|model| (route.provider.clone(), model))
         } else {
             None
         };
+        // Surface the router's concrete (verified-free) model choice in the
+        // event log whenever it changes, so the log answers "which model is
+        // actually answering this conversation?" instead of only naming the
+        // virtual router.
+        if pinned_route != resolved_free_route {
+            if let Some((pin_provider, pin_model)) = pinned_route.as_ref() {
+                event_bus::emit(
+                    ctx.callback.as_deref(),
+                    "provider.route_pinned",
+                    &serde_json::json!({
+                        "provider": pin_provider,
+                        "model": pin_model,
+                        "sessionKey": ctx.session_key,
+                    }),
+                );
+            }
+        }
+        resolved_free_route = pinned_route;
 
         cumulative_usage.input_tokens += response.usage.input_tokens;
         cumulative_usage.output_tokens += response.usage.output_tokens;
@@ -857,6 +886,7 @@ pub async fn run_agent_turn(
         messages,
         model: actual_model,
         provider: actual_provider,
+        free_router: free_router_turn,
     })
 }
 
@@ -1699,7 +1729,7 @@ fn build_route_plan(
             });
         }
 
-        match build_route_candidate(&provider, &model, tools_required, ctx, runtime) {
+        match build_route_candidate(&provider, &model, tools_required, false, ctx, runtime) {
             Ok(route) => candidates.push(route),
             Err(reason) if automatic => skipped.push(format!("{provider}/{model}: {reason}")),
             Err(reason) if reason.starts_with("AUTH:") => {
@@ -1725,6 +1755,7 @@ fn build_route_candidate(
     provider: &str,
     model: &str,
     tools_required: bool,
+    free_router_resolved: bool,
     ctx: &AgentLoopContext<'_>,
     runtime: &AgentRuntimeConfig,
 ) -> Result<ProviderRoute, String> {
@@ -1746,16 +1777,44 @@ fn build_route_candidate(
     if tools_required {
         let (capability, source) = provider_catalog::tool_capability(provider, model, runtime);
         if capability != Some(true) {
-            return Err(format!(
-                "tool calling is {} for this model (evidence: {source}); choose a verified tool-capable model or remove tools",
-                if capability == Some(false) { "disabled" } else { "unknown" }
-            ));
+            // A model the verified Free Router resolved for this very request
+            // inherits the router's feature guarantee: both first-choice
+            // routers select only models that support the request's features
+            // (including tool calling), and an earlier iteration of this same
+            // turn already completed with these exact tool definitions
+            // attached. Only an explicit `false` — a user or catalog override
+            // — still refuses the route; "unknown" alone must not kill a
+            // follow-up the router itself chose.
+            let router_vouched = free_router_resolved && capability.is_none();
+            if !router_vouched {
+                return Err(format!(
+                    "tool calling is {} for '{provider}/{model}' (evidence: {source}); choose a verified tool-capable model or remove tools",
+                    if capability == Some(false) { "disabled" } else { "unknown" }
+                ));
+            }
         }
     }
 
     let auth = crate::auth::get_auth_token(&ctx.config.auth_profiles_path, provider)
         .map_err(|error| error.to_string())?;
-    let model_auth_required = provider_catalog::model_auth_required(provider, model, runtime);
+    let mut model_auth_required = provider_catalog::model_auth_required(provider, model, runtime);
+    if free_router_resolved && provider == "kilo" && model_auth_required {
+        // A concrete model the Kilo Free Router resolved was just verified
+        // against the live catalog as a free route in this very session, and
+        // Kilo's catalog `isFree` flag marks anonymous access. Some resolved
+        // free ids carry no `:free` suffix, so the static route check alone
+        // would demand a key the router itself never needed and kill the
+        // follow-up. An explicit per-model runtime override stays
+        // authoritative; absent one, the router's anonymous selection wins.
+        let explicitly_overridden = runtime
+            .provider_model_auth_requirements
+            .get("kilo")
+            .and_then(|models| models.get(model))
+            .is_some();
+        if !explicitly_overridden {
+            model_auth_required = false;
+        }
+    }
     let api_key = match auth.api_key {
         Some(key) if !key.trim().is_empty() => key,
         _ if provider == "aihorde" => "0000000000".into(),
@@ -1845,8 +1904,12 @@ fn pin_resolved_free_route(
     {
         return Ok(route_plan);
     }
-    let resolved = build_route_candidate(provider, model, tools_required, ctx, runtime)
-        .map_err(|reason| NativeAgentError::Agent { msg: format!("Resolved free model is not available for follow-up: {reason}") })?;
+    let resolved = build_route_candidate(provider, model, tools_required, true, ctx, runtime)
+        .map_err(|reason| NativeAgentError::Agent {
+            msg: format!(
+                "Resolved free model '{provider}/{model}' is not available for follow-up: {reason}"
+            ),
+        })?;
     let mut candidates = vec![resolved];
     candidates.extend(route_plan.candidates.into_iter().filter(|candidate| candidate.provider != provider));
     route_plan.candidates = candidates;

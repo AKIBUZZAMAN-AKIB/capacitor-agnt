@@ -971,14 +971,26 @@ impl NativeAgentHandle {
 
             match result {
                 Ok(turn_result) => {
+                    // A Free Router turn persists the router identity, not the
+                    // concrete model it happened to resolve: a dynamically
+                    // selected free model has no static tool-capability
+                    // evidence, so pinning it would make the next skill
+                    // follow-up fail the strict tool gate. The router
+                    // re-selects per turn; per-turn pinning (which vouches for
+                    // the resolved model) keeps tool-loop continuity.
+                    let (session_provider, session_model) = if turn_result.free_router {
+                        (Some("auto".to_string()), None)
+                    } else {
+                        (Some(turn_result.provider.clone()), Some(turn_result.model.clone()))
+                    };
                     if let Ok(conn) = db::open_db(&config.db_path) {
                         let _ = db::save_session(
                             &conn,
                             &params_for_task.session_key,
                             &skill_id_for_task,
                             &turn_result.messages_json,
-                            Some(&turn_result.model),
-                            Some(&turn_result.provider),
+                            session_model.as_deref(),
+                            session_provider.as_deref(),
                             start_time,
                             Some(&turn_result.usage),
                         );
@@ -1000,9 +1012,11 @@ impl NativeAgentHandle {
                         agent_id: skill_id_for_task.clone(),
                         // Persist the actual selected route so a skill follow-up
                         // continues on the same provider/model rather than losing
-                        // the auto-router's first successful choice.
-                        provider: Some(turn_result.provider.clone()),
-                        model: Some(turn_result.model.clone()),
+                        // the auto-router's first successful choice — except for
+                        // Free Router turns, which persist `auto` so the router
+                        // re-selects instead of dying on a stale concrete id.
+                        provider: session_provider,
+                        model: session_model,
                         system_prompt: params_for_task.system_prompt.clone(),
                         max_turns: params_for_task.max_turns,
                         allowed_tools_json: params_for_task.allowed_tools_json.clone(),
@@ -1423,14 +1437,27 @@ impl NativeAgentHandle {
 
             match result {
                 Ok(turn_result) => {
+                    // Free Router turns persist `auto` (no concrete model) as
+                    // the session route: the router-resolved model carries no
+                    // static tool-capability evidence, so persisting it would
+                    // make the next follow-up — in-process or after a resume —
+                    // fail the strict tool gate with "tool calling is unknown".
+                    // The router re-selects per turn; per-turn pinning (which
+                    // vouches for the resolved model) keeps tool-loop
+                    // continuity inside a single turn.
+                    let (session_provider, session_model) = if turn_result.free_router {
+                        (Some("auto".to_string()), None)
+                    } else {
+                        (Some(turn_result.provider.clone()), Some(turn_result.model.clone()))
+                    };
                     if let Ok(conn) = db::open_db(&config.db_path) {
                         let _ = db::save_session(
                             &conn,
                             &params_for_task.session_key,
                             "main",
                             &turn_result.messages_json,
-                            Some(&turn_result.model),
-                            Some(&turn_result.provider),
+                            session_model.as_deref(),
+                            session_provider.as_deref(),
                             start_time,
                             Some(&turn_result.usage),
                         );
@@ -1445,8 +1472,8 @@ impl NativeAgentHandle {
                     }
 
                     let mut next_session = session_state;
-                    next_session.provider = Some(turn_result.provider.clone());
-                    next_session.model = Some(turn_result.model.clone());
+                    next_session.provider = session_provider;
+                    next_session.model = session_model;
                     next_session.messages = turn_result.messages;
 
                     // Build display JSON before moving session state
@@ -1781,6 +1808,19 @@ mod session_continuity_e2e_tests {
         }
     }
 
+    /// Scriptable extras the Free Router tests need on top of the default
+    /// mock gateway behaviour.
+    #[derive(Default)]
+    struct MockProviderScript {
+        /// Reported in every chat response's `model` field, like a gateway
+        /// that names the concrete model the virtual router resolved to.
+        response_model: Option<&'static str>,
+        /// When set, the FIRST chat response is a tool call to this (unknown)
+        /// tool instead of a plain answer, forcing a second loop iteration —
+        /// the exact shape that exercises free-router route pinning.
+        first_response_tool_call: Option<&'static str>,
+    }
+
     /// Mock OpenAI/OpenRouter-compatible provider. Every chat request body is
     /// sent to the returned receiver; streaming requests get an SSE answer,
     /// others JSON. `GET …/models` is answered with an OpenRouter-shaped
@@ -1789,10 +1829,18 @@ mod session_continuity_e2e_tests {
     /// runs against the mock exactly as it would against the live gateway —
     /// the e2e path stays hermetic (no network) without skipping that step.
     fn spawn_mock_provider() -> (String, std_mpsc::Receiver<serde_json::Value>) {
+        spawn_mock_provider_with(MockProviderScript::default())
+    }
+
+    fn spawn_mock_provider_with(
+        script: MockProviderScript,
+    ) -> (String, std_mpsc::Receiver<serde_json::Value>) {
         use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let (tx, rx) = std_mpsc::channel();
+        let chat_count = AtomicUsize::new(0);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
@@ -1839,6 +1887,29 @@ mod session_continuity_e2e_tests {
                                 "top_provider": { "context_length": 65_536, "max_completion_tokens": 4_096 },
                                 "architecture": { "input_modalities": ["text"], "output_modalities": ["text"] },
                                 "supported_parameters": ["tools"],
+                                "isFree": true,
+                                "pricing": { "prompt": "0", "completion": "0" }
+                            },
+                            {
+                                "id": "kilo-auto/free",
+                                "name": "Kilo Auto Free Router",
+                                "description": "Mocked Kilo anonymous free router.",
+                                "context_length": 65_536,
+                                "top_provider": { "context_length": 65_536, "max_completion_tokens": 4_096 },
+                                "architecture": { "input_modalities": ["text"], "output_modalities": ["text"] },
+                                "supported_parameters": ["tools"],
+                                "isFree": true,
+                                "pricing": { "prompt": "0", "completion": "0" }
+                            },
+                            {
+                                "id": "mockrouter/concrete-free",
+                                "name": "Concrete model a free router resolved to",
+                                "description": "Deliberately has no ':free' suffix and no static tool evidence.",
+                                "context_length": 32_768,
+                                "top_provider": { "max_completion_tokens": 4_096 },
+                                "architecture": { "input_modalities": ["text"], "output_modalities": ["text"] },
+                                "supported_parameters": ["tools"],
+                                "isFree": true,
                                 "pricing": { "prompt": "0", "completion": "0" }
                             },
                             {
@@ -1864,15 +1935,55 @@ mod session_continuity_e2e_tests {
                 let Some(body) = body else { continue };
                 let streaming = body["stream"] == serde_json::Value::Bool(true);
                 let _ = tx.send(body);
-                let usage = r#""usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}"#;
+                let chat_index = chat_count.fetch_add(1, Ordering::SeqCst);
+                let tool_probe = if chat_index == 0 { script.first_response_tool_call } else { None };
+                let usage = serde_json::json!({ "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 });
+                let finish_reason = if tool_probe.is_some() { "tool_calls" } else { "stop" };
                 let (content_type, payload) = if streaming {
+                    let first_chunk = if let Some(tool) = tool_probe {
+                        serde_json::json!({
+                            "model": script.response_model,
+                            "choices": [{ "delta": { "tool_calls": [{
+                                "index": 0,
+                                "id": "call_probe_1",
+                                "type": "function",
+                                "function": { "name": tool, "arguments": "{}" }
+                            }] } }]
+                        })
+                    } else {
+                        serde_json::json!({
+                            "model": script.response_model,
+                            "choices": [{ "delta": { "content": "ok" } }]
+                        })
+                    };
+                    let final_chunk = serde_json::json!({
+                        "model": script.response_model,
+                        "choices": [{ "delta": {}, "finish_reason": finish_reason }],
+                        "usage": usage
+                    });
                     ("text/event-stream", format!(
-                        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"ok\"}}}}]}}\n\n\
-                         data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}],{usage}}}\n\n\
-                         data: [DONE]\n\n"))
+                        "data: {first_chunk}\n\ndata: {final_chunk}\n\ndata: [DONE]\n\n"
+                    ))
                 } else {
-                    ("application/json", format!(
-                        "{{\"choices\":[{{\"message\":{{\"role\":\"assistant\",\"content\":\"ok\"}},\"finish_reason\":\"stop\"}}],{usage}}}"))
+                    let message = if let Some(tool) = tool_probe {
+                        serde_json::json!({
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [{
+                                "id": "call_probe_1",
+                                "type": "function",
+                                "function": { "name": tool, "arguments": "{}" }
+                            }]
+                        })
+                    } else {
+                        serde_json::json!({ "role": "assistant", "content": "ok" })
+                    };
+                    let response = serde_json::json!({
+                        "model": script.response_model,
+                        "choices": [{ "message": message, "finish_reason": finish_reason }],
+                        "usage": usage
+                    });
+                    ("application/json", response.to_string())
                 };
                 let wire = format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nConnection: close\r\n\r\n{payload}");
                 let _ = stream.write_all(wire.as_bytes());
@@ -1887,7 +1998,10 @@ mod session_continuity_e2e_tests {
         let handle = NativeAgentHandle::new(config.clone()).unwrap();
         std::fs::write(
             &runtime_path,
-            serde_json::json!({ "providerBaseUrls": { "openrouter": provider_base } }).to_string(),
+            // The Free Router tries Kilo before OpenRouter and its free routes
+            // are anonymous, so both gateways must point at the mock or the
+            // kilo leg would escape to the real network.
+            serde_json::json!({ "providerBaseUrls": { "kilo": provider_base, "openrouter": provider_base } }).to_string(),
         ).unwrap();
         handle.set_auth_key("sk-or-test-0000000000".into(), "openrouter".into(), "api_key".into()).unwrap();
         let (tx, rx) = std_mpsc::channel();
@@ -2011,5 +2125,122 @@ mod session_continuity_e2e_tests {
         handle.resume_session("chat-seed".into(), "main".into(), None, None, None).unwrap();
         assert!(handle.follow_up("   ".into()).is_err());
         assert!(requests.recv_timeout(Duration::from_millis(800)).is_err(), "no provider request may be sent");
+    }
+
+    /// Like `wait_for_turn`, but returns every non-terminal event payload so
+    /// tests can assert on the observability events the loop emits.
+    fn wait_for_turn_collecting(rx: &std_mpsc::Receiver<(String, String)>) -> Vec<(String, String)> {
+        let mut seen = Vec::new();
+        loop {
+            let (event, payload) = rx.recv_timeout(Duration::from_secs(30)).expect("turn must finish");
+            match event.as_str() {
+                "agent.completed" => return seen,
+                "agent.error" => panic!("turn failed: {payload}"),
+                _ => seen.push((event, payload)),
+            }
+        }
+    }
+
+    /// The Free Router resolves `auto` to a concrete free model and pins it for
+    /// the rest of the turn's tool loop. That pinned model carries no static
+    /// tool-capability evidence (and, on Kilo, may have no `:free` suffix for
+    /// the anonymous-auth shortcut), so the strict static gates used to kill
+    /// the follow-up iteration with "tool calling is unknown … (not_reported)"
+    /// — every tool-bearing question died right after its first model call.
+    /// The router's own verified selection must vouch for the model it chose,
+    /// keeping the loop on the pinned model instead of erroring.
+    #[test]
+    fn free_router_tool_loop_pins_the_resolved_model_and_continues() {
+        let config = sandbox("free-router-tools");
+        let (base, requests) = spawn_mock_provider_with(MockProviderScript {
+            response_model: Some("mockrouter/concrete-free"),
+            first_response_tool_call: Some("nonexistent_probe"),
+        });
+        let (handle, events) = launch(config.clone(), &base);
+
+        handle.send_message(types::SendMessageParams {
+            prompt: "প্রশ্ন".into(),
+            session_key: "chat-free-tools".into(),
+            model: None,
+            provider: Some("auto".into()),
+            system_prompt: String::new(),
+            max_turns: Some(3),
+            allowed_tools_json: None,
+            prior_messages_json: None,
+        }).unwrap();
+        let seen = wait_for_turn_collecting(&events);
+
+        // The router's concrete choice is announced in the event log.
+        let pinned = seen.iter()
+            .find(|(event, _)| event == "provider.route_pinned")
+            .map(|(_, payload)| serde_json::from_str::<serde_json::Value>(payload).unwrap())
+            .expect("provider.route_pinned event must be emitted");
+        assert_eq!(pinned["model"], "mockrouter/concrete-free");
+        assert_eq!(pinned["provider"], "kilo");
+
+        // Iteration 1: the anonymous Kilo free router, with tools attached.
+        let first = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(first["model"], "kilo-auto/free");
+        assert!(
+            first["tools"].as_array().map(|tools| !tools.is_empty()).unwrap_or(false),
+            "the agent's built-in tools must be attached"
+        );
+
+        // Iteration 2 (after the tool round-trip): the pinned concrete model.
+        let second = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            second["model"], "mockrouter/concrete-free",
+            "the follow-up iteration must run on the pinned model, not error out"
+        );
+        assert!(requests.recv_timeout(Duration::from_millis(800)).is_err(), "exactly two provider requests expected");
+
+        // A Free Router session persists the router identity, never the
+        // concrete model, or the next follow-up would fail the static gates.
+        let conn = db::open_db(&config.db_path).unwrap();
+        let (stored_provider, stored_model) = db::load_session_route(&conn, "chat-free-tools").unwrap();
+        assert_eq!(stored_provider.as_deref(), Some("auto"));
+        assert_eq!(stored_model, None);
+    }
+
+    /// After a restart, a Free Router session must resume through the router
+    /// again. Persisting the concrete resolved model made the resumed
+    /// follow-up fail the strict tool gate ("tool calling is unknown"),
+    /// because the dynamically routed id carries no static evidence.
+    #[test]
+    fn resumed_free_router_session_routes_through_the_router_again() {
+        let config = sandbox("free-router-resume");
+        let (base, requests) = spawn_mock_provider_with(MockProviderScript {
+            response_model: Some("mockrouter/concrete-free"),
+            first_response_tool_call: None,
+        });
+        let (handle, events) = launch(config.clone(), &base);
+
+        handle.send_message(types::SendMessageParams {
+            prompt: "প্রথম প্রশ্ন".into(),
+            session_key: "chat-free-resume".into(),
+            model: None,
+            provider: Some("auto".into()),
+            system_prompt: String::new(),
+            max_turns: None,
+            allowed_tools_json: None,
+            prior_messages_json: None,
+        }).unwrap();
+        wait_for_turn(&events);
+        let first = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(first["model"], "kilo-auto/free");
+
+        // Restart: a fresh handle, then resume the stored session the way the
+        // UI does, and ask a follow-up question.
+        drop(handle);
+        let (handle2, events2) = launch(config.clone(), &base);
+        handle2.resume_session("chat-free-resume".into(), "main".into(), None, None, None).unwrap();
+        handle2.follow_up("দ্বিতীয় প্রশ্ন".into()).unwrap();
+        wait_for_turn(&events2);
+        let second = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            second["model"], "kilo-auto/free",
+            "a resumed Free Router session must re-route via the router, not die on the stale concrete model"
+        );
+        drop(handle2);
     }
 }

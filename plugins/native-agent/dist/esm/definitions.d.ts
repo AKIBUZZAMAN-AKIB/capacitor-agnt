@@ -364,7 +364,7 @@ export interface TokenUsage {
  * are never emitted; the cron/wake/heartbeat events below were emitted but
  * missing from the union.
  */
-export type NativeAgentEventType = 'provider.route' | 'provider.selected' | 'provider.fallback' | 'provider.request' | 'provider.bridge.delta' | 'text_delta' | 'thinking' | 'tool_use' | 'tool_result' | 'mcp_tool_call' | 'user_message' | 'approval_request' | 'retry' | 'web_search_start' | 'web_search_complete' | 'max_turns_reached' | 'context.compacted' | 'context.trimmed' | 'transcript.repaired' | 'agent.background_timeout' | 'agent.completed' | 'agent.error' | 'wake.no_jobs' | 'wake.jobs_found' | 'wake.skipped'
+export type NativeAgentEventType = 'provider.route' | 'provider.selected' | 'provider.fallback' | 'provider.route_pinned' | 'provider.request' | 'provider.bridge.delta' | 'text_delta' | 'thinking' | 'tool_use' | 'tool_result' | 'mcp_tool_call' | 'user_message' | 'approval_request' | 'retry' | 'web_search_start' | 'web_search_complete' | 'max_turns_reached' | 'context.compacted' | 'context.trimmed' | 'transcript.repaired' | 'agent.background_timeout' | 'agent.completed' | 'agent.error' | 'wake.no_jobs' | 'wake.jobs_found' | 'wake.skipped'
 /**
  * The wake ran out of its total time budget and stopped between jobs.
  * `deferred` jobs were left untouched and stay due, so the next wake picks
