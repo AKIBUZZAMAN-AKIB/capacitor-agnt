@@ -281,7 +281,9 @@ fn parse_responses_payload(value: &Value) -> Result<CompletionResponse, LlmError
     for call in &calls {
         content.push(ContentBlock::ToolUse { id:call.id.clone(), name:call.name.clone(), input:call.input.clone(), provider_metadata:None });
     }
-    Ok(CompletionResponse { content, stop_reason:stop, tool_calls:calls, usage })
+    let model = value.get("model").and_then(Value::as_str)
+        .map(str::trim).filter(|value| !value.is_empty() && value.len() <= 512).map(str::to_string);
+    Ok(CompletionResponse { content, stop_reason:stop, tool_calls:calls, usage, model })
 }
 
 #[derive(Default)]
@@ -386,7 +388,7 @@ impl LlmDriver for OpenAiResponsesDriver {
             let mut content = Vec::new();
             if !text.is_empty() { content.push(ContentBlock::Text { text:text.clone() }); }
             for call in &tool_calls { content.push(ContentBlock::ToolUse { id:call.id.clone(), name:call.name.clone(), input:call.input.clone(), provider_metadata:None }); }
-            CompletionResponse { content, stop_reason:stop, tool_calls, usage:TokenUsage::default() }
+            CompletionResponse { content, stop_reason:stop, tool_calls, usage:TokenUsage::default(), model:None }
         };
         // The final response is authoritative, but text deltas remain the user
         // visible stream. If a gateway omitted text from the completed object,
@@ -612,7 +614,7 @@ fn build_gemini_completion(text: String, calls: BTreeMap<String, GeminiCallAccum
         return Err(LlmError::Parse("Gemini ended with MAX_TOKENS while emitting a functionCall".into()));
     }
     let stop_reason = gemini_finish_reason(finish, !tool_calls.is_empty());
-    Ok(CompletionResponse { content, stop_reason, tool_calls, usage })
+    Ok(CompletionResponse { content, stop_reason, tool_calls, usage, model:None })
 }
 
 #[async_trait]

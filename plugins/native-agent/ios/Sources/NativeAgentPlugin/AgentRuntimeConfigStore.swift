@@ -34,7 +34,7 @@ enum AgentRuntimeConfigStore {
             "temperature": 0.0,
             "maxTokens": 8_192,
             "defaultMaxTurns": 25,
-            "contextCharBudget": 150_000,
+            "contextCharBudget": 1_000_000,
             "mcpToolTimeoutMs": 30_000,
             "maxRetries": 2,
             "baseRetryDelayMs": 2_000,

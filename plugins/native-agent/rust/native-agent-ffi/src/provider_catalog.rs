@@ -8,7 +8,9 @@ use crate::runtime_config::AgentRuntimeConfig;
 use crate::NativeAgentError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -428,6 +430,9 @@ pub struct ProviderModelInfo {
     pub protocol_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u64>,
+    /// Provider/catalog-reported maximum completion tokens, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health: Option<String>,
 }
@@ -714,6 +719,13 @@ fn model_context_length(entry: &Value) -> Option<u64> {
         .or_else(|| entry.get("inputTokenLimit").and_then(Value::as_u64))
 }
 
+fn model_max_output_tokens(entry: &Value) -> Option<u64> {
+    entry.pointer("/top_provider/max_completion_tokens").and_then(Value::as_u64)
+        .or_else(|| entry.get("max_completion_tokens").and_then(Value::as_u64))
+        .or_else(|| entry.get("max_output_tokens").and_then(Value::as_u64))
+        .or_else(|| entry.get("max_tokens").and_then(Value::as_u64))
+}
+
 pub fn parse_model_catalog(provider: &str, root: &Value, runtime: &AgentRuntimeConfig) -> Vec<ProviderModelInfo> {
     let spec = match provider_spec(provider) { Some(s) => s, None => return Vec::new() };
     let mut result = Vec::new();
@@ -764,6 +776,7 @@ pub fn parse_model_catalog(provider: &str, root: &Value, runtime: &AgentRuntimeC
             protocol_source: protocol_source(provider, &id, protocol, runtime),
             protocol,
             context_length: model_context_length(entry),
+            max_output_tokens: model_max_output_tokens(entry),
             health,
         });
     }
@@ -795,7 +808,7 @@ fn webllm_models(runtime: &AgentRuntimeConfig) -> Vec<ProviderModelInfo> {
             is_free: None, free_price_source: None,
             may_train_on_your_prompts: None,
             protocol: Some(ProviderProtocol::WebLlmChatCompletions), protocol_source: Some("webllm_runtime".into()),
-            context_length: None, health: None,
+            context_length: None, max_output_tokens: None, health: None,
         }
     }).collect()
 }
@@ -934,6 +947,71 @@ pub fn list_models_json(models: &[ProviderModelInfo]) -> String {
     serde_json::to_string(models).unwrap_or_else(|_| "[]".into())
 }
 
+/// A context/output limit read from the provider's current public model catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelContextInfo {
+    pub context_length: Option<u64>,
+    pub max_output_tokens: Option<u64>,
+    /// Explicit zero-cost flag when the live catalog reports one.
+    pub is_free: Option<bool>,
+}
+
+const MODEL_CONTEXT_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+static MODEL_CONTEXT_CACHE: OnceLock<Mutex<HashMap<String, (Instant, ModelContextInfo)>>> = OnceLock::new();
+
+/// Resolve model-specific limits from the live catalog, with a short in-process
+/// cache. Virtual routers (for example `kilo-auto/free`) expose their own safe
+/// catalog limit; after a completion returns the concrete routed model ID, the
+/// same lookup can resolve that model's individual limit for session follow-ups.
+pub async fn model_context_info(
+    provider: &str,
+    model: &str,
+    api_key: Option<&str>,
+    runtime: &AgentRuntimeConfig,
+    workspace_path: &str,
+) -> Result<Option<ModelContextInfo>, NativeAgentError> {
+    let base = resolved_base_url(provider, runtime, workspace_path)
+        .ok_or_else(|| NativeAgentError::Agent { msg: format!("No HTTP endpoint is configured for {provider}") })?;
+    let cache_key = format!("{provider}|{base}|{}", model.trim());
+    let cache = MODEL_CONTEXT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(entries) = cache.lock() {
+        if let Some((checked_at, info)) = entries.get(&cache_key) {
+            if checked_at.elapsed() < MODEL_CONTEXT_CACHE_TTL {
+                return Ok(Some(*info));
+            }
+        }
+    }
+
+    let models = list_models(provider, api_key, runtime, workspace_path).await?;
+    let checked_at = Instant::now();
+    let mut resolved = None;
+    if let Ok(mut entries) = cache.lock() {
+        // One catalog response contains limits for both the virtual router and
+        // any concrete model it may resolve to. Cache every model from the same
+        // provider/base URL, so the post-response lookup needs no second GET.
+        for entry in &models {
+            let info = ModelContextInfo {
+                context_length: entry.context_length.filter(|value| *value > 0),
+                max_output_tokens: entry.max_output_tokens.filter(|value| *value > 0),
+                is_free: entry.is_free,
+            };
+            if info.context_length.is_some() || info.max_output_tokens.is_some() || info.is_free.is_some() {
+                entries.insert(format!("{provider}|{base}|{}", entry.id.trim()), (checked_at, info));
+            }
+            if entry.id == model.trim() { resolved = Some(info); }
+        }
+    } else {
+        resolved = models.iter().find(|entry| entry.id == model.trim()).map(|entry| ModelContextInfo {
+            context_length: entry.context_length.filter(|value| *value > 0),
+            max_output_tokens: entry.max_output_tokens.filter(|value| *value > 0),
+            is_free: entry.is_free,
+        });
+    }
+    // Exact IDs can be present but have no catalog metadata at all. Preserve
+    // None so free routes fail closed rather than receiving an inferred value.
+    if resolved.is_some() { Ok(resolved) } else { Ok(None) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1017,7 +1095,7 @@ mod tests {
     fn live_catalogs_preserve_model_auth_stream_tool_and_privacy_metadata() {
         let runtime = AgentRuntimeConfig::default();
         let llm7 = serde_json::json!([
-            {"id":"llm7-pro","model_type":"chat","schema_endpoints":["openai"],"tier":"pro","stream":false,"tools_calling":false,"context_window":{"tokens":100000}},
+            {"id":"llm7-pro","model_type":"chat","schema_endpoints":["openai"],"tier":"pro","stream":false,"tools_calling":false,"context_window":{"tokens":100000},"max_completion_tokens":16000},
             {"id":"llm7-turbo","model_type":"chat","schema_endpoints":["anthropic","openai"],"tier":"turbo","stream":true,"tools_calling":true},
             {"id":"llm7-anthropic-only","model_type":"chat","schema_endpoints":["anthropic"],"tier":"turbo","stream":true,"tools_calling":true},
             {"id":"llm7-audio","model_type":"audio_to_text","schema_endpoints":["openai"],"tier":"pro","stream":false}
@@ -1029,6 +1107,7 @@ mod tests {
         assert_eq!(pro.streaming_supported, Some(false));
         assert_eq!(pro.tool_calling, Some(false));
         assert_eq!(pro.context_length, Some(100_000));
+        assert_eq!(pro.max_output_tokens, Some(16_000));
         assert!(!models.iter().any(|model| model.id == "llm7-anthropic-only"));
         let turbo = models.iter().find(|model| model.id == "llm7-turbo").unwrap();
         assert_eq!(turbo.auth_required, Some(false));
@@ -1038,11 +1117,13 @@ mod tests {
 
         let kilo = serde_json::json!([
             {"id":"kilo-auto/efficient","name":"Auto Efficient","isFree":false,"architecture":{"output_modalities":["text"]},"supported_parameters":["tools"]},
-            {"id":"kilo-auto/free","name":"Auto Free","isFree":true,"mayTrainOnYourPrompts":true,"architecture":{"input_modalities":["text"],"output_modalities":["text"]},"supported_parameters":["tools"]},
+            {"id":"kilo-auto/free","name":"Auto Free","isFree":true,"mayTrainOnYourPrompts":true,"context_length":256000,"top_provider":{"context_length":256000,"max_completion_tokens":32768},"architecture":{"input_modalities":["text"],"output_modalities":["text"]},"supported_parameters":["tools"]},
+            {"id":"nvidia/nemotron-3-ultra-550b-a55b:free","name":"NVIDIA Nemotron 3 Ultra (free)","isFree":true,"context_length":1000000,"top_provider":{"context_length":1000000,"max_completion_tokens":65536},"architecture":{"input_modalities":["text"],"output_modalities":["text"]},"supported_parameters":["tools"]},
+            {"id":"inclusionai/ling-3.1-flash","name":"Ling 3.1 Flash","isFree":true,"context_length":262144,"top_provider":{"context_length":262144,"max_completion_tokens":32768},"architecture":{"input_modalities":["text"],"output_modalities":["text"]},"supported_parameters":["tools"]},
             {"id":"kilo-audio","name":"Audio transcription","isFree":false,"architecture":{"modality":"audio->text","input_modalities":["audio"],"output_modalities":["text"]},"supported_parameters":["tools"]}
         ]);
         let models = parse_model_catalog("kilo", &kilo, &runtime);
-        assert_eq!(models.len(), 2);
+        assert_eq!(models.len(), 4);
         let efficient = models.iter().find(|model| model.id == "kilo-auto/efficient").unwrap();
         assert_eq!(efficient.auth_required, Some(true));
         assert_eq!(efficient.tool_calling, Some(true));
@@ -1052,6 +1133,18 @@ mod tests {
         assert_eq!(free.is_free, Some(true));
         assert_eq!(free.free_price_source.as_deref(), Some("provider_catalog"));
         assert_eq!(free.may_train_on_your_prompts, Some(true));
+        assert_eq!(free.context_length, Some(256_000));
+        assert_eq!(free.max_output_tokens, Some(32_768));
+        assert_eq!(free.is_free, Some(true));
+        let resolved = models.iter().find(|model| model.id == "nvidia/nemotron-3-ultra-550b-a55b:free").unwrap();
+        assert_eq!(resolved.context_length, Some(1_000_000));
+        assert_eq!(resolved.max_output_tokens, Some(65_536));
+        assert_eq!(resolved.is_free, Some(true));
+        // Some Kilo free routes have no `:free` suffix; the live catalog's
+        // explicit isFree flag is the evidence used to confirm those IDs.
+        let no_suffix_free = models.iter().find(|model| model.id == "inclusionai/ling-3.1-flash").unwrap();
+        assert_eq!(no_suffix_free.context_length, Some(262_144));
+        assert_eq!(no_suffix_free.is_free, Some(true));
 
         let gemini = serde_json::json!([
             {"name":"models/gemini-3.8-flash","supportedGenerationMethods":["generateContent"]}

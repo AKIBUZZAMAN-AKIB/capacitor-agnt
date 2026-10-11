@@ -2,13 +2,13 @@
    Agent Workspace — owner-facing AI control centre
    ----------------------------------------------------------------------------
    Layout contract
-     · desktop : fixed 252px sidebar (nav + recent chats) + fluid main column
+     · desktop : compact 224px sidebar (nav + recent chats) + fluid main column
      · ≤900px  : nav becomes a horizontally scrollable segmented strip and the
                  main column owns scrolling (see agent-workspace-icons.css for
                  the mobile viewport/keyboard shell rules)
-     · chat    : four row bands — toolbar · approval · live reasoning ·
-                 transcript (1fr) · composer · audit log
-   Every control is ≥40px tall on touch, focus rings are always visible and
+     · chat    : toolbar · notice/reasoning · scrollable transcript · composer
+     · Work Log: a separate tab, so the conversation stays focused
+   Controls are compact while focus rings remain visible and
    colour never carries meaning on its own (dot + label everywhere).
    ========================================================================= */
 
@@ -36,7 +36,7 @@
 .agent-workspace:focus-within{outline:none}
 
 /* ── Shell ─────────────────────────────────────────────────────────────── */
-.aw-shell{display:grid;grid-template-columns:252px minmax(0,1fr);min-height:720px}
+.aw-shell{display:grid;grid-template-columns:224px minmax(0,1fr);min-height:720px}
 
 .aw-sidebar{
   display:flex;flex-direction:column;gap:4px;
@@ -55,7 +55,7 @@
 .aw-nav{display:grid;gap:3px}
 .aw-nav button{
   display:flex;align-items:center;gap:11px;
-  width:100%;min-height:42px;padding:10px 11px;
+  width:100%;min-height:38px;padding:8px 10px;
   border:1px solid transparent;border-radius:12px;
   background:transparent;background-image:none;box-shadow:none;
   justify-content:flex-start;
@@ -138,7 +138,7 @@
 .aw-status[data-tone="err"] .aw-status-dot{background:var(--aw-danger)}
 @keyframes aw-pulse{50%{opacity:.35;transform:scale(.7)}}
 .aw-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
-.aw-actions button{min-height:38px;padding:8px 12px;font-size:.78rem;border-radius:11px}
+.aw-actions button{min-height:34px;padding:6px 9px;font-size:.73rem;border-radius:9px}
 
 /* Empty transcript: a calm, useful launch pad instead of a blank box. */
 .aw-chat-feed{
@@ -163,7 +163,7 @@
 .aw-empty-chat .aw-empty-sub{margin-top:7px;font-size:.85rem;color:#8ea6bb}
 .aw-suggestions{display:flex;justify-content:center;flex-wrap:wrap;gap:9px;margin-top:20px}
 .aw-suggestions button{
-  min-height:40px;padding:10px 15px;
+  min-height:36px;padding:8px 12px;
   border:1px solid rgba(43,86,119,.95);border-radius:999px;
   background:rgba(13,36,58,.9);background-image:none;box-shadow:none;
   color:#bddcef;font-size:.79rem;font-weight:680;
@@ -234,7 +234,7 @@
 .aw-composer-note{display:inline-flex;align-items:center;gap:7px;color:#7893aa;font-size:.7rem;line-height:1.4}
 .aw-composer-note .aw-icon{color:#67e8f9}
 .aw-send-row{display:flex;align-items:center;gap:8px;flex:0 0 auto}
-.aw-send{min-height:42px;padding:10px 17px;font-weight:780}
+.aw-send{min-height:36px;padding:8px 12px;font-weight:780}
 
 /* Approval queue */
 .aw-approval-queue{margin-bottom:12px}
@@ -319,7 +319,7 @@
 .aw-list-copy strong{font-size:.82rem;color:#dcecf7;font-weight:720}
 .aw-list-copy span{margin-top:4px;color:#89a3b8;font-size:.7rem}
 .aw-list-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
-.aw-list-actions button{min-height:34px;padding:7px 10px;font-size:.71rem}
+.aw-list-actions button{min-height:32px;padding:5px 8px;font-size:.69rem}
 .aw-inbox{max-height:320px;overflow:auto}
 .aw-inbox .aw-list-item{align-items:flex-start}
 .aw-inbox .aw-list-copy span{white-space:normal;line-height:1.5}
@@ -464,13 +464,13 @@
 }
 @media(max-width:560px){
   .aw-main{padding:11px}
-  .aw-nav button{min-width:70px;padding:8px}
+  .aw-nav button{min-width:66px;min-height:36px;padding:7px}
   .aw-chat-layout{min-height:520px}
   .aw-chat-toolbar{align-items:flex-start;flex-direction:column;gap:9px}
   .aw-toolbar-actions{width:100%;justify-content:space-between}
   .aw-status{max-width:150px}
   .aw-actions{margin-left:auto}
-  .aw-actions button{min-height:36px;padding:8px 10px}
+  .aw-actions button{min-height:32px;padding:6px 8px;font-size:.7rem}
   .aw-model-badge{width:100%}
   .aw-model-badge strong{max-width:none;flex:1 1 auto}
   .aw-composer textarea{min-height:78px;padding:13px}
@@ -506,4 +506,30 @@
   .aw-route-row strong{font-size:.7rem}
   .aw-router-list{max-height:380px}
   .aw-toast{position:static}
+}
+
+/* ── Compact, responsive polish ──────────────────────────────────────── */
+.aw-event-log{max-height:min(68dvh,700px)}
+.aw-history-details{margin:8px 0 0;border:1px solid rgba(45,78,105,.82);border-radius:11px;background:rgba(5,18,31,.86);overflow:hidden}
+.aw-history-details summary{padding:8px 10px;cursor:pointer;color:#a9dced;font-size:.72rem;font-weight:720;list-style:none;overflow-wrap:anywhere}
+.aw-history-details summary::-webkit-details-marker{display:none}
+.aw-history-details summary::before{content:"+";display:inline-grid;place-items:center;width:16px;height:16px;margin-right:7px;border:1px solid #35617c;border-radius:5px;color:#73d7ed;font-size:.78rem;line-height:1}
+.aw-history-details[open] summary::before{content:"−"}
+.aw-history-details pre{max-height:280px;margin:0;padding:9px 11px;overflow:auto;border-top:1px solid rgba(45,78,105,.7);color:#b8ccdb;font:normal .7rem/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere;-webkit-overflow-scrolling:touch;touch-action:pan-y}
+.aw-history-thinking{border-color:rgba(42,108,128,.85);background:rgba(6,29,40,.9)}
+.aw-history-thinking summary{color:#8fe4f4}
+.aw-history-tool-result.is-error{border-color:rgba(151,64,82,.85)}
+.aw-message-meta{margin:8px 3px 0;color:#78a3bb;font-size:.66rem;line-height:1.5;overflow-wrap:anywhere}
+.aw-message.tool-message .aw-avatar{background:rgba(40,70,34,.88);border-color:#4b753e;color:#c0f4a4}
+#aw-tab-worklog .aw-event-log-panel{margin-top:0}
+#aw-tab-worklog>.aw-panel-title{margin-bottom:12px}
+.agent-workspace .aw-composer-bottom{justify-content:flex-end;padding:8px 10px}
+.agent-workspace .aw-send-row{gap:6px}
+.agent-workspace form>button[type="submit"],.agent-workspace .aw-inline>button{min-height:34px;padding:7px 10px;font-size:.74rem}
+.agent-workspace .aw-composer .aw-send{min-height:34px;padding:7px 11px}
+@media(max-width:560px){
+  #aw-tab-worklog .aw-event-log{max-height:68dvh}
+  .aw-history-details pre{max-height:220px}
+  .agent-workspace form>button[type="submit"],.agent-workspace .aw-inline>button{min-height:32px;padding:6px 9px}
+  .agent-workspace .aw-composer .aw-send{min-height:34px}
 }

@@ -295,6 +295,9 @@ pub struct DisplayToolResult {
 pub struct DisplayMessage {
     pub role: String,
     pub text: String,
+    /// Provider-supplied working/reasoning text, separate from the final answer.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub thinking: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<DisplayToolCall>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -334,9 +337,10 @@ impl DisplayMessage {
                     result.push(DisplayMessage {
                         role: role.to_string(),
                         text: t.clone(),
+                        thinking: String::new(),
                         tool_calls: Vec::new(),
                         tool_results: Vec::new(),
-                        model: if msg.role == Role::Assistant { model.map(|s| s.to_string()) } else { None },
+                        model: if Some(i) == last_assistant_index { model.map(|s| s.to_string()) } else { None },
                         usage: if Some(i) == last_assistant_index { usage.cloned() } else { None },
                         timestamp: now,
                         sequence: i as u32,
@@ -352,10 +356,20 @@ impl DisplayMessage {
                         .collect::<Vec<_>>()
                         .join("");
 
+                    let thinking: String = blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::Thinking { thinking } => Some(thinking.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
                     let tool_calls: Vec<DisplayToolCall> = blocks
                         .iter()
                         .filter_map(|b| match b {
-                            ContentBlock::ToolUse { id, name, input, .. } => Some(DisplayToolCall {
+                            ContentBlock::ToolUse { id, name, input, .. }
+                            | ContentBlock::ServerToolUse { id, name, input } => Some(DisplayToolCall {
                                 id: id.clone(),
                                 name: name.clone(),
                                 input: input.clone(),
@@ -376,6 +390,11 @@ impl DisplayMessage {
                                 output: content.clone(),
                                 is_error: *is_error,
                             }),
+                            ContentBlock::WebSearchToolResult { tool_use_id, content } => Some(DisplayToolResult {
+                                tool_call_id: tool_use_id.clone(),
+                                output: content.to_string(),
+                                is_error: false,
+                            }),
                             _ => None,
                         })
                         .collect();
@@ -383,9 +402,10 @@ impl DisplayMessage {
                     result.push(DisplayMessage {
                         role: role.to_string(),
                         text,
+                        thinking,
                         tool_calls,
                         tool_results,
-                        model: if msg.role == Role::Assistant { model.map(|s| s.to_string()) } else { None },
+                        model: if Some(i) == last_assistant_index { model.map(|s| s.to_string()) } else { None },
                         usage: if Some(i) == last_assistant_index { usage.cloned() } else { None },
                         timestamp: now,
                         sequence: i as u32,
@@ -513,6 +533,27 @@ mod round_trip_tests {
         };
         assert_eq!(ids, vec!["toolu_a".to_string()]);
         assert_eq!(restored.text(), "I will read it");
+    }
+
+    #[test]
+    fn display_history_keeps_reasoning_and_tool_activity_separate_from_answer_text() {
+        let call = Message::assistant_blocks(vec![
+            ContentBlock::Thinking { thinking: "working text".into() },
+            ContentBlock::Text { text: "final answer".into() },
+            ContentBlock::ToolUse {
+                id: "call-1".into(), name: "read_file".into(),
+                input: serde_json::json!({"path":"notes.txt"}), provider_metadata: None,
+            },
+        ]);
+        let result = Message::tool_result("call-1", "file output", false);
+        let display = DisplayMessage::from_messages(&[call, result], Some("model:free"), None, 1);
+        assert_eq!(display.len(), 2);
+        assert_eq!(display[0].text, "final answer");
+        assert_eq!(display[0].thinking, "working text");
+        assert_eq!(display[0].tool_calls.len(), 1);
+        assert_eq!(display[0].tool_calls[0].name, "read_file");
+        assert_eq!(display[1].tool_results.len(), 1);
+        assert_eq!(display[1].tool_results[0].output, "file output");
     }
 
     #[test]

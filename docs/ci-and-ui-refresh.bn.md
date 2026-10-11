@@ -90,10 +90,11 @@ Checkout → Node → Xcode 26 → npm ci → npm run check → ci:ios → SPM r
 - `#aw-icon-history`-এর `use` → `#aw-icon-history` ইনলাইন SVG স্প্রাইট, হোভার-ফোকাস ট্রানজিশন; ফোনে back-বাটনের লেবেল লুকিয়ে শুধু আইকন।
 
 ### ৩.৩ ওয়ার্কস্পেস (`www/agent-workspace.css`, `www/agent-workspace-icons.css`)
-- সাইডবার ২৫২px, সক্রিয় ট্যাবে সায়ান inset-bar; ≤৯০০px-এ ন্যাভ **হরাইজন্টাল সেগমেন্ট স্ট্রিপ** (স্ক্রল-স্ন্যাপ, `width:auto` ফিক্স — আগে ডেস্কটপের `width:100%` মোবাইলে প্রতিটি বাটনকে পুরো চওড়া করে বাকিগুলোকে স্ক্রিনের বাইরে ঠেলে দিচ্ছিল)। যাচাই: ৩২০px-এ ৫/৮ ট্যাব দৃশ্যমান, ৮৩৪px-এ ৮/৮ দেখাচ্ছে।
-- চ্যাটে ৪-ব্যান্ড গ্রিড: `toolbar · notice band (approval + live reasoning) · transcript(1fr) · composer`, আর audit log আলাদা নিচের ব্যান্ড — মোবাইলে কীবোর্ড খুললে ট্রান্সক্রিপ্টই একটাই স্ক্রলার।
-- খালি চ্যাট আর ফাঁকা বক্স নয়: spark ব্যাজ, "আজ কী করব, বলুন" লিড, ৩টি প্রস্তাবিত প্রম্পট, আর ৩টি ফিচার কার্ড (দ্রুত উত্তর / অনুমতি-নিয়ন্ত্রিত / ব্যাকগ্রাউন্ড কাজ)।
-- কার্ড, ফর্ম, router-row, tool-grid, audit-log টেবিল, toast, history drawer — সব নতুন ভিজ্যুয়াল ভাষায়; টাচ টার্গেট ≥৪০px।
+- ডেস্কটপ সাইডবার 224px; সক্রিয় ট্যাবে সায়ান inset-bar। ≤৯০০px-এ ছোট icon-সহ **হরাইজন্টাল স্ক্রল-স্ন্যাপ ন্যাভ** — `width:auto` রাখায় ট্যাবগুলো পুরো স্ক্রিন দখল করে অন্য ট্যাব ঠেলে দেয় না।
+- চ্যাটে transcript হলো প্রধান উল্লম্ব scroller; কাজের লগ ও event details সীমাবদ্ধ নিজস্ব pane-এ scroll করে, আর composer/header viewport-এর মধ্যে থাকে। ছোট ফোনে ফাঁকা feature-card, অতিরিক্ত paragraph ও বড় icon কমানো; suggestion ও জরুরি controls দৃশ্যমান থাকে।
+- Card, form, file editor, router-row ও tool-list-এর spacing compact এবং লম্বা text নিজস্ব pane-এ scroll করে; interactive touch target ≥৪০px রাখা হয়েছে।
+- `নিরাপদ event details` খোলার আগে body/credential redact হয়। পুরোনো localStorage log restore-এ data আবার sanitize হয় এবং summary নিরাপদ structured field থেকে নতুন করে তৈরি হয় — আগের raw summary ফেরত দেখায় না।
+- Runtime Settings-এ context budget-কে স্পষ্টভাবে **অক্ষর** বলা হয়েছে; এটি model-এর token limit নয়, system/tool/output reserve-এর পর history budget—এটিও help text-এ ব্যাখ্যা করা হয়েছে।
 
 ### ৩.৪ হোম পেজ (`www/index.html`, `www/styles.css`)
 - হিরোতে quick-nav চিপ রো (AI Workspace · Widgets · App Browser · Appearance · Native API · Live log), ব্যাজে লাইভ ডট।
@@ -150,3 +151,19 @@ Checkout → Node → Xcode 26 → npm ci → npm run check → ci:ios → SPM r
 1. অ্যাপল সিক্রেট যোগ করলে ট্যাগ push-এ সাইনড IPA স্বয়ংক্রিয়ভাবে উঠবে।
 2. `require_ipa=true` দিয়ে dispatch করলে রিলিজের আগে সাইনিং বাধ্যতামূলক করা যায়।
 3. `docs/screenshots/`-এর ছবিগুলো README-তে যুক্ত করা যায় (দ্রুত ভিজ্যুয়াল প্রিভিউ)।
+
+## ৭. ২০২৬-১০-১১ checkout audit
+
+`main`-এর clone করা head ছিল `7bdd8b4`। GitHub Actions API-তে দেখা সবচেয়ে সাম্প্রতিক remote run-গুলো:
+
+| রান | Workflow | ফল |
+| --- | --- | --- |
+| [38090755454](https://github.com/AKIBUZZAMAN-AKIB/capacitor-agnt/actions/runs/38090755454) | iOS validation and IPA · #85 | **success** |
+| [38090755446](https://github.com/AKIBUZZAMAN-AKIB/capacitor-agnt/actions/runs/38090755446) | Android APK and AAB · #83 | **success** |
+| [38090755411](https://github.com/AKIBUZZAMAN-AKIB/capacitor-agnt/actions/runs/38090755411) | Verify · #36 | **success** |
+
+সাম্প্রতিক পুরোনো iOS ব্যর্থতা [38087426890](https://github.com/AKIBUZZAMAN-AKIB/capacitor-agnt/actions/runs/38087426890)-তে `Require complete IPA secrets` ধাপে signing secret না থাকায় হয়েছিল। পরের tagged run-এ capability-gated signing pass হয়েছে; বর্তমান remote head-এ নতুন লাল run নেই। এই local পরিবর্তনের পরে Actions পুনরায় চালানো এখনও প্রয়োজন।
+
+এই audit-এ lockfile-এর ৮টি npm advisory ধরা পড়ে। Capacitor Android/iOS/Core/CLI এবং root/local-plugin SwiftPM exact pin `8.5.3`, Vitest `4.1.11` ও নিরাপদ transitive lock update-এর পর clean `npm ci` **0 vulnerability** জানিয়েছে; Verify workflow-তে `npm audit --audit-level=moderate` যোগ করা হয়েছে। Node `22.23.3`-এ `npm run check`: schema, TypeScript, native staging pass; **16 test file / 245 test pass**.
+
+UI-র compact mobile spacing, scroll bounds ও event-log restore redaction-সহ local patch-টি remote-এ push করার পরই নতুন Actions ফল পাওয়া যাবে।

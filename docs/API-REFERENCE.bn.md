@@ -2,7 +2,7 @@
 
 > **সর্বশেষ source-audit:** 25 আগস্ট 2026 (সম্পূর্ণ নথি কোডের সঙ্গে re-verify) · সংশোধন: 24 আগস্ট 2026 (`NativeKit.nearby` যোগ)  
 > **Runtime:** trusted bridge `1.0.0`, installed-package façade `app-browser-1.1.0`  
-> **Pinned stack:** Capacitor `8.5.0` এবং `package.json`-এ থাকা plugin version-সমূহ
+> **Pinned stack (security maintenance 11 October 2026):** Capacitor Core/Android/iOS/CLI `8.5.3` এবং `package.json`-এ থাকা plugin version-সমূহ
 
 এই নথিটি trusted main app, installed HTML/CSS/JavaScript/Web Component এবং remote URL—তিনটি trust tier-এর ব্যবহার, method, argument, result, event, permission, error, quota ও platform caveat এক জায়গায় দেয়। সাধারণ ওয়েব ডেভেলপমেন্টের জন্য repository-র implementation source পড়া প্রয়োজন নেই।
 

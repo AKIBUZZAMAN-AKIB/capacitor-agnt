@@ -135,30 +135,34 @@ function redactLogText(value, max = 220) {
   return safeText(String(value ?? '')
     .replace(/(bearer\s+)[^\s,;]+/ig, '$1[redacted]')
     .replace(/((?:api[_ -]?key|token|secret|password)\s*[:=]\s*)[^\s,;]+/ig, '$1[redacted]')
-    // Provider key shapes (sk-or-…, gsk_…, hf_…) even when no label precedes them.
-    .replace(/\b(?:sk|pk|rk|gsk|xai|or|hf)[-_][A-Za-z0-9_-]{12,}/g, '[redacted]'), max);
+    .replace(/([?&](?:api[_-]?key|key|token|secret|password)=)[^&#\s]+/ig, '$1[redacted]')
+    // Common provider/VCS/cloud credentials even when no descriptive label precedes them.
+    .replace(/\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[opurs]_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{12,}|AIza[A-Za-z0-9_-]{25,}|ya29\.[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|(?:sk|pk|rk|gsk|xai|or|hf)[-_][A-Za-z0-9_-]{12,})/g, '[redacted]'), max);
 }
 
-// Credentials are always withheld by key name. Conversation/file bodies are
-// withheld by size only. Everything else (error, reason, message, output,
-// result, summary …) is kept, with secret VALUES masked by redactLogText. The
-// old blanket key rule hid the very error phrase the log exists to show, and
-// it also hid `sessionKey` (it contains "key"), which broke stream grouping.
+// Credentials are withheld by key name; prompts, tool args/results and other
+// content-bearing event fields are withheld by size only. Error text and safe
+// route counters remain useful, but any secret value inside them is masked.
+// `sessionKey` is intentionally safe (and must not match this rule).
 const LOG_SECRET_KEY = /(?:api[_-]?key|secret|password|authorization|cookie|^token$|[_-]token$)/i;
-const LOG_BODY_KEY = /^(?:prompt|systemPrompt|system|content|body|fileContent|file_content|instructions?|request|command|description)$/i;
+const LOG_BODY_KEY = /^(?:prompt|systemPrompt|system|content|body|fileContent|file_content|instructions?|request|requestJson|response|responseJson|payload|command|args?|arguments?|toolArgs|input|output|outputText|result|resultJson|stdout|stderr|diff|patch|text|thinking|reasoning|summary|description|query|searchQuery|messagesJson|displayMessagesJson)$/i;
 
 function safeLogValue(value, key = '', depth = 0) {
   if (value == null || typeof value === 'boolean' || typeof value === 'number') return value;
   if (LOG_SECRET_KEY.test(key)) return '[redacted]';
   if (LOG_BODY_KEY.test(key)) {
-    if (typeof value === 'string') return `[redacted · ${bytes(value)} bytes]`;
+    if (typeof value === 'string') {
+      // Keep an already-redacted size marker stable when a saved log is rechecked.
+      if (/^\[redacted · \d+ bytes\]$/.test(value)) return value;
+      return `[redacted · ${bytes(value)} bytes]`;
+    }
     return '[redacted]';
   }
   if (typeof value === 'string') return redactLogText(value, 260);
   if (depth >= 3) return Array.isArray(value) ? `[${value.length} items]` : '[object]';
   if (Array.isArray(value)) return value.slice(0, 20).map((entry) => safeLogValue(entry, '', depth + 1));
   if (typeof value === 'object') {
-    const safe = {};
+    const safe = Object.create(null);
     for (const [name, child] of Object.entries(value).slice(0, 30)) safe[name] = safeLogValue(child, name, depth + 1);
     return safe;
   }
@@ -167,13 +171,20 @@ function safeLogValue(value, key = '', depth = 0) {
 
 function eventTone(type, payload = {}) {
   if (/(?:error|failed|timeout|denied)/i.test(type) || payload?.result?.isError || payload?.isError) return 'err';
-  if (/(?:fallback|retry|trimmed|compacted|approval|warning|skipped)/i.test(type)) return 'warn';
+  if (/(?:fallback|retry|trimmed|compacted|approval|warning|skipped|unavailable)/i.test(type)) return 'warn';
   return '';
 }
 
 function eventSummary(type, payload = {}) {
+  if (type === 'context.limit_resolved') {
+    const length = Number(payload?.contextLimitTokens);
+    return `verified context · ${Number.isFinite(length) && length > 0 ? `${length.toLocaleString()} tokens` : 'configured cap'} · ${Number(payload?.contextBudgetChars || 0).toLocaleString()} chars`;
+  }
+  if (type === 'context.limit_unavailable') {
+    return `context metadata unavailable · ${payload?.provider ?? 'provider'} / ${payload?.model ?? 'model'}`;
+  }
   const provider = payload?.toProvider ?? payload?.provider ?? payload?.selectedProvider;
-  const model = payload?.toModel ?? payload?.model ?? payload?.selectedModel;
+  const model = payload?.resolvedModel ?? payload?.toModel ?? payload?.model ?? payload?.selectedModel;
   const tool = payload?.toolName ?? payload?.tool_name;
   const error = payload?.error ?? payload?.message ?? payload?.reason;
   const session = payload?.sessionKey ?? payload?.session_key;
@@ -194,12 +205,12 @@ function persistEventLog() {
 function renderEventLog() {
   const root = $('aw-event-log');
   const count = $('aw-event-log-count');
-  if (count) count.textContent = `${state.eventLog.length} events`;
+  if (count) count.textContent = `${state.eventLog.length}টি ইভেন্ট`;
   if (!root) return;
   const followLatest = !root.children.length || root.scrollHeight - root.scrollTop - root.clientHeight < 48;
   root.replaceChildren();
   if (!state.eventLog.length) {
-    const empty = document.createElement('p'); empty.className = 'aw-event-log-empty'; empty.textContent = 'এখনো কোনো event নেই। Chat শুরু হলে এখানে audit trail দেখা যাবে।'; root.append(empty); return;
+    const empty = document.createElement('p'); empty.className = 'aw-event-log-empty'; empty.textContent = 'এখনো কোনো ইভেন্ট নেই। কাজ শুরু হলে এখানে নিরাপদ activity log দেখা যাবে।'; root.append(empty); return;
   }
   // Entries are stored newest-first so persistence is cheap; render chronologically.
   for (const entry of [...state.eventLog].reverse()) {
@@ -219,11 +230,33 @@ function renderEventLog() {
   if (followLatest) root.scrollTop = root.scrollHeight;
 }
 
+function sanitizeStoredEvent(entry, index = 0) {
+  if (!entry || typeof entry !== 'object' || typeof entry.type !== 'string') return null;
+  const at = Number(entry.at);
+  if (!Number.isFinite(at) || !Number.isFinite(new Date(at).getTime())) return null;
+  const type = redactLogText(entry.type || 'unknown.event', 90) || 'unknown.event';
+  const data = entry.data && typeof entry.data === 'object' && !Array.isArray(entry.data)
+    ? safeLogValue(entry.data)
+    : {};
+  // Rebuild the summary from sanitized structured data; never trust a legacy or
+  // hand-edited localStorage summary that could contain prompt/file contents.
+  return {
+    id: `stored-${at}-${index}`,
+    at,
+    type,
+    tone: eventTone(type, data),
+    summary: eventSummary(type, data),
+    data,
+  };
+}
+
 function restoreEventLog() {
   const stored = parseJson(workspaceStorage()?.getItem(EVENT_LOG_STORAGE_KEY), []);
-  state.eventLog = Array.isArray(stored) ? stored
-    .filter((entry) => entry && typeof entry.type === 'string' && Number.isFinite(Number(entry.at)))
-    .slice(0, EVENT_LOG_LIMIT) : [];
+  state.eventLog = Array.isArray(stored)
+    ? stored.map((entry, index) => sanitizeStoredEvent(entry, index)).filter(Boolean).slice(0, EVENT_LOG_LIMIT)
+    : [];
+  // Persist any migration/redaction so unsafe legacy details are removed at rest too.
+  if (Array.isArray(stored) && JSON.stringify(stored) !== JSON.stringify(state.eventLog)) persistEventLog();
   renderEventLog();
 }
 
@@ -474,9 +507,9 @@ function appendActivity(label, tone = '') {
 
 function recordRouteEvent(kind, payload = {}) {
   const provider = payload.provider ?? payload.toProvider ?? payload.selectedProvider ?? 'unknown';
-  const model = payload.model ?? payload.toModel ?? payload.selectedModel ?? '';
+  const model = payload.resolvedModel ?? payload.model ?? payload.toModel ?? payload.selectedModel ?? '';
   const attempt = payload.attempt ? ` · চেষ্টা ${payload.attempt}` : '';
-  const reason = payload.reason ? ` · ${safeText(payload.reason, 110)}` : '';
+  const reason = payload.reason ? ` · ${redactLogText(payload.reason, 110)}` : '';
   const label = `${kind} · ${provider}${model ? ` / ${model}` : ''}${attempt}${reason}`;
   state.routeEvents.unshift({ label, kind, at: Date.now() });
   state.routeEvents = state.routeEvents.slice(0, 8);
@@ -490,8 +523,9 @@ function recordRouteEvent(kind, payload = {}) {
 }
 
 function makeMessage(role, text, when = Date.now(), pending = false) {
-  // A submitted user prompt should reveal the new turn. Incoming deltas obey
-  // the reader's current scroll position instead of fighting their finger.
+  // A submitted user prompt should reveal the new turn and re-enable following;
+  // incoming deltas then obey the reader's position instead of fighting their finger.
+  if (role === 'user') state.chatAutoScroll = true;
   const revealLatest = role === 'user' || state.chatAutoScroll;
   $('aw-empty-chat')?.remove();
   const wrap = document.createElement('article');
@@ -684,7 +718,7 @@ async function wireEvents() {
     if (type === 'provider.selected' || type === 'provider.route') {
       if (payload?.sessionKey && payload.sessionKey !== state.sessionKey) { appendActivity('Background route update'); return; }
       const name = payload?.provider ?? payload?.selectedProvider;
-      const model = payload?.model ?? payload?.selectedModel;
+      const model = payload?.resolvedModel ?? payload?.model ?? payload?.selectedModel;
       if (name) $('aw-model-label').textContent = `${name}${model ? ` / ${model}` : ''}`;
       recordRouteEvent(type === 'provider.selected' ? 'selected' : 'trying', payload ?? {});
       appendActivity(`${type === 'provider.selected' ? 'Route selected' : 'Route চেষ্টা'} · ${name ?? 'unknown'}`);
@@ -695,14 +729,27 @@ async function wireEvents() {
       recordRouteEvent('fallback', payload ?? {});
       appendActivity(`Provider fallback · ${payload?.toProvider ?? payload?.provider ?? 'unknown'}`, 'warn'); return;
     }
+    if (type === 'context.limit_resolved') {
+      if (payload?.sessionKey && payload.sessionKey !== state.sessionKey) return;
+      const length = Number(payload?.contextLimitTokens);
+      appendActivity(`যাচাইকৃত context · ${Number.isFinite(length) && length > 0 ? `${length.toLocaleString()} tokens` : 'configured cap'}`);
+      return;
+    }
+    if (type === 'context.limit_unavailable') {
+      if (!payload?.sessionKey || payload.sessionKey === state.sessionKey) appendActivity('Model context metadata যাচাই হয়নি', 'warn');
+      return;
+    }
     if (type === 'context.compacted' || type === 'context.trimmed') { appendActivity('পুরোনো context সংক্ষেপ করা হয়েছে', 'warn'); return; }
     if (type === 'agent.completed') {
       const isForeground = !payload?.sessionKey || payload.sessionKey === state.sessionKey;
       // A cron/skill can finish while the user is composing. It must never mark
       // that foreground conversation as ready or replace its streaming state.
       if (!isForeground) { appendActivity('Background কাজ শেষ'); void refreshSessions(); return; }
+      const displayMessages = parseJson(payload?.displayMessagesJson, null);
+      if (Array.isArray(displayMessages)) renderChatHistory(displayMessages);
       state.currentAssistant?.removeAttribute('data-pending');
       state.currentAssistant = null;
+      clearThinking();
       persistEventLog();
       state.streamLogEntryId = null;
       // The native side has now stored this exact session in current_session,
@@ -776,11 +823,101 @@ async function abortRun() {
 }
 
 function normalizeMessage(message) {
-  const role = message?.role === 'user' ? 'user' : 'assistant';
-  const content = typeof message?.content === 'string' ? message.content
-    : typeof message?.text === 'string' ? message.text
-      : Array.isArray(message?.content) ? message.content.map((item) => item?.text ?? '').join('\n') : '';
-  return { role, text: content, at: Number(message?.createdAt ?? message?.timestamp ?? Date.now()) };
+  const rawRole = String(message?.role ?? '').toLowerCase();
+  if (rawRole !== 'user' && rawRole !== 'assistant') return null;
+  const blocks = Array.isArray(message?.content) ? message.content : [];
+  const text = typeof message?.text === 'string' ? message.text
+    : typeof message?.content === 'string' ? message.content
+      : blocks.filter((item) => item?.type === 'text' || item?.type === 'Text')
+        .map((item) => item?.text ?? '').join('');
+  const thinking = String(message?.thinking ?? blocks
+    .filter((item) => item?.type === 'thinking' || item?.type === 'Thinking')
+    .map((item) => item?.thinking ?? '').filter(Boolean).join('\n'));
+  return {
+    role: rawRole,
+    text,
+    thinking,
+    toolCalls: Array.isArray(message?.tool_calls) ? message.tool_calls : Array.isArray(message?.toolCalls) ? message.toolCalls : [],
+    toolResults: Array.isArray(message?.tool_results) ? message.tool_results : Array.isArray(message?.toolResults) ? message.toolResults : [],
+    model: typeof message?.model === 'string' ? message.model : '',
+    usage: message?.usage && typeof message.usage === 'object' ? message.usage : null,
+    at: (() => { const value = Number(message?.createdAt ?? message?.timestamp ?? Date.now()); return Number.isFinite(value) && Number.isFinite(new Date(value).getTime()) ? value : Date.now(); })(),
+  };
+}
+
+function appendHistoryDetails(parent, className, label, value, open = false) {
+  const details = document.createElement('details');
+  details.className = `aw-history-details ${className}`;
+  details.open = open;
+  const summary = document.createElement('summary'); summary.textContent = label;
+  const pre = document.createElement('pre');
+  pre.textContent = typeof value === 'string' ? value : JSON.stringify(value ?? {}, null, 2);
+  details.append(summary, pre); parent.append(details);
+}
+
+function makeHistoryMessage(message) {
+  const item = normalizeMessage(message);
+  if (!item) return null;
+  const hasTools = item.toolCalls.length > 0 || item.toolResults.length > 0;
+  if (!item.text && !item.thinking && !hasTools) return null;
+
+  const wrap = document.createElement('article');
+  wrap.className = `aw-message ${item.role === 'user' ? 'user' : 'assistant'}${item.role === 'user' && !item.text && item.toolResults.length ? ' tool-message' : ''}`;
+  wrap.dataset.role = item.role;
+  const avatar = document.createElement('div'); avatar.className = 'aw-avatar';
+  if (item.role === 'user' && item.text) avatar.textContent = 'আপনি';
+  else if (item.role === 'user' && item.toolResults.length) avatar.append(icon('bolt'));
+  else avatar.append(icon(item.role === 'assistant' ? 'spark' : 'chat'));
+  const body = document.createElement('div'); body.className = 'aw-message-body';
+
+  if (item.text) {
+    const bubble = document.createElement('div'); bubble.className = 'aw-bubble'; bubble.textContent = item.text; body.append(bubble);
+  }
+  if (item.thinking) {
+    appendHistoryDetails(body, 'aw-history-thinking', 'Thinking · provider-এর working text', item.thinking, true);
+  }
+  for (const call of item.toolCalls) {
+    const name = safeText(call?.name ?? 'tool', 100);
+    const id = call?.id ? ` · ${safeText(call.id, 80)}` : '';
+    appendHistoryDetails(body, 'aw-history-tool-call', `Tool call · ${name}${id}`, call?.input ?? {});
+  }
+  for (const result of item.toolResults) {
+    const id = result?.tool_call_id ?? result?.toolCallId ?? '';
+    const label = `${result?.is_error || result?.isError ? 'Tool result · error' : 'Tool result'}${id ? ` · ${safeText(id, 80)}` : ''}`;
+    appendHistoryDetails(body, `aw-history-tool-result${result?.is_error || result?.isError ? ' is-error' : ''}`, label, result?.output ?? '');
+  }
+  if (item.model || item.usage) {
+    const meta = document.createElement('div'); meta.className = 'aw-message-meta';
+    const pieces = [];
+    if (item.model) pieces.push(item.model);
+    if (item.usage) {
+      const input = item.usage.input_tokens ?? item.usage.inputTokens;
+      const output = item.usage.output_tokens ?? item.usage.outputTokens;
+      if (Number.isFinite(Number(input)) || Number.isFinite(Number(output))) pieces.push(`tokens ${Number(input || 0)} in · ${Number(output || 0)} out`);
+    }
+    meta.textContent = pieces.join(' · '); body.append(meta);
+  }
+  const stamp = document.createElement('div'); stamp.className = 'aw-message-time'; stamp.textContent = nowTime(item.at);
+  body.append(stamp); wrap.append(avatar, body); return wrap;
+}
+
+function renderChatHistory(messages, { forceBottom = false } = {}) {
+  const feed = $('aw-chat-feed');
+  if (!feed || !Array.isArray(messages)) return;
+  const followLatest = forceBottom || state.chatAutoScroll;
+  feed.replaceChildren(); state.currentAssistant = null; state.activity = [];
+  for (const message of messages) {
+    const node = makeHistoryMessage(message);
+    if (node) feed.append(node);
+  }
+  if (!feed.children.length) {
+    const empty = document.createElement('div'); empty.id = 'aw-empty-chat'; empty.className = 'aw-empty-chat';
+    const copy = document.createElement('div'); const lead = document.createElement('p');
+    lead.className = 'aw-empty-lead'; lead.textContent = 'এই চ্যাটে দেখানোর মতো বার্তা নেই।';
+    copy.append(lead); empty.append(copy); feed.append(empty);
+  }
+  state.chatAutoScroll = followLatest;
+  scrollChatToBottom(followLatest);
 }
 
 function renderSessionList(root, limit) {
@@ -881,14 +1018,12 @@ async function openSession(sessionKey, { refresh = true } = {}) {
   rememberActiveSession(sessionKey);
   recordEventLog('session.opened', { sessionKey, messageCount: messages.length });
   $('aw-session-label').textContent = sessionKey;
-  const feed = $('aw-chat-feed'); feed.replaceChildren(); state.currentAssistant = null; clearThinking();
-  for (const message of messages) {
-    const normalized = normalizeMessage(message);
-    if (normalized.text) makeMessage(normalized.role, normalized.text, normalized.at);
-  }
-  if (!feed.children.length) clearChat();
+  const sessionMeta = state.sessions.find((item) => item.sessionKey === sessionKey);
+  const actualModel = sessionMeta?.model || [...messages].reverse().find((message) => message?.model)?.model;
+  $('aw-model-label').textContent = `${sessionMeta?.provider || 'Provider'}${actualModel ? ` / ${actualModel}` : ''}`;
+  clearThinking();
   state.chatAutoScroll = true;
-  scrollChatToBottom(true);
+  renderChatHistory(messages, { forceBottom: true });
   closeHistory();
   if (refresh) await refreshSessions();
   showTab('chat');
@@ -1432,7 +1567,7 @@ async function saveRouter(event) {
 
 async function refreshSettings() {
   requireInit(); const config = await nativeAgent().getRuntimeConfig(); state.runtimeConfig = config; state.routerDraft = routerDraftFrom(config);
-  $('aw-max-turns').value = config.defaultMaxTurns ?? 25; $('aw-max-tokens').value = config.maxTokens ?? 8192; $('aw-temperature').value = config.temperature ?? 0; $('aw-context-budget').value = config.contextCharBudget ?? 150000;
+  $('aw-max-turns').value = config.defaultMaxTurns ?? 25; $('aw-max-tokens').value = config.maxTokens ?? 8192; $('aw-temperature').value = config.temperature ?? 0; $('aw-context-budget').value = config.contextCharBudget ?? 1000000;
   // Route choice and key management are intentionally separate: leaving the
   // route untouched means every chat uses native Auto Router.
   const selected = clean($('aw-provider').value) || 'auto'; $('aw-provider').value = selected; $('aw-model-label').textContent = selected === 'auto' ? 'Free Router · verified free only' : selected;

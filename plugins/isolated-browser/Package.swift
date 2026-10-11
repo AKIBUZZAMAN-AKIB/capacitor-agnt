@@ -8,7 +8,7 @@ let package = Package(
         .library(name: "NativekitIsolatedBrowser", targets: ["NativeKitIsolatedBrowserPlugin"])
     ],
     dependencies: [
-        .package(url: "https://github.com/ionic-team/capacitor-swift-pm.git", exact: "8.5.0")
+        .package(url: "https://github.com/ionic-team/capacitor-swift-pm.git", exact: "8.5.3")
     ],
     targets: [
         .target(

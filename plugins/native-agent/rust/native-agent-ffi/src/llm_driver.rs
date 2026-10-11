@@ -72,6 +72,8 @@ pub struct CompletionResponse {
     pub stop_reason: StopReason,
     pub tool_calls: Vec<ToolCall>,
     pub usage: TokenUsage,
+    /// Concrete model ID reported by a gateway/router, when available.
+    pub model: Option<String>,
 }
 
 impl CompletionResponse {
@@ -798,8 +800,13 @@ impl OpenAiDriver {
         tool_calls: Vec<ToolCall>,
         finish_reason: Option<&str>,
         usage: TokenUsage,
+        model: Option<String>,
+        reasoning: Option<String>,
     ) -> CompletionResponse {
         let mut content: Vec<ContentBlock> = Vec::new();
+        if let Some(thinking) = reasoning.filter(|text| !text.is_empty()) {
+            content.push(ContentBlock::Thinking { thinking });
+        }
         if !text.is_empty() {
             content.push(ContentBlock::Text { text });
         }
@@ -816,6 +823,7 @@ impl OpenAiDriver {
             content,
             tool_calls,
             usage,
+            model,
         }
     }
 
@@ -882,7 +890,12 @@ pub(crate) fn parse_chat_completion(json: &serde_json::Value) -> Result<Completi
     if matches!(finish, Some("length" | "content_filter")) && !tool_calls.is_empty() {
         return Err(LlmError::Parse(format!("Provider ended with {finish:?} while emitting incomplete tool calls")));
     }
-    Ok(OpenAiDriver::build_response(text, tool_calls, finish, OpenAiDriver::usage_from(&json["usage"])))
+    let model = json.get("model").and_then(serde_json::Value::as_str)
+        .map(str::trim).filter(|value| !value.is_empty() && value.len() <= 512).map(str::to_string);
+    let reasoning = openai_reasoning_text(&choice["message"]);
+    Ok(OpenAiDriver::build_response(
+        text, tool_calls, finish, OpenAiDriver::usage_from(&json["usage"]), model, reasoning,
+    ))
 }
 
 #[derive(Default)]
@@ -1000,7 +1013,7 @@ impl LlmDriver for OpenAiDriver {
             }
         }
 
-        let OpenAiStreamState { text, partial_calls, finish_reason, usage } = state;
+        let OpenAiStreamState { text, reasoning, model, partial_calls, finish_reason, usage } = state;
         let mut tool_calls = Vec::new();
         for (_, partial) in partial_calls {
             if partial.id.is_empty() || partial.name.is_empty() || !partial.has_arguments {
@@ -1022,7 +1035,10 @@ impl LlmDriver for OpenAiDriver {
             return Err(LlmError::Parse(format!("Provider ended with {:?} while emitting incomplete tool calls", finish_reason)));
         }
 
-        let response = Self::build_response(text, tool_calls, finish_reason.as_deref(), usage);
+        let response = Self::build_response(
+            text, tool_calls, finish_reason.as_deref(), usage, model,
+            (!reasoning.is_empty()).then_some(reasoning),
+        );
         on_event(StreamEvent::MessageDone(response.clone()));
         Ok(response)
     }
@@ -1099,6 +1115,8 @@ fn openai_reasoning_text(delta: &serde_json::Value) -> Option<String> {
 #[derive(Default)]
 struct OpenAiStreamState {
     text: String,
+    reasoning: String,
+    model: Option<String>,
     partial_calls: std::collections::BTreeMap<u64, OpenAiCallAccum>,
     finish_reason: Option<String>,
     usage: TokenUsage,
@@ -1132,6 +1150,10 @@ impl OpenAiStreamState {
         if let Some(u) = json.get("usage").filter(|u| !u.is_null()) {
             self.usage = OpenAiDriver::usage_from(u);
         }
+        if self.model.is_none() {
+            self.model = json.get("model").and_then(serde_json::Value::as_str)
+                .map(str::trim).filter(|value| !value.is_empty() && value.len() <= 512).map(str::to_string);
+        }
 
         // With `stream_options.include_usage` the final chunk carries usage and
         // an EMPTY `choices` array; indexing `[0]` on it yields Null.
@@ -1144,6 +1166,7 @@ impl OpenAiStreamState {
         let delta = &choice["delta"];
 
         if let Some(reasoning) = openai_reasoning_text(delta) {
+            self.reasoning.push_str(&reasoning);
             on_event(StreamEvent::ThinkingDelta(reasoning));
         }
 
@@ -1209,6 +1232,7 @@ struct StreamAccumulator {
     stop_reason: StopReason,
     input_tokens: u32,
     output_tokens: u32,
+    model: Option<String>,
 }
 
 impl StreamAccumulator {
@@ -1219,6 +1243,7 @@ impl StreamAccumulator {
             stop_reason: StopReason::EndTurn,
             input_tokens: 0,
             output_tokens: 0,
+            model: None,
         }
     }
 
@@ -1231,6 +1256,8 @@ impl StreamAccumulator {
 
         match event_type {
             "message_start" => {
+                self.model = json.pointer("/message/model").and_then(serde_json::Value::as_str)
+                    .map(str::trim).filter(|value| !value.is_empty() && value.len() <= 512).map(str::to_string);
                 self.input_tokens = json["message"]["usage"]["input_tokens"]
                     .as_u64()
                     .unwrap_or(0) as u32;
@@ -1443,6 +1470,7 @@ impl StreamAccumulator {
                 output_tokens: self.output_tokens,
                 total_tokens: self.input_tokens + self.output_tokens,
             },
+            model: self.model,
         })
     }
 }
@@ -1495,6 +1523,8 @@ struct ApiTool {
 
 #[derive(Deserialize)]
 struct ApiResponse {
+    #[serde(default)]
+    model: Option<String>,
     content: Vec<ApiResponseBlock>,
     stop_reason: Option<String>,
     usage: ApiUsage,
@@ -1684,6 +1714,7 @@ fn parse_api_response(resp: ApiResponse) -> Result<CompletionResponse, LlmError>
             output_tokens: resp.usage.output_tokens,
             total_tokens: resp.usage.input_tokens + resp.usage.output_tokens,
         },
+        model: resp.model.filter(|value| !value.trim().is_empty() && value.len() <= 512),
     })
 }
 
@@ -1948,6 +1979,28 @@ mod openai_wire_tests {
         assert!(compatible.get("max_completion_tokens").is_none());
     }
 
+    #[test]
+    fn chat_completion_keeps_the_resolved_model_and_provider_reasoning() {
+        let response = parse_chat_completion(&serde_json::json!({
+            "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "চূড়ান্ত উত্তর",
+                    "reasoning": "আগে যাচাই করি",
+                    "reasoning_details": [{"type":"reasoning.text","text":"আগে যাচাই করি"}]
+                }
+            }],
+            "usage": {"prompt_tokens": 42, "completion_tokens": 8, "total_tokens": 50}
+        })).unwrap();
+        assert_eq!(response.model.as_deref(), Some("nvidia/nemotron-3-ultra-550b-a55b:free"));
+        assert_eq!(response.text(), "চূড়ান্ত উত্তর");
+        assert!(response.content.iter().any(|block| matches!(
+            block, ContentBlock::Thinking { thinking } if thinking == "আগে যাচাই করি"
+        )));
+    }
+
     #[tokio::test]
     async fn non_streaming_gateway_uses_json_completion_and_emits_one_final_delta() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2190,13 +2243,17 @@ mod openai_sse_audit_tests {
     #[tokio::test]
     async fn reasoning_fields_are_emitted_as_thinking_and_kept_out_of_the_answer() {
         let (result, events) = run(
-            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"প্রথমে ভাবছি\"}}]}\n\n\
-             data: {\"choices\":[{\"delta\":{\"reasoning\":\" তারপর উত্তর\"}}]}\n\n\
-             data: {\"choices\":[{\"delta\":{\"content\":\"উত্তর\"}}]}\n\n\
+            "data: {\"model\":\"nvidia/nemotron-3-ultra-550b-a55b:free\",\"choices\":[{\"delta\":{\"reasoning_content\":\"প্রথমে ভাবছি\"}}]}\n\n\
+             data: {\"model\":\"nvidia/nemotron-3-ultra-550b-a55b:free\",\"choices\":[{\"delta\":{\"reasoning\":\" তারপর উত্তর\"}}]}\n\n\
+             data: {\"model\":\"nvidia/nemotron-3-ultra-550b-a55b:free\",\"choices\":[{\"delta\":{\"content\":\"উত্তর\"}}]}\n\n\
              data: [DONE]\n\n",
         ).await;
         let response = result.expect("stream must succeed");
         assert_eq!(response.text(), "উত্তর", "reasoning must never leak into the final answer");
+        assert_eq!(response.model.as_deref(), Some("nvidia/nemotron-3-ultra-550b-a55b:free"));
+        assert!(response.content.iter().any(|block| matches!(
+            block, ContentBlock::Thinking { thinking } if thinking == "প্রথমে ভাবছি তারপর উত্তর"
+        )), "provider reasoning must survive into the persisted response");
         let thinking: String = events.iter().filter_map(|e| match e {
             StreamEvent::ThinkingDelta(t) => Some(t.as_str()), _ => None,
         }).collect();

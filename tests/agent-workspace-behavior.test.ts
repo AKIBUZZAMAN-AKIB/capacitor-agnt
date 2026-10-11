@@ -28,16 +28,18 @@ function extract(names: string[]): string {
 const helpers = new Function(
   `${extract([
     'bytes', 'safeText', 'redactLogText', 'LOG_SECRET_KEY', 'LOG_BODY_KEY', 'safeLogValue',
+    'eventTone', 'eventSummary', 'sanitizeStoredEvent',
     'AGENT_ERROR_ADVICE', 'AGENT_ERROR_PATTERNS', 'classifyAgentError',
-  ])}\nreturn { safeLogValue, classifyAgentError, AGENT_ERROR_ADVICE, AGENT_ERROR_PATTERNS };`,
+  ])}\nreturn { safeLogValue, sanitizeStoredEvent, classifyAgentError, AGENT_ERROR_ADVICE, AGENT_ERROR_PATTERNS };`,
 )() as {
   safeLogValue: (value: unknown, key?: string, depth?: number) => any;
+  sanitizeStoredEvent: (entry: unknown, index?: number) => any;
   classifyAgentError: (error: unknown, reportedCategory?: string) => { code: string; message: string; detail: string };
   AGENT_ERROR_ADVICE: Record<string, string>;
   AGENT_ERROR_PATTERNS: Array<[string, RegExp]>;
 };
 
-const { safeLogValue, classifyAgentError, AGENT_ERROR_ADVICE, AGENT_ERROR_PATTERNS } = helpers;
+const { safeLogValue, sanitizeStoredEvent, classifyAgentError, AGENT_ERROR_ADVICE, AGENT_ERROR_PATTERNS } = helpers;
 
 describe('agent audit log values', () => {
   it('keeps the real provider error phrase while masking the secret inside it', () => {
@@ -59,16 +61,67 @@ describe('agent audit log values', () => {
     expect(data.inputTokens).toBe(12);
   });
 
-  it('withholds conversation and file bodies by size only', () => {
-    const data = safeLogValue({ prompt: 'আমার ব্যক্তিগত পরিকল্পনা', content: 'file body' });
+  it('withholds prompts, file bodies, tool arguments/results and thinking by size only', () => {
+    const data = safeLogValue({
+      prompt: 'আমার ব্যক্তিগত পরিকল্পনা', content: 'file body',
+      args: { path: 'secret.txt', query: 'private question' },
+      result: 'full tool output', output: 'provider response',
+      thinking: 'private reasoning', messagesJson: '[full transcript]',
+      promptCharacters: 24, sessionKey: 'chat-private',
+    });
     expect(data.prompt).toMatch(/^\[redacted · \d+ bytes\]$/);
     expect(data.content).toMatch(/^\[redacted · \d+ bytes\]$/);
+    expect(data.args).toBe('[redacted]');
+    expect(data.result).toMatch(/^\[redacted · \d+ bytes\]$/);
+    expect(data.output).toMatch(/^\[redacted · \d+ bytes\]$/);
+    expect(data.thinking).toMatch(/^\[redacted · \d+ bytes\]$/);
+    expect(data.messagesJson).toMatch(/^\[redacted · \d+ bytes\]$/);
+    expect(data.promptCharacters).toBe(24);
+    expect(data.sessionKey).toBe('chat-private');
+  });
+
+  it('masks exposed GitHub PAT formats even when they appear inside error text', () => {
+    const data = safeLogValue({ error: 'request failed with github_pat_abcdefghijklmnopqrstuvwxyz0123456789' });
+    expect(data.error).toContain('request failed');
+    expect(data.error).not.toContain('github_pat_');
+    expect(data.error).toContain('[redacted]');
   });
 
   it('masks bearer tokens inside free text', () => {
     const data = safeLogValue({ reason: 'upstream said Bearer abc.def.ghi was invalid' });
     expect(data.reason).not.toContain('abc.def.ghi');
     expect(data.reason).toContain('invalid');
+  });
+
+  it('re-sanitizes persisted event details and rebuilds summaries from safe fields', () => {
+    const saved = sanitizeStoredEvent({
+      id: 'sk-or-v1-abcdefghijklmnop123456',
+      at: 1_700_000_000_000,
+      type: 'agent.error',
+      tone: 'unexpected-class',
+      summary: 'PRIVATE prompt: do not display this saved text',
+      data: {
+        prompt: 'আমার ব্যক্তিগত পরিকল্পনা',
+        error: 'API error (401): invalid Bearer abc.def.ghi',
+        sessionKey: 'chat-42',
+      },
+    }, 2);
+
+    expect(saved.id).toBe('stored-1700000000000-2');
+    expect(saved.summary).not.toContain('PRIVATE prompt');
+    expect(saved.summary).not.toContain('abc.def.ghi');
+    expect(saved.summary).toContain('API error (401)');
+    expect(saved.data.prompt).toMatch(/^\[redacted · \d+ bytes\]$/);
+    expect(saved.data.error).not.toContain('abc.def.ghi');
+    expect(saved.data.sessionKey).toBe('chat-42');
+    expect(saved.tone).toBe('err');
+  });
+
+  it('keeps untrusted details from polluting the object prototype', () => {
+    const data = safeLogValue(JSON.parse('{"__proto__":{"polluted":true},"safe":"value"}'));
+    expect(Object.getPrototypeOf(data)).toBeNull();
+    expect(data.__proto__.polluted).toBe(true);
+    expect(({} as { polluted?: boolean }).polluted).toBeUndefined();
   });
 });
 

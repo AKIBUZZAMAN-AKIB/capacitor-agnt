@@ -1,6 +1,7 @@
 # Native Agent: Provider, Tools ও Context/Memory গভীর অডিট
 
-**পরীক্ষার তারিখ:** ২০২৬-১০-০৮
+**প্রাথমিক audit:** ২০২৬-১০-০৮<br>
+**Context-limit/UI follow-up যাচাই:** ২০২৬-১০-১১
 **কোড:** `plugins/native-agent/rust/native-agent-ffi/src/{provider_catalog.rs,llm_driver.rs,protocol_drivers.rs,agent_loop.rs,tool_runner.rs}`
 
 ## সংক্ষিপ্ত সিদ্ধান্ত
@@ -24,7 +25,7 @@
 | **AI Horde OpenAI shim** | default model নেই; OpenAI Chat-compatible shim | Upstream proxy documentation স্পষ্টভাবে **tools/functions এবং streaming নেই** বলে; code tool support বন্ধ, stream-ও বন্ধ ধরে buffered request করে। `0000000000` anonymous key সর্বনিম্ন priority; context/output worker availability-তে capped। এটি volunteer compute—গোপন prompt পাঠানোর আগে privacy ঝুঁকি বিবেচনা করুন। |
 | **LLM7** | default model নেই; OpenAI Chat Completions | `tools_calling`, `stream`, `tier`, `context_window.tokens` model catalog-নির্ভর। Live snapshot-এ ৫০টি chat model-এর সবগুলোতেই `openai` schema route আছে; ১৪টি OpenAI ও Anthropic—দুই schema-তেই তালিকাভুক্ত। Code OpenAI-only route নিশ্চিত করে; `anthropic`-only future entry filter হয়। `turbo` anonymous/free access; `pro` key লাগে। Capability per-model। |
 | **OpenCode Zen** | `claude-sonnet-5-5`; model অনুযায়ী Messages, Responses, Gemini অথবা Chat Completions | Live `/models`-এ ৮৭টি ID পাওয়া গেছে, কিন্তু protocol/capability metadata নেই। Official endpoint table-এর সঙ্গে ID mapping মেলে। `jev-1.13`/`jev-1.13-free` আলাদা `systemone` API; dedicated adapter না থাকায় route বন্ধ। Unknown model-এর protocol override শুধু vendor contract যাচাই করে সেট করতে হবে। Privacy docs-এ চিহ্নিত free/trial exception-এ UI warning দেখায়। |
-| **Kilo Gateway** | `kilo-auto/efficient`; OpenAI Chat Completions | Official API reference-এ Bearer key, SSE ও OpenAI-shaped tools আছে। Live catalog-এ default model `isFree: false`, `supported_parameters`-এ `tools`; free model ও `mayTrainOnYourPrompts` model-এর metadata UI-তে আলাদা দেখানো হয়। |
+| **Kilo Gateway** | `kilo-auto/efficient`; OpenAI Chat Completions | Official API reference-এ Bearer key, SSE ও OpenAI-shaped tools আছে। Live catalog-এ default model `isFree: false`, `supported_parameters`-এ `tools`; free model ও `mayTrainOnYourPrompts` model-এর metadata UI-তে আলাদা দেখানো হয়। `kilo-auto/free` ও তার concrete resolved model-এর context/output সীমা live catalog থেকে পড়া হয়। |
 | **Pollinations** | default model নেই; OpenAI Chat Completions | Current public catalog snapshot-এ ৩১৬টি entry। Text/chat category-র entries-এ Chat Completions endpoint আছে; image/audio/embedding/realtime/3D-only entries category/modality filter-এ বাদ পড়ে। `tools`/`stream` support `supported_parameters`/capability থেকে model-wise পড়া হয়; বর্তমান snapshot-এ ১২টি text entry tools parameter দেয়নি। API key catalog-এ লাগে না, generation-এর auth rule provider-level। |
 | **WebLLM** | `Llama-3.2-1B-Instruct-q4f16_1-MLC`; local WebGPU | Remote API key লাগে না; weights ডাউনলোড ও compatible WebGPU/WebView দরকার। Foreground callback ছাড়া বা background job-এ route বন্ধ। তালিকাভুক্ত ছোট model-গুলোর tool-call support catalog-এ নিশ্চিত নয়; explicit confirmation ছাড়া tool-সহ request করা হয় না। Android/iOS WebGPU-র বাস্তব device matrix আলাদা করে পরীক্ষা বাকি। |
 
@@ -50,8 +51,8 @@
 ## Session context, short-term ও long-term memory
 
 - Transcript SQLite-এ session অনুযায়ী থাকে; app/session restart করলেও তা পুনরায় load হতে পারে। Context compaction পুরোনো safe prefix-কে tool-call/result boundary অক্ষত রেখে summarize করে। Summary hidden `Role::Context` message: provider-এ user content হিসেবে যায়, chat display-তে দেখা যায় না, এবং `MEMORY.md`/long-term store-এ auto-promote হয় না। Summary lossy হতে পারে এবং secret-free থাকার নিশ্চয়তা নেই।
-- Summarizer unavailable/fail হলে oldest safe prefix trim হয় এবং `context.trimmed` event আসে; success-এ `context.compacted` আসে। সর্বশেষ oversized message একা budget ছাড়ালে provider এখনও request reject করতে পারে।
-- `contextCharBudget` হলো **global character-based estimate**, exact model tokenizer নয়। System prompt, tool schema ও `maxTokens × 4` output reserve বাদ দিয়ে transcript budget করা হয়। বর্তমান runtime compactor live `context_length` metadata থেকে model-specific limit গণনা করে না; server-side Anthropic/OpenAI compaction-ও এখানে ব্যবহার করা হয় না। ছোট context-window model ব্যবহারে `contextCharBudget` কমিয়ে দিন।
+- Summarizer unavailable/fail হলে oldest safe prefix trim হয় এবং `context.trimmed` event আসে; success-এ `context.compacted` আসে। সর্বশেষ oversized message একা verified budget ছাড়ালে provider-এ পাঠানোর আগেই request থামে; approximate character-to-token হিসাব কম পড়লে upstream-এর rejection তবুও সম্ভব।
+- `contextCharBudget` user-configurable **character cap**, model-token limit নয়। ২০২৬-১০-১১-এর live Kilo catalog-এ `kilo-auto/free` alias ছিল `context_length=256000`, `max_completion_tokens=32768`; একই catalog-এ `nvidia/nemotron-3-ultra-550b-a55b:free` ছিল `context_length=1000000`, `max_completion_tokens=65536` এবং `inclusionai/ling-3.1-flash` (ID-তে `:free` নেই) `isFree=true`, context 262144। OpenRouter `openrouter/free` alias-এর live catalog `context_length=200000` জানায়। এগুলো dynamic snapshots, hard-coded constant নয়: প্রথম Auto request-এ সক্রিয় router/fallback-গুলোর সর্বনিম্ন যাচাইকৃত context limit নেওয়া হয়; response-এর concrete model ID persist হয়, পরের tool continuation ও session follow-up-এ সেই ID-র metadata lookup হয়। Kilo/OpenRouter model context metadata না মিললে prompt পাঠানো হয় না; no-suffix free ID কেবল catalog-এর `isFree=true` ও context metadata দিয়ে গ্রহণ করা হয়। System prompt/tool schema/output reserve বাদ দিয়ে `context_length` token ceiling-কে approximate character budget-এ নামানো হয়; কোনো shared tokenizer নেই। ১,০২৪ অক্ষরের কোনো forced floor নেই; estimate-এর মধ্যেও নতুন request না ধরলে provider-এ পাঠানোর আগেই context-window error হয়। Estimate token count-এর নিশ্চয়তা নয়, তাই provider-side tokenizer/limit এখনও চূড়ান্ত। server-side Anthropic/OpenAI compaction এখানে ব্যবহার করা হয় না।
 - Long-term memory আলাদা: workspace `MEMORY.md` system context-এ পড়ে; `memory_*` tool local JSON memory provider ব্যবহার করে। Store/forget approval-নির্ভর; search lexical/token overlap, vector/semantic search নয়। `memory_store` call না হলে transcript বা rolling summary permanent memory-তে কপি হয় না।
 
 ## Privacy ও যা নিশ্চিত নয়
@@ -63,9 +64,9 @@
 
 ## যাচাই ও পরিবর্তন
 
-- এই সংশোধনের পরে Rust crate test: **১৬৫ passed, ০ failed**। Root `npm_config_engine_strict=false npm run check`: **config validation, typecheck, ১৩ test file/২১৩ test এবং native prepare পাস**।
+- ২০২৬-১০-০৮-এর মূল audit verification: Rust crate test **১৬৫ passed, ০ failed**; root `npm_config_engine_strict=false npm run check`-এ config validation, typecheck, ১৩ test file/২১৩ test এবং native prepare পাস করেছিল।
+- ২০২৬-১০-১১-এর follow-up verification: `npm test` **১৬/১৬ test file, ২৪৮/২৪৮ test পাস**; `npm run typecheck`, `npm run validate:config` ও `npm run prepare:native` পাস। `npm run test:browser:csp` Chromium/Chrome executable না থাকায় চালানো যায়নি; এই follow-up-এর Rust fmt/test/build-ও `cargo`/`rustfmt` না থাকায় চালানো যায়নি।
 - OVH default বদলানো ও catalog-ভিত্তিক streaming metadata test আছে; Zen model privacy exception mapping-এর unit test আছে। Live API catalog observation unit test নয়—public service যেকোনো সময় বদলাতে পারে।
-
 ## Official sources
 
 - [Anthropic Messages API](https://docs.anthropic.com/en/api/messages) · [Models API](https://docs.anthropic.com/en/api/models-list) · [Tool use](https://docs.anthropic.com/en/docs/build-with-claude/tool-use)

@@ -154,7 +154,7 @@ internal object AgentRuntimeConfigStore {
         .put("temperature", 0.0)
         .put("maxTokens", 8_192)
         .put("defaultMaxTurns", 25)
-        .put("contextCharBudget", 150_000)
+        .put("contextCharBudget", 1_000_000)
         .put("mcpToolTimeoutMs", 30_000)
         .put("maxRetries", 2)
         .put("baseRetryDelayMs", 2_000)

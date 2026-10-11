@@ -89,7 +89,7 @@ impl Default for AgentRuntimeConfig {
             temperature: 0.0,
             max_tokens: 8_192,
             default_max_turns: 25,
-            context_char_budget: 150_000,
+            context_char_budget: 1_000_000,
             mcp_tool_timeout_ms: 30_000,
             max_retries: 2,
             base_retry_delay_ms: 2_000,
@@ -313,7 +313,7 @@ mod tests {
         assert_eq!(config.temperature, 0.0);
         assert_eq!(config.max_tokens, 8_192);
         assert_eq!(config.default_max_turns, 25);
-        assert_eq!(config.context_char_budget, 150_000);
+        assert_eq!(config.context_char_budget, 1_000_000);
         assert_eq!(config.mcp_tool_timeout_ms, 30_000);
         assert_eq!(config.max_retries, 2);
         assert_eq!(config.base_retry_delay_ms, 2_000);

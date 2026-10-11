@@ -127,17 +127,50 @@ describe('owner-facing AI Workspace', () => {
     expect(lab).toContain('res = await window.NativeKit.agent.followUp(prompt);');
   });
 
-  it('renders a redacted, persistent and complete runtime audit log below the composer', () => {
+  it('provides a separate, redacted and persistent Work Log tab', () => {
+    expect(agent).toContain('data-aw-tab="worklog"');
+    expect(agent).toContain('id="aw-tab-worklog"');
     expect(agent).toContain('id="aw-event-log"');
     expect(agent).toContain('id="aw-log-clear"');
+    expect(agent).toContain('tool args/results');
+    expect(agent.indexOf('id="aw-event-log"')).toBeGreaterThan(agent.indexOf('id="aw-tab-worklog"'));
+    expect(agent.slice(agent.indexOf('id="aw-tab-chat"'), agent.indexOf('id="aw-tab-worklog"'))).not.toContain('id="aw-event-log"');
     expect(css).toContain('.aw-event-log-panel');
     expect(css).toContain('.aw-event-log{max-height:240px;overflow:auto');
+    expect(css).toContain('#aw-tab-worklog .aw-event-log-panel');
     expect(ui).toContain("const EVENT_LOG_STORAGE_KEY = 'nativekit.agent.workspace.event-log.v1'");
     expect(ui).toContain('function recordEventLog(');
     expect(ui).toContain('function safeLogValue(');
     expect(ui).toContain('function recordStreamLog(');
     expect(ui).toContain("else if (!thinkingDelta) recordEventLog(type || 'unknown.event', payload ?? {});");
-    expect(agent).toContain('Sensitive prompt, file-content ও token');
+    expect(agent).toContain('tool args/results ও credential details এখানে দেখানো হয় না');
+  });
+
+  it('distinguishes the user character cap from live, resolved-model token metadata', () => {
+    expect(agent).toContain('কথোপকথনের বাজেট (অক্ষর)');
+    expect(agent).toContain('live provider catalog থেকে context_length ও max output tokens নেয়');
+    expect(agent).toContain('resolved model পাওয়ার পর follow-up/পরের tool turn-এ সেই model-এর exact metadata নেয়');
+    expect(agent).toContain('১০ লাখ অক্ষর মানে ১০ লাখ token নয়');
+    expect(agent).toContain('id="aw-context-budget-help"');
+    expect(ui).toContain("type === 'context.limit_resolved'");
+  });
+
+  it('restores complete display messages including thinking, tools, usage and resolved model', () => {
+    expect(ui).toContain('function normalizeMessage(message)');
+    expect(ui).toContain('function makeHistoryMessage(message)');
+    expect(ui).toContain('function renderChatHistory(messages');
+    expect(ui).toContain("parseJson(payload?.displayMessagesJson, null)");
+    expect(ui).toContain('aw-history-thinking');
+    expect(ui).toContain('tool_calls');
+    expect(ui).toContain('tool_results');
+    expect(ui).toContain('resolvedModel');
+  });
+
+  it('removes the composer instruction and keeps the compact submit controls', () => {
+    expect(agent).not.toContain('Agent প্রস্তুত হলে Enter পাঠাবে');
+    expect(agent).not.toContain('Shift + Enter নতুন লাইন');
+    expect(agent).not.toContain('সংবেদনশীল কাজ অনুমতি চাইবে</span>');
+    expect(css).toContain('.agent-workspace .aw-composer .aw-send{min-height:34px');
   });
 
   it('shows provider reasoning separately and classifies opaque provider failures with regexes', () => {
