@@ -1781,8 +1781,13 @@ mod session_continuity_e2e_tests {
         }
     }
 
-    /// Mock OpenAI-compatible provider. Every request body is sent to the
-    /// returned receiver; streaming requests get an SSE answer, others JSON.
+    /// Mock OpenAI/OpenRouter-compatible provider. Every chat request body is
+    /// sent to the returned receiver; streaming requests get an SSE answer,
+    /// others JSON. `GET …/models` is answered with an OpenRouter-shaped
+    /// catalog whose Free Models Router row is zero-priced and carries real
+    /// context/output limits, so the agent's fail-closed context verification
+    /// runs against the mock exactly as it would against the live gateway —
+    /// the e2e path stays hermetic (no network) without skipping that step.
     fn spawn_mock_provider() -> (String, std_mpsc::Receiver<serde_json::Value>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1793,7 +1798,7 @@ mod session_continuity_e2e_tests {
                 let Ok(mut stream) = stream else { continue };
                 let mut raw: Vec<u8> = Vec::new();
                 let mut chunk = [0u8; 4096];
-                let body = loop {
+                let request = loop {
                     let count = match stream.read(&mut chunk) {
                         Ok(0) | Err(_) => break None,
                         Ok(count) => count,
@@ -1808,10 +1813,54 @@ mod session_continuity_e2e_tests {
                                 .and_then(|v| v.trim().parse::<usize>().ok()))
                             .unwrap_or(0);
                         if raw.len() >= end + 4 + length {
-                            break serde_json::from_slice::<serde_json::Value>(&raw[end + 4..end + 4 + length]).ok();
+                            let request_line = headers.lines().next().unwrap_or_default().to_string();
+                            let body = if length > 0 {
+                                serde_json::from_slice::<serde_json::Value>(&raw[end + 4..end + 4 + length]).ok()
+                            } else {
+                                None
+                            };
+                            break Some((request_line, body));
                         }
                     }
                 };
+                let Some((request_line, body)) = request else { continue };
+                let mut parts = request_line.split_whitespace();
+                let method = parts.next().unwrap_or_default().to_string();
+                let path = parts.next().unwrap_or_default().to_string();
+
+                if method == "GET" && path.trim_end_matches('/').ends_with("/models") {
+                    let catalog = serde_json::json!({
+                        "data": [
+                            {
+                                "id": "openrouter/free",
+                                "name": "OpenRouter: Free Models Router",
+                                "description": "Mocked free virtual router for hermetic e2e tests.",
+                                "context_length": 65_536,
+                                "top_provider": { "context_length": 65_536, "max_completion_tokens": 4_096 },
+                                "architecture": { "input_modalities": ["text"], "output_modalities": ["text"] },
+                                "supported_parameters": ["tools"],
+                                "pricing": { "prompt": "0", "completion": "0" }
+                            },
+                            {
+                                "id": "meta-llama/llama-3.3-70b-instruct:free",
+                                "name": "Llama 3.3 70B Instruct (free)",
+                                "context_length": 131_072,
+                                "top_provider": { "max_completion_tokens": 8_192 },
+                                "architecture": { "input_modalities": ["text"], "output_modalities": ["text"] },
+                                "supported_parameters": ["tools"],
+                                "pricing": { "prompt": "0", "completion": "0" }
+                            }
+                        ]
+                    });
+                    let payload = catalog.to_string();
+                    let wire = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    let _ = stream.write_all(wire.as_bytes());
+                    continue;
+                }
+
                 let Some(body) = body else { continue };
                 let streaming = body["stream"] == serde_json::Value::Bool(true);
                 let _ = tx.send(body);
