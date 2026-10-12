@@ -36,8 +36,10 @@ import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
-import com.journeyapps.barcodescanner.IntentIntegrator;
-import com.journeyapps.barcodescanner.IntentResult;
+// zxing-android-embedded keeps the IntentIntegrator/IntentResult helpers in
+// the original zxing integration package (verified against the 4.3.0 aar).
+import com.google.zxing.integration.android.IntentIntegrator;
+import com.google.zxing.integration.android.IntentResult;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
