@@ -9,7 +9,7 @@ describe('custom native plugin integration', () => {
   it('declares matching Java and Swift bridge names', () => {
     const java = read('plugins/custom-native/android/src/main/java/dev/nativekit/custom/NativeKitCustomPlugin.java');
     const swift = read('plugins/custom-native/ios/Sources/NativeKitCustomPlugin/NativeKitCustomPlugin.swift');
-    expect(java).toContain('@CapacitorPlugin(name = "NativeKitCustom")');
+    expect(java).toContain('@CapacitorPlugin(name = "NativeKitCustom", permissions = {');
     expect(swift).toContain('public let jsName = "NativeKitCustom"');
   });
 
@@ -18,6 +18,8 @@ describe('custom native plugin integration', () => {
     for (const name of ['AlarmReceiver', 'AlarmService', 'BootReceiver', 'LocationTrackingService']) {
       expect(manifest).toContain(`dev.nativekit.custom.${name}`);
     }
+    // The phase 2 speech tools need the microphone at runtime.
+    expect(manifest).toContain('android.permission.RECORD_AUDIO');
   });
 
   it('uses the Swift product name expected by Capacitor package generation', () => {

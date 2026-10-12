@@ -409,6 +409,85 @@ window.addEventListener('nativekit:agent-toast', (event) => {
   if (message) toast(message, 'info');
 });
 
+
+// The device-tools bridge dispatches this when the agent calls device__ask_user.
+// A question card lands in the chat feed with the offered options as buttons;
+// tapping one answers through the paired response event, and the bridge hands
+// the pick back to the agent as the tool result.
+window.addEventListener('nativekit:agent-ask', (event) => {
+  const detail = event?.detail ?? {};
+  const requestId = String(detail.requestId ?? '');
+  const question = String(detail.question ?? '').slice(0, 500);
+  const options = (Array.isArray(detail.options) ? detail.options : [])
+    .map((option) => String(option ?? '').trim().slice(0, 60))
+    .filter(Boolean)
+    .slice(0, 6);
+  const feed = $('aw-chat-feed');
+  if (!requestId || !question || options.length < 2 || !feed) return;
+  $('aw-empty-chat')?.remove();
+
+  const card = document.createElement('article');
+  card.className = 'aw-message assistant';
+  card.dataset.role = 'assistant';
+  card.dataset.askCard = requestId;
+  const avatar = document.createElement('div');
+  avatar.className = 'aw-avatar';
+  avatar.append(icon('spark'));
+  const body = document.createElement('div');
+  const bubble = document.createElement('div');
+  bubble.className = 'aw-bubble';
+  const label = document.createElement('strong');
+  label.textContent = 'Agent জিজ্ঞেস করছে:';
+  const query = document.createElement('div');
+  query.textContent = question;
+  bubble.append(label, query);
+  const actions = document.createElement('div');
+  actions.className = 'aw-actions';
+  actions.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-top:8px';
+  const answer = (choice, index) => {
+    window.dispatchEvent(new CustomEvent('nativekit:agent-ask-response', {
+      detail: { requestId, answer: { answer: choice, index } },
+    }));
+    for (const button of actions.querySelectorAll('button')) {
+      button.disabled = true;
+      button.dataset.chosen = String(button.dataset.index === String(index));
+    }
+    query.append(' ');
+    const chosen = document.createElement('em');
+    chosen.textContent = `→ ${choice}`;
+    query.append(chosen);
+  };
+  options.forEach((option, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.index = String(index);
+    button.textContent = option;
+    button.addEventListener('click', () => answer(option, index));
+    actions.append(button);
+  });
+  const skip = document.createElement('button');
+  skip.type = 'button';
+  skip.textContent = 'এখন না';
+  skip.style.cssText = 'opacity:.7';
+  skip.addEventListener('click', () => {
+    window.dispatchEvent(new CustomEvent('nativekit:agent-ask-response', { detail: { requestId, answer: null } }));
+    for (const button of actions.querySelectorAll('button')) button.disabled = true;
+    const note = document.createElement('div');
+    note.style.cssText = 'opacity:.7;margin-top:6px';
+    note.textContent = 'আপনি উত্তর দেননি।';
+    bubble.append(note);
+  });
+  actions.append(skip);
+  bubble.append(actions);
+  const stamp = document.createElement('div');
+  stamp.className = 'aw-message-time';
+  stamp.textContent = nowTime();
+  body.append(bubble, stamp);
+  card.append(avatar, body);
+  feed.append(card);
+  scrollChatToBottom(true);
+});
+
 function toast(message, tone = 'muted') {
   const node = $('aw-toast');
   if (!node) return;

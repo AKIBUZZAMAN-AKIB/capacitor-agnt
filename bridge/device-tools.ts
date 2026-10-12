@@ -46,11 +46,13 @@ import { Haptics } from '@capacitor/haptics';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { Share } from '@capacitor/share';
 import { Network } from '@capacitor/network';
-import { Directory, Filesystem } from '@capacitor/filesystem';
+import { Directory, Encoding, Filesystem } from '@capacitor/filesystem';
 import { FileTransfer } from '@capacitor/file-transfer';
 import { App } from '@capacitor/app';
+import { NearbyConnections } from '@capacitor-trancee/nearby-connections';
 import { Widget } from '@nativekit/widget';
 import { NativeKitCustom } from '@nativekit/custom-native';
+import { unzipSync, zipSync } from 'fflate';
 import type {
   JsonRpcResponse,
   McpCallToolResult,
@@ -73,6 +75,10 @@ export type DeviceToolFeature =
   | 'networkStatus'
   | 'advancedAlarms'
   | 'fileTransfer'
+  | 'filesystem'
+  | 'sqlite'
+  | 'nearby'
+  | 'appBrowser'
   | 'widget';
 
 /**
@@ -106,9 +112,55 @@ export interface DeviceToolDeps {
   filesystem: {
     mkdir(options: any): Promise<void>;
     writeFile(options: any): Promise<void>;
+    readFile(options: any): Promise<{ data: string }>;
+    readdir(options: any): Promise<{ files: Array<{ name: string; type?: string; size?: number }> }>;
     getUri(options: any): Promise<{ uri: string }>;
     stat(options: any): Promise<{ size?: number; type?: string }>;
   };
+  /** Phase 2 native extras from the custom plugin: speech, scanner, intents, torch, battery, picker. */
+  extras: {
+    ttsSpeak(options: any): Promise<{ queued?: boolean; languageSupported?: boolean }>;
+    ttsStop(options?: any): Promise<void>;
+    listenSpeech(options: any): Promise<{ text: string; confidence?: number }>;
+    scanQrCode(options?: any): Promise<{ text: string; format?: string }>;
+    dialPhone(options: { number: string }): Promise<void>;
+    composeSms(options: { number: string; body?: string }): Promise<void>;
+    setTorch(options: { on: boolean }): Promise<void>;
+    batteryStatus(options?: any): Promise<{ percent?: number; charging?: boolean; plugged?: boolean }>;
+    pickDocument(options?: any): Promise<{ path: string; bytes?: number }>;
+  };
+  /** Asks the user a question through the workspace UI; resolves null on timeout or dismissal. */
+  askUser: (question: string, options: string[], timeoutMs: number) => Promise<{ answer: string; index: number } | null>;
+  /** SQLite facade slice for sql_query (the agent-owned database). */
+  sqlite: {
+    query(name: string, statement: string, values?: any[]): Promise<{ values?: any[] }>;
+    run(name: string, statement: string, values?: any[]): Promise<{ changes?: unknown }>;
+  };
+  /** Nearby Connections facade subset for peer-to-peer tools. */
+  nearby: {
+    initialize(options?: any): Promise<unknown>;
+    startAdvertising(options?: any): Promise<unknown>;
+    stopAdvertising(options?: any): Promise<unknown>;
+    startDiscovery(options?: any): Promise<unknown>;
+    stopDiscovery(options?: any): Promise<unknown>;
+    requestConnection(options: any): Promise<unknown>;
+    acceptConnection(options: any): Promise<unknown>;
+    sendPayload(options: any): Promise<unknown>;
+    status(options?: any): Promise<Record<string, unknown>>;
+    requestPermissions(options?: any): Promise<unknown>;
+    addListener(eventName: string, listenerFunc: (data: any) => void): Promise<{ remove?: () => void }>;
+  };
+  /**
+   * Isolated-browser mini-app staging + launch. Wired lazily by the nativekit
+   * bridge (the app-browser surface is assembled there); the placeholder
+   * default throws so tests must inject a fake.
+   */
+  miniapp: {
+    install(pkg: { files: Array<{ path: string; data: string | Uint8Array; type?: string }>; manifest?: Record<string, unknown> }): Promise<unknown>;
+    launch(appId: string, target: unknown): Promise<unknown>;
+  };
+  /** Clipboard, when the host grants it. */
+  clipboard: { writeText(text: string): Promise<void>; readText(): Promise<string> };
   /** Opens a URL outside the WebView. Defaults to `window.open`. */
   openUrl: (url: string) => void;
   /**
@@ -196,6 +248,103 @@ function optionalString(args: Record<string, unknown>, key: string, max = 280): 
 function requiredString(args: Record<string, unknown>, key: string, max = 280): string | null {
   const value = optionalString(args, key, max);
   return value ?? null;
+}
+
+/** Clamps a number into [min, max]. */
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+/** Workspace-relative path from args: normalised, no '..', no leading '/', no trailing '/'. */
+function workspacePathArg(args: Record<string, unknown>, key: string): string | null {
+  const raw = optionalString(args, key, 300);
+  if (!raw) return null;
+  const path = raw.replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!path || path.includes('..') || path.includes('//') || path.endsWith('/')) return null;
+  return path;
+}
+
+const TEXT_DECODER = typeof TextDecoder !== 'undefined' ? new TextDecoder() : null;
+
+/** Decodes bytes as UTF-8 with a latin-1 fallback for very old hosts. */
+function bytesToText(bytes: Uint8Array): string {
+  if (TEXT_DECODER) return TEXT_DECODER.decode(bytes);
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 1) out += String.fromCharCode(bytes[i]);
+  return out;
+}
+
+/** Decodes base64 to bytes using atob (WebView) or Buffer (node tests). */
+function base64ToBytes(base64: string): Uint8Array {
+  const clean = base64.replace(/\s+/g, '');
+  if (typeof atob === 'function') {
+    const raw = atob(clean);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
+    return bytes;
+  }
+  if (typeof Buffer !== 'undefined' && typeof Buffer.from === 'function') return new Uint8Array(Buffer.from(clean, 'base64'));
+  return new Uint8Array(0);
+}
+
+/** Encodes bytes as base64 using btoa (WebView) or Buffer (node tests). */
+function bytesToBase64(bytes: Uint8Array): string {
+  if (typeof btoa === 'function') {
+    let raw = '';
+    const chunk = 8192;
+    for (let i = 0; i < bytes.length; i += chunk) raw += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    return btoa(raw);
+  }
+  if (typeof Buffer !== 'undefined' && typeof Buffer.from === 'function') return Buffer.from(bytes).toString('base64');
+  throw new Error('No base64 encoder is available in this host');
+}
+
+/** File extensions that must be read/written as binary bytes rather than text. */
+const BINARY_EXTENSIONS = new Set([
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'ico', 'bmp', 'woff', 'woff2', 'ttf', 'otf', 'eot',
+  'mp3', 'm4a', 'aac', 'wav', 'ogg', 'opus', 'flac', 'mp4', 'webm', 'mov', 'pdf', 'zip',
+  'gz', 'tgz', 'tar', 'wasm', 'apk', 'jar', 'bin', 'db', 'sqlite', 'sqlite3',
+]);
+
+function isBinaryPath(path: string): boolean {
+  const extension = path.includes('.') ? path.slice(path.lastIndexOf('.') + 1).toLowerCase() : '';
+  return BINARY_EXTENSIONS.has(extension);
+}
+
+/** Reads a workspace file as text or bytes (files live under agent/workspace in Directory.Data). */
+async function readWorkspaceFile(
+  deps: DeviceToolDeps,
+  path: string,
+): Promise<{ text?: string; bytes?: Uint8Array }> {
+  const fullPath = `agent/workspace/${path}`;
+  if (isBinaryPath(path)) {
+    const read = await deps.filesystem.readFile({ path: fullPath, directory: Directory.Data });
+    return { bytes: base64ToBytes(String(read?.data ?? '')) };
+  }
+  const read = await deps.filesystem.readFile({ path: fullPath, directory: Directory.Data, encoding: Encoding.UTF8 });
+  return { text: String(read?.data ?? '') };
+}
+
+/** Writes text or bytes into the workspace under a relative path, creating parent dirs. */
+async function writeWorkspaceFile(
+  deps: DeviceToolDeps,
+  path: string,
+  content: { text?: string; bytes?: Uint8Array },
+): Promise<void> {
+  const fullPath = `agent/workspace/${path}`;
+  const parent = fullPath.slice(0, fullPath.lastIndexOf('/'));
+  if (parent) await deps.filesystem.mkdir({ path: parent, directory: Directory.Data, recursive: true }).catch(() => undefined);
+  if (content.bytes !== undefined) {
+    await deps.filesystem.writeFile({ path: fullPath, directory: Directory.Data, data: bytesToBase64(content.bytes) });
+  } else {
+    await deps.filesystem.writeFile({ path: fullPath, directory: Directory.Data, data: content.text ?? '', encoding: Encoding.UTF8 });
+  }
+}
+
+/** Extracts an endpoint id from a nearby-connections callback payload. */
+function nearbyEndpointId(event: unknown): string {
+  const record = event as Record<string, unknown> | null | undefined;
+  return String(record?.endpointID ?? record?.endpointId ?? '');
 }
 
 function optionalNumber(args: Record<string, unknown>, key: string): number | undefined {
@@ -383,6 +532,16 @@ const TOAST_LIMIT = { max: 6, windowMs: 60_000 };
 const FLOAT_SHOW_LIMIT = { max: 3, windowMs: 60_000 };
 const FLOAT_UPDATE_LIMIT = { max: 10, windowMs: 60_000 };
 const WIDGET_SET_LIMIT = { max: 4, windowMs: 60_000 };
+const SPEAK_LIMIT = { max: 6, windowMs: 60_000 };
+const LISTEN_LIMIT = { max: 4, windowMs: 60_000 };
+const SCAN_LIMIT = { max: 6, windowMs: 60_000 };
+const SMS_LIMIT = { max: 4, windowMs: 60_000 };
+const ASK_LIMIT = { max: 4, windowMs: 60_000 };
+const ZIP_LIMIT = { max: 4, windowMs: 60_000 };
+const SQL_LIMIT = { max: 20, windowMs: 60_000 };
+const NEARBY_LIMIT = { max: 6, windowMs: 60_000 };
+const MINIAPP_LIMIT = { max: 3, windowMs: 60_000 };
+const CLIPBOARD_LIMIT = { max: 10, windowMs: 60_000 };
 
 const TOOL_SPECS: DeviceToolSpec[] = [
   {
@@ -1138,6 +1297,673 @@ const TOOL_SPECS: DeviceToolSpec[] = [
       }
     },
   },
+
+  // ── Phase 2: speech, scanning and device hardware ─────────────────────────
+
+  {
+    name: 'speak',
+    description:
+      'Reads text aloud with the device text-to-speech voice (defaults to Bangla bn-BD; pass language="en-US" or another BCP-47 tag for other voices). ' +
+      'Returns once speech is queued; use stop_speaking to cut it short.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'The text to speak (1–5000 chars).' },
+        language: { type: 'string', description: 'BCP-47 language tag, default "bn-BD".' },
+        pitch: { type: 'number', description: 'Voice pitch 0.5–2, default 1.' },
+        rate: { type: 'number', description: 'Speaking speed 0.5–2, default 1.' },
+      },
+      required: ['text'],
+    },
+    rateLimit: SPEAK_LIMIT,
+    run: async (args, deps) => {
+      const text = requiredString(args, 'text', 5000);
+      if (!text) return errorResult("'text' is required.");
+      const language = optionalString(args, 'language', 20) ?? 'bn-BD';
+      const pitch = clampNumber(optionalNumber(args, 'pitch') ?? 1, 0.5, 2);
+      const rate = clampNumber(optionalNumber(args, 'rate') ?? 1, 0.5, 2);
+      try {
+        const result = await deps.extras.ttsSpeak({ text, language, pitch, rate });
+        return textResult(
+          result?.languageSupported === false
+            ? `Speaking with the fallback voice — no ${language} voice is installed on this device.`
+            : 'Speaking.',
+          { queued: true, language },
+        );
+      } catch (error) {
+        return errorResult(`Speech failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'stop_speaking',
+    description: 'Stops any in-progress text-to-speech playback.',
+    inputSchema: { type: 'object', properties: {} },
+    run: async (_args, deps) => {
+      try {
+        await deps.extras.ttsStop();
+        return textResult('Speech stopped.');
+      } catch (error) {
+        return errorResult(`Stop failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'listen',
+    description:
+      'Listens to the microphone once and returns the recognised speech as text (defaults to Bangla bn-BD; pass language for another). ' +
+      'The device asks for microphone permission the first time. Timeout defaults to 12 s.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        language: { type: 'string', description: 'BCP-47 language tag, default "bn-BD".' },
+        timeoutMs: { type: 'number', description: 'Max wait in milliseconds, 2000–25000 (default 12000).' },
+      },
+    },
+    rateLimit: LISTEN_LIMIT,
+    run: async (args, deps) => {
+      const language = optionalString(args, 'language', 20) ?? 'bn-BD';
+      const timeoutMs = Math.round(clampNumber(optionalNumber(args, 'timeoutMs') ?? 12000, 2000, 25000));
+      try {
+        const result = await deps.extras.listenSpeech({ language, timeoutMs });
+        const text = String(result?.text ?? '').trim();
+        return textResult(
+          text ? `Heard: ${text}` : 'No speech was recognised.',
+          { text, ...(typeof result?.confidence === 'number' ? { confidence: result.confidence } : {}) },
+        );
+      } catch (error) {
+        return errorResult(`Listening failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'scan_qr',
+    description: 'Opens the camera barcode scanner (QR codes) and returns the decoded text. The user can cancel; camera permission is requested if missing.',
+    inputSchema: { type: 'object', properties: {} },
+    feature: 'camera',
+    rateLimit: SCAN_LIMIT,
+    run: async (_args, deps) => {
+      try {
+        const result = await deps.extras.scanQrCode();
+        const text = String(result?.text ?? '');
+        return textResult(`Scanned: ${text}`, { text, ...(result?.format ? { format: result.format } : {}) });
+      } catch (error) {
+        return errorResult(`Scan failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'dial_phone',
+    description: 'Opens the phone dialer with a number pre-filled (the user presses call — nothing is dialled automatically).',
+    inputSchema: {
+      type: 'object',
+      properties: { number: { type: 'string', description: 'Phone number: digits, +, spaces and ( ) . - only.' } },
+      required: ['number'],
+    },
+    rateLimit: SMS_LIMIT,
+    run: async (args, deps) => {
+      const number = requiredString(args, 'number', 30);
+      if (!number) return errorResult("'number' is required.");
+      if (!/^[+\d\s().-]+$/.test(number)) return errorResult("'number' may only contain digits, +, spaces and ( ) . -");
+      try {
+        await deps.extras.dialPhone({ number });
+        return textResult(`Dialer opened with ${number.trim()}.`, { number: number.trim() });
+      } catch (error) {
+        return errorResult(`Dialer failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'compose_sms',
+    description: 'Opens the SMS app with the recipient (and optional message body) pre-filled; the user reviews and sends.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        number: { type: 'string', description: 'Recipient phone number.' },
+        body: { type: 'string', description: 'Pre-filled message text (max 1000 chars).' },
+      },
+      required: ['number'],
+    },
+    rateLimit: SMS_LIMIT,
+    run: async (args, deps) => {
+      const number = requiredString(args, 'number', 30);
+      if (!number) return errorResult("'number' is required.");
+      const body = optionalString(args, 'body', 1000) ?? '';
+      try {
+        await deps.extras.composeSms({ number, ...(body ? { body } : {}) });
+        return textResult(`SMS composer opened for ${number.trim()}.`, { number: number.trim() });
+      } catch (error) {
+        return errorResult(`SMS composer failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'torch',
+    description: 'Turns the camera flash (torch) on or off.',
+    inputSchema: {
+      type: 'object',
+      properties: { on: { type: 'boolean', description: 'true to switch the torch on, false for off.' } },
+      required: ['on'],
+    },
+    rateLimit: SCAN_LIMIT,
+    run: async (args, deps) => {
+      if (typeof args.on !== 'boolean') return errorResult("'on' (boolean) is required.");
+      try {
+        await deps.extras.setTorch({ on: args.on });
+        return textResult(`Torch ${args.on ? 'on' : 'off'}.`, { on: args.on });
+      } catch (error) {
+        return errorResult(`Torch failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'battery_status',
+    description: 'Reports the battery level, whether it is charging and whether a charger is plugged in.',
+    inputSchema: { type: 'object', properties: {} },
+    run: async (_args, deps) => {
+      try {
+        const result = await deps.extras.batteryStatus();
+        const percent = typeof result?.percent === 'number' ? result.percent : null;
+        const charging = result?.charging === true;
+        return textResult(
+          `Battery ${percent === null ? 'level unknown' : `${percent}%`}${charging ? ', charging' : ', not charging'}.`,
+          { ...(percent !== null ? { percent } : {}), charging, plugged: result?.plugged === true },
+        );
+      } catch (error) {
+        return errorResult(`Battery status failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'pick_file',
+    description:
+      'Opens the system file picker and copies the chosen file into the agent workspace under picked/ (up to 25 MB), so the file tools can read it. ' +
+      'The user picks the file; nothing is read without that.',
+    inputSchema: { type: 'object', properties: {} },
+    feature: 'filesystem',
+    rateLimit: ZIP_LIMIT,
+    run: async (_args, deps) => {
+      try {
+        const result = await deps.extras.pickDocument();
+        const path = String(result?.path ?? '');
+        if (!path) return errorResult('No file was picked.');
+        return textResult(
+          `Saved the picked file to the agent workspace at '${path}'${typeof result?.bytes === 'number' ? ` (${(result.bytes / 1024).toFixed(0)} KB)` : ''}; read it with the file tools.`,
+          { path, ...(typeof result?.bytes === 'number' ? { bytes: result.bytes } : {}) },
+        );
+      } catch (error) {
+        return errorResult(`Pick failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+
+  // ── Phase 3: interaction, files, data and peers ────────────────────────────
+
+  {
+    name: 'ask_user',
+    description:
+      "Shows the user a question card with tappable options in the chat and waits for the answer — use it whenever the user's choice is needed. " +
+      'Resolves "no answer" if the user does not respond in time (default 20 s; the engine tool timeout, mcp_tool_timeout_ms default 30 s, also caps the wait).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        question: { type: 'string', description: 'The question to show (max 500 chars).' },
+        options: { type: 'array', items: { type: 'string' }, description: '2–6 short answer buttons (max 60 chars each).' },
+        timeoutSeconds: { type: 'number', description: 'How long to wait for an answer, 3–120 s (default 20).' },
+      },
+      required: ['question', 'options'],
+    },
+    rateLimit: ASK_LIMIT,
+    run: async (args, deps) => {
+      const question = requiredString(args, 'question', 500);
+      if (!question) return errorResult("'question' is required.");
+      const rawOptions = Array.isArray(args.options) ? args.options : [];
+      const options = rawOptions.map((option) => (typeof option === 'string' ? option.trim().slice(0, 60) : '')).filter(Boolean).slice(0, 6);
+      if (options.length < 2) return errorResult("'options' must list 2–6 non-empty strings.");
+      const timeoutMs = Math.round(clampNumber(optionalNumber(args, 'timeoutSeconds') ?? 20, 3, 120) * 1000);
+      const answer = await deps.askUser(question, options, timeoutMs);
+      if (!answer) return textResult('The user did not answer in time.', { answered: false });
+      return textResult(`The user chose: ${answer.answer}`, { answered: true, answer: answer.answer, index: answer.index });
+    },
+  },
+  {
+    name: 'zip_files',
+    description:
+      'Bundles workspace files into a .zip archive in the workspace (up to 100 files, 20 MB). Pass workspace-relative paths; the archive keeps the same subpaths.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        paths: { type: 'array', items: { type: 'string' }, description: 'Workspace-relative file paths to include.' },
+        output: { type: 'string', description: 'Workspace-relative path for the .zip (default "archive-<timestamp>.zip").' },
+      },
+      required: ['paths'],
+    },
+    feature: 'filesystem',
+    rateLimit: ZIP_LIMIT,
+    run: async (args, deps) => {
+      const rawPaths = Array.isArray(args.paths) ? args.paths : [];
+      const paths = [...new Set(rawPaths.map((path) => (typeof path === 'string' ? path.trim() : '')).filter(Boolean))].slice(0, 100);
+      if (!paths.length) return errorResult("'paths' must list at least one workspace file.");
+      for (const path of paths) {
+        if (path.startsWith('/') || path.includes('..') || path.includes('\\')) return errorResult(`'${path}' must be workspace-relative without '..'.`);
+      }
+      let output = workspacePathArg(args, 'output');
+      if (output === null && args.output !== undefined) return errorResult("'output' is not a valid workspace path.");
+      if (!output) output = `archive-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.zip`;
+      if (!output.toLowerCase().endsWith('.zip')) return errorResult("'output' must end with .zip");
+      const entries: Record<string, Uint8Array> = {};
+      let total = 0;
+      for (const path of paths) {
+        const stat = await deps.filesystem.stat({ path: `agent/workspace/${path}`, directory: Directory.Data }).catch(() => undefined);
+        if (stat?.type === 'directory') return errorResult(`'${path}' is a directory; zip lists files individually.`);
+        try {
+          const read = await readWorkspaceFile(deps, path);
+          if (read.bytes) {
+            total += read.bytes.length;
+            entries[path] = read.bytes;
+          } else {
+            if (!read.text) return errorResult(`'${path}' could not be read (missing or empty).`);
+            total += read.text.length;
+            entries[path] = new TextEncoder().encode(read.text);
+          }
+          if (total > 20 * 1024 * 1024) return errorResult('The archive would exceed the 20 MB limit.');
+        } catch (error) {
+          return errorResult(`Could not read '${path}': ${String((error as Error)?.message ?? error)}`);
+        }
+      }
+      if (Object.keys(entries).length === 0) return errorResult('No readable files were found.');
+      try {
+        const zipped = zipSync(entries, { level: 6 });
+        await writeWorkspaceFile(deps, output, { bytes: zipped });
+        return textResult(
+          `Zipped ${Object.keys(entries).length} file(s) (${(zipped.length / 1024).toFixed(0)} KB) to '${output}'.`,
+          { path: output, files: Object.keys(entries).length, bytes: zipped.length },
+        );
+      } catch (error) {
+        return errorResult(`Zip failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'unzip_file',
+    description:
+      'Extracts a .zip archive from the workspace back into the workspace (up to 200 entries, 40 MB uncompressed). Existing files with the same name are overwritten.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Workspace-relative path of the .zip file.' },
+        outputDir: { type: 'string', description: 'Optional directory prefix for extracted files (default: archive name without .zip).' },
+      },
+      required: ['path'],
+    },
+    feature: 'filesystem',
+    rateLimit: ZIP_LIMIT,
+    run: async (args, deps) => {
+      const path = workspacePathArg(args, 'path');
+      if (!path) return errorResult("'path' must be a workspace-relative file path.");
+      if (!path.toLowerCase().endsWith('.zip')) return errorResult("'path' must point to a .zip file.");
+      const outputDir = workspacePathArg(args, 'outputDir') ?? path.replace(/\.zip$/i, '');
+      try {
+        const read = await readWorkspaceFile(deps, path);
+        const bytes = read.bytes ?? new Uint8Array(0);
+        if (!bytes.length) return errorResult(`'${path}' is empty or missing.`);
+        const extracted = unzipSync(bytes);
+        const names = Object.keys(extracted).filter((name) => !name.endsWith('/'));
+        if (!names.length) return errorResult('The archive contains no files.');
+        if (names.length > 200) return errorResult(`The archive has ${names.length} entries; the limit is 200.`);
+        let total = 0;
+        const written: string[] = [];
+        for (const name of names) {
+          const safeName = name.replace(/\\/g, '/').replace(/^\/+/, '');
+          if (!safeName || safeName.includes('..')) continue;
+          total += extracted[name].length;
+          if (total > 40 * 1024 * 1024) return errorResult('The archive would exceed the 40 MB limit when extracted.');
+          const target = outputDir ? `${outputDir}/${safeName}` : safeName;
+          await writeWorkspaceFile(deps, target, { bytes: extracted[name] });
+          written.push(target);
+        }
+        return textResult(
+          `Extracted ${written.length} file(s) from '${path}'${outputDir ? ` into '${outputDir}/'` : ''}.`,
+          { path, outputDir: outputDir || undefined, files: written.length, extracted: written.slice(0, 50) },
+        );
+      } catch (error) {
+        return errorResult(`Unzip failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'sql_query',
+    description:
+      "Runs ONE SQL statement on the agent's private SQLite database (name: agent_tools) and returns up to 50 rows as JSON. " +
+      'Use ? placeholders and params for values. CREATE TABLE / INSERT / UPDATE / DELETE work too; the schema persists across sessions.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sql: { type: 'string', description: 'A single SQL statement (multiple statements separated by ; are rejected).' },
+        params: { type: 'array', description: 'Values for the ? placeholders, in order.' },
+      },
+      required: ['sql'],
+    },
+    feature: 'sqlite',
+    rateLimit: SQL_LIMIT,
+    run: async (args, deps) => {
+      const sql = requiredString(args, 'sql', 8000);
+      if (!sql) return errorResult("'sql' is required.");
+      const trimmed = sql.trim().replace(/;\s*$/, '');
+      if (!trimmed) return errorResult("'sql' is empty.");
+      if (trimmed.includes(';')) return errorResult('Only a single statement is allowed; remove the inner semicolon.');
+      const rawParams = args.params;
+      if (rawParams !== undefined && !Array.isArray(rawParams)) return errorResult("'params' must be an array of values.");
+      const params = (rawParams as unknown[] | undefined)?.map((value) => (typeof value === 'bigint' ? Number(value) : value)) ?? [];
+      const firstWord = trimmed.slice(0, 10).toLowerCase();
+      const isRead = firstWord.startsWith('select') || firstWord.startsWith('with') || firstWord.startsWith('pragma') || firstWord.startsWith('explain');
+      try {
+        if (isRead) {
+          const result = await deps.sqlite.query('agent_tools', trimmed, params);
+          const rows = Array.isArray(result?.values) ? result.values : [];
+          const limited = rows.slice(0, 50);
+          const preview = JSON.stringify(limited, null, 1).slice(0, 8000);
+          return textResult(
+            rows.length > limited.length
+              ? `Query returned ${rows.length} rows; showing the first ${limited.length}.\n${preview}`
+              : `Query returned ${rows.length} row(s).\n${preview}`,
+            { rows: rows.length, results: limited },
+          );
+        }
+        const result = await deps.sqlite.run('agent_tools', trimmed, params);
+        const changes = (result as { changes?: unknown } | null)?.changes;
+        return textResult(
+          `Statement executed.${typeof changes === 'number' ? ` Rows affected: ${changes}.` : ''}`,
+          { ...(typeof changes === 'number' ? { changes } : {}) },
+        );
+      } catch (error) {
+        return errorResult(`SQL failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'nearby_status',
+    description: 'Reports the Nearby Connections status: advertising/discovery state and the permissions needed for peer-to-peer.',
+    inputSchema: { type: 'object', properties: {} },
+    feature: 'nearby',
+    run: async (_args, deps) => {
+      try {
+        const status = await deps.nearby.status();
+        return textResult(`Nearby status: ${JSON.stringify(status)}`, { status });
+      } catch (error) {
+        return errorResult(`Status failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'nearby_advertise',
+    description:
+      'Starts advertising this phone over Nearby Connections (Bluetooth/Wi-Fi direct) so a nearby device running the same agent can discover and connect. ' +
+      'The other device runs nearby_discover, then nearby_connect; this side accepts with nearby_accept.',
+    inputSchema: {
+      type: 'object',
+      properties: { title: { type: 'string', description: 'Endpoint name the other device sees (default: a generic agent name).' } },
+    },
+    feature: 'nearby',
+    rateLimit: NEARBY_LIMIT,
+    run: async (args, deps) => {
+      const title = optionalString(args, 'title', 60);
+      try {
+        await deps.nearby.initialize();
+        await deps.nearby.requestPermissions().catch(() => null);
+        await deps.nearby.startAdvertising({ ...(title ? { endpointName: title } : {}) });
+        return textResult('Advertising started. The other device can now discover this phone with nearby_discover.', { advertising: true });
+      } catch (error) {
+        return errorResult(`Advertising failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'nearby_discover',
+    description: 'Scans for nearby devices that are advertising (Nearby Connections) for a few seconds and lists endpoint ids/names. Then use nearby_connect.',
+    inputSchema: {
+      type: 'object',
+      properties: { durationSeconds: { type: 'number', description: 'How long to scan, 2–20 s (default 8).' } },
+    },
+    feature: 'nearby',
+    rateLimit: NEARBY_LIMIT,
+    run: async (args, deps) => {
+      const durationMs = Math.round(clampNumber(optionalNumber(args, 'durationSeconds') ?? 8, 2, 20) * 1000);
+      try {
+        await deps.nearby.initialize();
+        await deps.nearby.requestPermissions().catch(() => null);
+        const found = new Map<string, { endpointId: string; endpointName?: string }>();
+        const lost = new Set<string>();
+        const handles: Array<{ remove?: () => void }> = [];
+        handles.push(await deps.nearby.addListener('onEndpointFound', (event) => {
+          const id = nearbyEndpointId(event);
+          if (!id) return;
+          const name = (event as Record<string, unknown> | null)?.endpointName;
+          found.set(id, { endpointId: id, ...(typeof name === 'string' && name ? { endpointName: name } : {}) });
+        }));
+        handles.push(await deps.nearby.addListener('onEndpointLost', (event) => {
+          const id = nearbyEndpointId(event);
+          if (id) lost.add(id);
+        }));
+        try {
+          await deps.nearby.startDiscovery();
+          await new Promise((resolve) => setTimeout(resolve, durationMs));
+        } finally {
+          await deps.nearby.stopDiscovery().catch(() => undefined);
+          for (const handle of handles) handle.remove?.();
+        }
+        const endpoints = [...found.values()].filter((endpoint) => !lost.has(endpoint.endpointId));
+        return textResult(
+          endpoints.length
+            ? `Found ${endpoints.length} endpoint(s): ${JSON.stringify(endpoints)}`
+            : 'No advertising endpoints were found nearby.',
+          { endpoints },
+        );
+      } catch (error) {
+        return errorResult(`Discovery failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'nearby_connect',
+    description: 'Requests a Nearby Connections connection to a discovered endpoint id. The other side must accept (its agent runs nearby_accept). Waits up to 15 s.',
+    inputSchema: {
+      type: 'object',
+      properties: { endpointId: { type: 'string', description: 'The endpointId returned by nearby_discover.' } },
+      required: ['endpointId'],
+    },
+    feature: 'nearby',
+    rateLimit: NEARBY_LIMIT,
+    run: async (args, deps) => {
+      const endpointId = requiredString(args, 'endpointId', 40);
+      if (!endpointId) return errorResult("'endpointId' is required.");
+      try {
+        await deps.nearby.initialize();
+        let connectedResolve!: () => void;
+        let failedResolve!: (reason: string) => void;
+        const connected = new Promise<void>((resolve) => { connectedResolve = resolve; });
+        const failed = new Promise<string>((resolve) => { failedResolve = resolve; });
+        const connectedHandle = await deps.nearby.addListener('onEndpointConnected', (event) => {
+          if (nearbyEndpointId(event) === endpointId) connectedResolve();
+        });
+        const failedHandle = await deps.nearby.addListener('onEndpointFailed', (event) => {
+          if (nearbyEndpointId(event) === endpointId) {
+            const record = event as Record<string, unknown> | null;
+            failedResolve(String(record?.status ?? record?.errorMessage ?? 'connection failed'));
+          }
+        });
+        const timeout = new Promise<null>((resolve) => setTimeout(resolve, 15000));
+        try {
+          await deps.nearby.requestConnection({ endpointID: endpointId });
+          const outcome = await Promise.race([connected.then(() => 'connected' as const), failed, timeout]);
+          if (outcome === 'connected') {
+            return textResult(`Connected to endpoint ${endpointId}. Exchange messages with nearby_send.`, { endpointId, connected: true });
+          }
+          if (outcome === null) return errorResult('Connection request timed out — the other side did not respond.', { endpointId, connected: false });
+          return errorResult(`Connection rejected or failed: ${outcome}`, { endpointId, connected: false });
+        } finally {
+          connectedHandle.remove?.();
+          failedHandle.remove?.();
+        }
+      } catch (error) {
+        return errorResult(`Connection request failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'nearby_accept',
+    description: 'Accepts an incoming Nearby Connections request from an endpoint (fires when the other device runs nearby_connect). Afterwards use nearby_send.',
+    inputSchema: {
+      type: 'object',
+      properties: { endpointId: { type: 'string', description: 'The endpointId that requested the connection.' } },
+      required: ['endpointId'],
+    },
+    feature: 'nearby',
+    rateLimit: NEARBY_LIMIT,
+    run: async (args, deps) => {
+      const endpointId = requiredString(args, 'endpointId', 40);
+      if (!endpointId) return errorResult("'endpointId' is required.");
+      try {
+        await deps.nearby.initialize();
+        await deps.nearby.acceptConnection({ endpointID: endpointId });
+        return textResult(`Accepted the connection from ${endpointId}.`, { endpointId, accepted: true });
+      } catch (error) {
+        return errorResult(`Accept failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'nearby_send',
+    description: 'Sends a short text message to a connected Nearby Connections endpoint (arrives as a payload event on the other agent).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        endpointId: { type: 'string', description: 'Connected endpoint id (omit to send to the single connected endpoint).' },
+        text: { type: 'string', description: 'Message text (max 4000 chars).' },
+      },
+      required: ['text'],
+    },
+    feature: 'nearby',
+    rateLimit: NEARBY_LIMIT,
+    run: async (args, deps) => {
+      const text = requiredString(args, 'text', 4000);
+      if (!text) return errorResult("'text' is required.");
+      const endpointId = optionalString(args, 'endpointId', 40);
+      try {
+        await deps.nearby.sendPayload({ ...(endpointId ? { endpointID: endpointId } : {}), payload: text });
+        return textResult(`Sent to ${endpointId ?? 'the connected endpoint'}.`, { endpointId: endpointId ?? undefined, chars: text.length });
+      } catch (error) {
+        return errorResult(`Send failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'stage_miniapp',
+    description:
+      'Builds a mini-app (HTML/CSS/JS bundle) from workspace files and launches it in the isolated app browser, full screen on the device. ' +
+      'files[] lists workspace-relative paths; the entry must be an HTML file among them. Up to 60 files / 5 MB.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Display name (1–60 chars).' },
+        files: { type: 'array', items: { type: 'string' }, description: 'Workspace-relative file paths (the HTML entry plus its css/js/assets).' },
+        entryFile: { type: 'string', description: 'Entry HTML file (default: the first path ending in index.html).' },
+        appId: { type: 'string', description: 'Optional stable app id (lowercase letters/digits/dots/dashes); default "agent.<name>".' },
+      },
+      required: ['name', 'files'],
+    },
+    feature: 'appBrowser',
+    rateLimit: MINIAPP_LIMIT,
+    run: async (args, deps) => {
+      const name = requiredString(args, 'name', 60);
+      if (!name) return errorResult("'name' is required.");
+      const rawFiles = Array.isArray(args.files) ? args.files : [];
+      const paths = [...new Set(rawFiles.map((file) => (typeof file === 'string' ? file.trim() : '')).filter(Boolean))].slice(0, 60);
+      if (!paths.length) return errorResult("'files' must list at least one workspace path.");
+      for (const path of paths) {
+        if (path.startsWith('/') || path.includes('..') || path.includes('\\')) return errorResult(`'${path}' must be workspace-relative without '..'.`);
+      }
+      const entry = optionalString(args, 'entryFile', 120) ?? paths.find((path) => path.toLowerCase().endsWith('index.html')) ?? 'index.html';
+      if (!paths.includes(entry)) return errorResult(`Entry file '${entry}' must be one of files[].`);
+      let appId = optionalString(args, 'appId', 120);
+      if (appId) {
+        if (!/^[a-z0-9][a-z0-9.-]{0,118}$/.test(appId)) return errorResult("'appId' may only use lowercase letters, digits, dots and dashes.");
+      } else {
+        const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+        appId = slug ? `agent.${slug}` : 'agent.app';
+      }
+      const pkgFiles: Array<{ path: string; data: string | Uint8Array; type?: string }> = [];
+      let total = 0;
+      for (const path of paths) {
+        const stat = await deps.filesystem.stat({ path: `agent/workspace/${path}`, directory: Directory.Data }).catch(() => undefined);
+        if (stat?.type === 'directory') return errorResult(`'${path}' is a directory; list individual files.`);
+        try {
+          const read = await readWorkspaceFile(deps, path);
+          if (read.bytes) {
+            total += read.bytes.length;
+            pkgFiles.push({ path, data: read.bytes });
+          } else {
+            if (!read.text) return errorResult(`'${path}' could not be read (missing or empty).`);
+            total += read.text.length;
+            pkgFiles.push({ path, data: read.text });
+          }
+        } catch (error) {
+          return errorResult(`Could not read '${path}': ${String((error as Error)?.message ?? error)}`);
+        }
+      }
+      if (total > 5 * 1024 * 1024) return errorResult(`The mini-app bundle is ${(total / 1024 / 1024).toFixed(1)} MB; the limit is 5 MB.`);
+      try {
+        const installResult = await deps.miniapp.install({
+          files: pkgFiles,
+          manifest: { id: appId, name, entry, version: '1.0.0', requestedCapabilities: [] },
+        });
+        const installedId = String((installResult as Record<string, unknown> | null)?.id ?? appId);
+        const host = typeof document !== 'undefined' && typeof document.createElement === 'function' ? document.createElement('div') : undefined;
+        await deps.miniapp.launch(installedId, host);
+        return textResult(
+          `Mini-app '${name}' installed and launched in the isolated app browser.`,
+          { appId: installedId, files: pkgFiles.length, entry },
+        );
+      } catch (error) {
+        return errorResult(`Mini-app staging failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'clipboard_write',
+    description: 'Copies text to the device clipboard.',
+    inputSchema: {
+      type: 'object',
+      properties: { text: { type: 'string', description: 'Text to copy (max 20000 chars).' } },
+      required: ['text'],
+    },
+    rateLimit: CLIPBOARD_LIMIT,
+    run: async (args, deps) => {
+      const text = requiredString(args, 'text', 20000);
+      if (!text) return errorResult("'text' is required.");
+      try {
+        await deps.clipboard.writeText(text);
+        return textResult('Copied to the clipboard.', { chars: text.length });
+      } catch (error) {
+        return errorResult(`Clipboard write failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'clipboard_read',
+    description: 'Reads the current clipboard text (the device may ask the user for permission). An empty clipboard returns an empty string.',
+    inputSchema: { type: 'object', properties: {} },
+    rateLimit: CLIPBOARD_LIMIT,
+    run: async (_args, deps) => {
+      try {
+        const text = await deps.clipboard.readText();
+        const value = typeof text === 'string' ? text : '';
+        return textResult(value ? `Clipboard contains: ${value.slice(0, 4000)}` : 'The clipboard is empty.', { text: value.slice(0, 20000) });
+      } catch (error) {
+        return errorResult(`Clipboard read failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
 ];
 
 // ── Transport ────────────────────────────────────────────────────────────────
@@ -1252,11 +2078,53 @@ export function defaultDeviceToolDeps(): DeviceToolDeps {
     transfer: FileTransfer as unknown as DeviceToolDeps['transfer'],
     appInfo: App as unknown as DeviceToolDeps['appInfo'],
     widget: Widget as unknown as DeviceToolDeps['widget'],
+    extras: NativeKitCustom as unknown as DeviceToolDeps['extras'],
     // The workspace listens for this DOM event and shows its own toast — the
     // bridge stays UI-agnostic.
     toast: (message) => {
       window.dispatchEvent(new CustomEvent('nativekit:agent-toast', { detail: { message } }));
     },
+    // Same decoupling for ask_user: the workspace renders a question card and
+    // answers through a paired DOM event.
+    askUser: (question, options, timeoutMs) =>
+      new Promise((resolve) => {
+        if (typeof window === 'undefined' || typeof CustomEvent === 'undefined') { resolve(null); return; }
+        const requestId = `ask-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        const onAnswer = (event: Event) => {
+          const detail = (event as CustomEvent).detail as { requestId?: string; answer?: { answer: string; index: number } | null } | undefined;
+          if (detail?.requestId !== requestId) return;
+          cleanup();
+          resolve(detail.answer ?? null);
+        };
+        const cleanup = () => {
+          clearTimeout(timer);
+          window.removeEventListener('nativekit:agent-ask-response', onAnswer);
+        };
+        const timer = setTimeout(() => {
+          cleanup();
+          resolve(null);
+        }, timeoutMs);
+        window.addEventListener('nativekit:agent-ask-response', onAnswer);
+        window.dispatchEvent(new CustomEvent('nativekit:agent-ask', { detail: { requestId, question, options } }));
+      }),
+    // Wired by the nativekit bridge at startup (the facades are assembled
+    // there); these placeholders keep the module standalone for tests.
+    sqlite: {
+      query: async () => { throw new Error('sql_query is not wired in this host'); },
+      run: async () => { throw new Error('sql_query is not wired in this host'); },
+    },
+    nearby: NearbyConnections as unknown as DeviceToolDeps['nearby'],
+    miniapp: {
+      install: async () => { throw new Error('stage_miniapp is not wired in this host'); },
+      launch: async () => { throw new Error('stage_miniapp is not wired in this host'); },
+    },
+    clipboard:
+      typeof navigator !== 'undefined' && navigator.clipboard
+        ? navigator.clipboard
+        : {
+            writeText: async () => { throw new Error('Clipboard is unavailable in this host'); },
+            readText: async () => { throw new Error('Clipboard is unavailable in this host'); },
+          },
     now: () => Date.now(),
   };
 }

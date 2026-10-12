@@ -1086,6 +1086,16 @@ const NativeKit: any = {
                 // Web search and file transfers must leave the WebView: swap
                 // the plain fetch default for the CapacitorHttp adapter.
                 ...defaultDeviceToolDeps(),
+                // sql_query and stage_miniapp reach the facades assembled on
+                // NativeKit below — referenced lazily so wiring order never matters.
+                sqlite: {
+                  query: (name: string, statement: string, values?: any[]) => NativeKit.sqlite.query(name, statement, values),
+                  run: (name: string, statement: string, values?: any[]) => NativeKit.sqlite.run(name, statement, values),
+                },
+                miniapp: {
+                  install: (pkg: Parameters<typeof NativeKit.appBrowser.install>[0]) => NativeKit.appBrowser.install(pkg),
+                  launch: (appId: string, target: HTMLElement) => NativeKit.appBrowser.launch(appId, target),
+                },
                 ...(isNative ? { fetchImpl: buildNativeFetch() } : {}),
               },
               {
@@ -1098,6 +1108,10 @@ const NativeKit: any = {
                   networkStatus: config.features.networkStatus !== false,
                   advancedAlarms: config.features.advancedAlarms !== false,
                   fileTransfer: config.features.fileTransfer !== false,
+                  filesystem: config.features.filesystem !== false,
+                  sqlite: config.features.sqlite !== false,
+                  nearby: config.features.nearby !== false,
+                  appBrowser: config.features.appBrowser !== false,
                   widget: config.features.widget !== false,
                 },
               },

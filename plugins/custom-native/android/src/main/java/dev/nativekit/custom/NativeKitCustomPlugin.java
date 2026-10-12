@@ -1,23 +1,51 @@
 package dev.nativekit.custom;
 
 import android.Manifest;
+import android.app.Activity;
 import android.app.AlarmManager;
 import android.app.NotificationManager;
+import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
+import android.hardware.camera2.CameraCharacteristics;
+import android.hardware.camera2.CameraManager;
 import android.net.Uri;
+import android.os.BatteryManager;
 import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.OpenableColumns;
 import android.provider.Settings;
+import android.speech.RecognitionListener;
+import android.speech.RecognizerIntent;
+import android.speech.SpeechRecognizer;
+import android.speech.tts.TextToSpeech;
+import androidx.activity.result.ActivityResult;
 import androidx.core.content.ContextCompat;
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
+import com.journeyapps.barcodescanner.IntentIntegrator;
+import com.journeyapps.barcodescanner.IntentResult;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.atomic.AtomicBoolean;
 import okhttp3.Call;
 import okhttp3.Callback;
 import okhttp3.Headers;
@@ -37,12 +65,20 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
-@CapacitorPlugin(name = "NativeKitCustom")
+@CapacitorPlugin(name = "NativeKitCustom", permissions = {
+    @Permission(strings = { Manifest.permission.RECORD_AUDIO }, alias = "recordAudio"),
+    @Permission(strings = { Manifest.permission.CAMERA }, alias = "camera")
+})
 public class NativeKitCustomPlugin extends Plugin {
     private final Map<String, Call> streams = new ConcurrentHashMap<>();
     private OkHttpClient http;
     private SecureStore secureStore;
     private BroadcastReceiver eventReceiver;
+    // Text-to-speech engine, initialised lazily; calls that arrive before the
+    // engine is ready are parked and replayed from the onInit callback.
+    private TextToSpeech tts;
+    private boolean ttsReady;
+    private final List<Object[]> pendingTts = new ArrayList<>();
 
     @Override public void load() {
         secureStore = new SecureStore(getContext());
@@ -356,6 +392,319 @@ public class NativeKitCustomPlugin extends Plugin {
             getActivity().startActivity(intent);
             call.resolve();
         } catch (Exception error) { call.reject("Unable to open app settings", error); }
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Phase 2: speech, scanning and device-hardware tools
+    // ───────────────────────────────────────────────────────────────────────
+
+    @PluginMethod
+    public void ttsSpeak(PluginCall call) {
+        final String text = required(call, "text");
+        if (text == null) return;
+        if (text.length() > 5000) { call.reject("text is limited to 5000 characters"); return; }
+        final String language = call.getString("language", "bn-BD");
+        final double pitch = call.getDouble("pitch", 1.0);
+        final double rate = call.getDouble("rate", 1.0);
+        whenTtsReady(call, () -> {
+            try {
+                int availability = tts.setLanguage(Locale.forLanguageTag(language));
+                tts.setPitch((float) pitch);
+                tts.setSpeechRate((float) rate);
+                int result = tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "nativekit-agent-" + System.currentTimeMillis());
+                if (result == TextToSpeech.ERROR) { call.reject("The text-to-speech engine refused to speak"); return; }
+                JSObject out = new JSObject();
+                out.put("queued", true);
+                out.put("languageSupported", availability != TextToSpeech.LANG_MISSING_DATA && availability != TextToSpeech.LANG_NOT_SUPPORTED);
+                call.resolve(out);
+            } catch (Exception error) { call.reject("Speech failed: " + error.getMessage(), error); }
+        });
+    }
+
+    /** Runs action once the TTS engine is ready; parks the call while the engine initialises. */
+    private void whenTtsReady(PluginCall call, Runnable action) {
+        if (ttsReady) { action.run(); return; }
+        synchronized (pendingTts) { pendingTts.add(new Object[] { call, action }); }
+        if (tts != null) return; // initialisation already in flight
+        tts = new TextToSpeech(getContext(), status -> {
+            ttsReady = status == TextToSpeech.SUCCESS;
+            if (!ttsReady) tts = null; // allow a later call to re-initialise the engine
+            List<Object[]> drained;
+            synchronized (pendingTts) { drained = new ArrayList<>(pendingTts); pendingTts.clear(); }
+            for (Object[] pair : drained) {
+                PluginCall pending = (PluginCall) pair[0];
+                if (pending == null) continue;
+                if (!ttsReady) { pending.reject("Text-to-speech engine failed to initialise"); continue; }
+                ((Runnable) pair[1]).run();
+            }
+        });
+    }
+
+    @PluginMethod
+    public void ttsStop(PluginCall call) {
+        try {
+            if (tts != null) tts.stop();
+            call.resolve();
+        } catch (Exception error) { call.reject("Speech could not be stopped", error); }
+    }
+
+    @PluginMethod
+    public void listenSpeech(PluginCall call) {
+        Activity activity = getActivity();
+        if (activity == null) { call.reject("No foreground activity is available"); return; }
+        if (!SpeechRecognizer.isRecognitionAvailable(getContext())) { call.reject("Speech recognition is not available on this device"); return; }
+        if (ContextCompat.checkSelfPermission(getContext(), Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissionForAlias("recordAudio", call, "listenAfterPermission");
+            return;
+        }
+        startListening(call);
+    }
+
+    @PermissionCallback
+    private void listenAfterPermission(PluginCall call) {
+        if (ContextCompat.checkSelfPermission(getContext(), Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            startListening(call);
+        } else {
+            call.reject("Microphone permission was denied");
+        }
+    }
+
+    private void startListening(PluginCall call) {
+        Activity activity = getActivity();
+        if (activity == null) { call.reject("No foreground activity is available"); return; }
+        final String language = call.getString("language", "bn-BD");
+        double requested = call.getDouble("timeoutMs", 12000.0);
+        final long timeoutMs = (long) Math.max(2000.0, Math.min(60000.0, requested));
+        activity.runOnUiThread(() -> {
+            try {
+                final SpeechRecognizer recognizer = SpeechRecognizer.createSpeechRecognizer(getContext());
+                final AtomicBoolean settled = new AtomicBoolean(false);
+                final Handler handler = new Handler(Looper.getMainLooper());
+                final Runnable timeout = () -> {
+                    if (settled.compareAndSet(false, true)) {
+                        recognizer.destroy();
+                        call.reject("No speech was recognised before the timeout");
+                    }
+                };
+                recognizer.setRecognitionListener(new RecognitionListener() {
+                    @Override
+                    public void onResults(Bundle results) {
+                        if (!settled.compareAndSet(false, true)) return;
+                        handler.removeCallbacks(timeout);
+                        recognizer.destroy();
+                        ArrayList<String> texts = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                        float[] scores = results.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES);
+                        JSObject out = new JSObject();
+                        out.put("text", texts != null && !texts.isEmpty() ? texts.get(0) : "");
+                        if (scores != null && scores.length > 0) out.put("confidence", (double) scores[0]);
+                        call.resolve(out);
+                    }
+
+                    @Override
+                    public void onError(int error) {
+                        if (!settled.compareAndSet(false, true)) return;
+                        recognizer.destroy();
+                        call.reject("Speech recognition error " + error);
+                    }
+
+                    @Override public void onReadyForSpeech(Bundle params) {}
+                    @Override public void onBeginningOfSpeech() {}
+                    @Override public void onRmsChanged(float rmsdB) {}
+                    @Override public void onBufferReceived(byte[] buffer) {}
+                    @Override public void onEndOfSpeech() {}
+                    @Override public void onPartialResults(Bundle partialResults) {}
+                    @Override public void onEvent(int eventType, Bundle params) {}
+                });
+                Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+                intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+                intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, language);
+                intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false);
+                recognizer.startListening(intent);
+                handler.postDelayed(timeout, timeoutMs);
+            } catch (Exception error) { call.reject("Speech recognition failed to start: " + error.getMessage(), error); }
+        });
+    }
+
+    @PluginMethod
+    public void scanQrCode(PluginCall call) {
+        Activity activity = getActivity();
+        if (activity == null) { call.reject("No foreground activity is available"); return; }
+        if (ContextCompat.checkSelfPermission(getContext(), Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissionForAlias("camera", call, "scanAfterPermission");
+            return;
+        }
+        launchScanner(call);
+    }
+
+    @PermissionCallback
+    private void scanAfterPermission(PluginCall call) {
+        if (ContextCompat.checkSelfPermission(getContext(), Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            launchScanner(call);
+        } else {
+            call.reject("Camera permission was denied");
+        }
+    }
+
+    private void launchScanner(PluginCall call) {
+        try {
+            Intent intent = new IntentIntegrator(getActivity())
+                .setDesiredBarcodeFormats(IntentIntegrator.QR_CODE)
+                .setBeepEnabled(true)
+                .setPrompt("")
+                .createScanIntent();
+            startActivityForResult(call, intent, "scanQrResult");
+        } catch (ActivityNotFoundException error) {
+            call.reject("No barcode scanner is available on this device", error);
+        } catch (Exception error) {
+            call.reject("Scanner failed to start: " + error.getMessage(), error);
+        }
+    }
+
+    @ActivityCallback
+    private void scanQrResult(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        if (result.getResultCode() != Activity.RESULT_OK) { call.reject("Scan was cancelled"); return; }
+        IntentResult scan = IntentIntegrator.parseActivityResult(result.getResultCode(), result.getData());
+        if (scan == null || scan.getContents() == null) { call.reject("Scan was cancelled"); return; }
+        JSObject out = new JSObject();
+        out.put("text", scan.getContents());
+        out.put("format", scan.getFormatName());
+        call.resolve(out);
+    }
+
+    @PluginMethod
+    public void dialPhone(PluginCall call) {
+        String number = required(call, "number");
+        if (number == null) return;
+        if (!number.replaceAll("[+\\d\\s().-]", "").isEmpty()) { call.reject("number may only contain digits, +, spaces and ( ) . -"); return; }
+        Activity activity = getActivity();
+        if (activity == null) { call.reject("No foreground activity is available"); return; }
+        try {
+            Intent intent = new Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + number.trim().replaceAll("\\s+", "")));
+            activity.startActivity(intent);
+            call.resolve();
+        } catch (Exception error) { call.reject("Dialer could not be opened", error); }
+    }
+
+    @PluginMethod
+    public void composeSms(PluginCall call) {
+        String number = required(call, "number");
+        if (number == null) return;
+        String body = call.getString("body", "");
+        Activity activity = getActivity();
+        if (activity == null) { call.reject("No foreground activity is available"); return; }
+        try {
+            Intent intent = new Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:" + number.trim().replaceAll("\\s+", "")));
+            if (body != null && !body.isEmpty()) intent.putExtra("sms_body", body);
+            activity.startActivity(intent);
+            call.resolve();
+        } catch (Exception error) { call.reject("SMS composer could not be opened", error); }
+    }
+
+    @PluginMethod
+    public void setTorch(PluginCall call) {
+        Boolean on = call.getBoolean("on");
+        if (on == null) { call.reject("on (boolean) is required"); return; }
+        try {
+            CameraManager cameras = (CameraManager) getContext().getSystemService(Context.CAMERA_SERVICE);
+            if (cameras == null) { call.reject("No camera service is available"); return; }
+            String chosen = null;
+            for (String id : cameras.getCameraIdList()) {
+                CameraCharacteristics characteristics = cameras.getCameraCharacteristics(id);
+                Integer facing = characteristics.get(CameraCharacteristics.LENS_FACING);
+                if (facing != null && facing == CameraCharacteristics.LENS_FACING_BACK
+                        && Boolean.TRUE.equals(characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE))) { chosen = id; break; }
+            }
+            if (chosen == null) { call.reject("No back camera with a flash unit was found"); return; }
+            cameras.setTorchMode(chosen, on);
+            call.resolve();
+        } catch (Exception error) { call.reject("Torch could not be toggled: " + error.getMessage(), error); }
+    }
+
+    @PluginMethod
+    public void batteryStatus(PluginCall call) {
+        try {
+            JSObject out = new JSObject();
+            Intent battery = getContext().registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+            if (battery != null) {
+                int level = battery.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+                int scale = battery.getIntExtra(BatteryManager.EXTRA_SCALE, -1);
+                if (level >= 0 && scale > 0) out.put("percent", level * 100 / scale);
+                int status = battery.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
+                out.put("charging", status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL);
+                int plugged = battery.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1);
+                out.put("plugged", plugged == BatteryManager.BATTERY_PLUGGED_AC || plugged == BatteryManager.BATTERY_PLUGGED_USB || plugged == BatteryManager.BATTERY_PLUGGED_WIRELESS);
+            }
+            BatteryManager manager = (BatteryManager) getContext().getSystemService(Context.BATTERY_SERVICE);
+            if (manager != null && !out.has("percent")) {
+                Integer capacity = manager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY);
+                if (capacity != null && capacity > 0 && capacity <= 100) out.put("percent", capacity.intValue());
+            }
+            call.resolve(out);
+        } catch (Exception error) { call.reject("Battery status could not be read", error); }
+    }
+
+    @PluginMethod
+    public void pickDocument(PluginCall call) {
+        Activity activity = getActivity();
+        if (activity == null) { call.reject("No foreground activity is available"); return; }
+        try {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("*/*");
+            startActivityForResult(call, intent, "pickDocumentResult");
+        } catch (Exception error) { call.reject("Document picker could not be opened", error); }
+    }
+
+    @ActivityCallback
+    private void pickDocumentResult(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null) { call.reject("No file was picked"); return; }
+        try {
+            Uri uri = result.getData().getData();
+            if (uri == null) { call.reject("No file was picked"); return; }
+            String name = "picked-" + Long.toHexString(System.currentTimeMillis());
+            Cursor cursor = null;
+            try {
+                cursor = getContext().getContentResolver().query(uri, null, null, null, null);
+                if (cursor != null && cursor.moveToFirst()) {
+                    int nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                    if (nameIndex >= 0) {
+                        String displayName = cursor.getString(nameIndex);
+                        if (displayName != null && !displayName.trim().isEmpty()) name = displayName.trim();
+                    }
+                }
+            } finally {
+                if (cursor != null) cursor.close();
+            }
+            String safe = name.replaceAll("[^A-Za-z0-9 ._()-]", "_");
+            if (safe.isEmpty()) safe = "picked.bin";
+            if (safe.length() > 120) {
+                int dot = safe.lastIndexOf('.');
+                String ext = dot > 0 ? safe.substring(dot) : "";
+                safe = safe.substring(0, Math.max(1, 110 - ext.length())) + ext;
+            }
+            File dir = new File(getContext().getFilesDir(), "agent/workspace/picked");
+            if (!dir.exists() && !dir.mkdirs()) { call.reject("Could not create the workspace picked directory"); return; }
+            File target = new File(dir, safe);
+            if (target.exists()) target = new File(dir, Long.toHexString(System.currentTimeMillis()) + "-" + safe);
+            try (InputStream in = getContext().getContentResolver().openInputStream(uri);
+                 OutputStream out = new FileOutputStream(target)) {
+                if (in == null) { call.reject("The picked file could not be opened"); return; }
+                byte[] buffer = new byte[16384];
+                long total = 0;
+                int read;
+                while ((read = in.read(buffer)) > 0) {
+                    out.write(buffer, 0, read);
+                    total += read;
+                    if (total > 26214400L) throw new java.io.IOException("picked file exceeds the 25 MB limit");
+                }
+            }
+            JSObject out2 = new JSObject();
+            out2.put("path", "picked/" + target.getName());
+            out2.put("bytes", target.length());
+            call.resolve(out2);
+        } catch (Exception error) { call.reject("The picked file could not be saved: " + error.getMessage(), error); }
     }
 
     private String required(PluginCall call, String key) {

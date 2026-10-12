@@ -156,3 +156,13 @@ describe('agent error classification', () => {
     for (const [code] of AGENT_ERROR_PATTERNS) expect(AGENT_ERROR_ADVICE).toHaveProperty(code);
   });
 });
+
+describe('agent ask-user card wiring', () => {
+  it('listens for the bridge ask event and answers on the paired response event', () => {
+    expect(source).toContain("window.addEventListener('nativekit:agent-ask',");
+    expect(source).toContain('nativekit:agent-ask-response');
+    expect(source).toContain('Agent জিজ্ঞেস করছে');
+    // Option buttons are capped to match the bridge tool schema (2–6 options).
+    expect(source).toContain('.slice(0, 6)');
+  });
+});

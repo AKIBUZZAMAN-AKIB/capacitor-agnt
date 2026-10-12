@@ -20,6 +20,15 @@ export interface NativeKitCustomPlugin extends Plugin {
   getBufferedLocations(): Promise<Record<string, any>>;
   clearBufferedLocations(): Promise<void>;
   openAppSettings(): Promise<void>;
+  ttsSpeak(options: { text: string; language?: string; pitch?: number; rate?: number }): Promise<{ queued?: boolean; languageSupported?: boolean }>;
+  ttsStop(): Promise<void>;
+  listenSpeech(options: { language?: string; timeoutMs?: number }): Promise<{ text: string; confidence?: number }>;
+  scanQrCode(): Promise<{ text: string; format?: string }>;
+  dialPhone(options: { number: string }): Promise<void>;
+  composeSms(options: { number: string; body?: string }): Promise<void>;
+  setTorch(options: { on: boolean }): Promise<void>;
+  batteryStatus(): Promise<{ percent?: number; charging?: boolean; plugged?: boolean }>;
+  pickDocument(): Promise<{ path: string; bytes?: number }>;
   addListener(eventName: 'nativeSSEData' | 'nativeSSEEnd' | 'nativeSSEError' | 'nativeLocation' | 'nativeAlarmFired', listenerFunc: (event: any) => void): Promise<PluginListenerHandle>;
 }
 

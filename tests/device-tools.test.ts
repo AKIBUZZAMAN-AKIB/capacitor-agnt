@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { unzipSync, zipSync } from 'fflate';
 
 import {
   createDeviceToolsTransport,
@@ -31,6 +32,9 @@ function fakeDeps(overrides: Partial<DeviceToolDeps> = {}, clockStart = 1_000_00
   let clock = clockStart;
   const fetchResponses: Array<{ ok: boolean; status: number; body: string }> = [];
   let overlayGranted = true;
+  const files = new Map<string, string>();
+  const nearbyHandlers: Record<string, (data: any) => void> = {};
+  const askUserScript: Array<(options: string[]) => { answer: string; index: number } | null> = [];
   const record = (method: string) => (args: any) => {
     calls.push({ method, args });
     return Promise.resolve(undefined as any);
@@ -86,7 +90,23 @@ function fakeDeps(overrides: Partial<DeviceToolDeps> = {}, clockStart = 1_000_00
     },
     filesystem: {
       mkdir: record('mkdir'),
-      writeFile: record('writeFile'),
+      writeFile: async (options: any) => {
+        calls.push({ method: 'writeFile', args: options });
+        // In-memory store keeps everything as base64 so text and binary paths
+        // round-trip through the same fake.
+        const data = options.encoding ? Buffer.from(String(options.data ?? ''), 'utf8').toString('base64') : String(options.data ?? '');
+        files.set(String(options.path ?? ''), data);
+      },
+      async readFile(options: any) {
+        calls.push({ method: 'readFile', args: options });
+        const data = files.get(String(options.path ?? ''));
+        if (data === undefined) throw new Error('File does not exist');
+        return { data: options.encoding ? Buffer.from(data, 'base64').toString('utf8') : data };
+      },
+      async readdir(options: any) {
+        calls.push({ method: 'readdir', args: options });
+        return { files: [] as any };
+      },
       async getUri(options: any) {
         calls.push({ method: 'getUri', args: options });
         return { uri: `file:///data/user/0/dev.nativekit.shell/files/${options.path}` };
@@ -95,6 +115,67 @@ function fakeDeps(overrides: Partial<DeviceToolDeps> = {}, clockStart = 1_000_00
         calls.push({ method: 'stat', args: options });
         return { type: 'file', size: 4096 };
       },
+    },
+    extras: {
+      ttsSpeak: async (options: any) => { calls.push({ method: 'ttsSpeak', args: options }); return { queued: true, languageSupported: true }; },
+      ttsStop: record('ttsStop'),
+      async listenSpeech(options: any) { calls.push({ method: 'listenSpeech', args: options }); return { text: 'ঢাকার আবহাওয়া ভালো', confidence: 0.82 }; },
+      async scanQrCode(_options?: any) { calls.push({ method: 'scanQrCode', args: _options }); return { text: 'https://example.com/qr', format: 'QR_CODE' }; },
+      dialPhone: record('dialPhone'),
+      composeSms: record('composeSms'),
+      setTorch: record('setTorch'),
+      async batteryStatus(_options?: any) { calls.push({ method: 'batteryStatus', args: _options }); return { percent: 73, charging: true, plugged: true }; },
+      async pickDocument(_options?: any) { calls.push({ method: 'pickDocument', args: _options }); return { path: 'picked/report.pdf', bytes: 20480 }; },
+    },
+    async askUser(question, options, _timeoutMs) {
+      calls.push({ method: 'askUser', args: { question, options } });
+      const scripted = askUserScript.shift();
+      return scripted ? scripted(options) : { answer: options[0], index: 0 };
+    },
+    sqlite: {
+      async query(name: string, statement: string, values?: any[]) {
+        calls.push({ method: 'sqlite.query', args: { name, statement, values } });
+        return { values: [{ id: 1, title: 'বাংলা' }, { id: 2, title: 'English' }] } as any;
+      },
+      async run(name: string, statement: string, values?: any[]) {
+        calls.push({ method: 'sqlite.run', args: { name, statement, values } });
+        return { changes: 3 } as any;
+      },
+    },
+    nearby: {
+      initialize: record('nearby.initialize'),
+      startAdvertising: record('nearby.startAdvertising'),
+      stopAdvertising: record('nearby.stopAdvertising'),
+      async startDiscovery(_options?: any) {
+        calls.push({ method: 'nearby.startDiscovery', args: _options });
+        setTimeout(() => {
+          nearbyHandlers.onEndpointFound?.({ endpointID: 'E1', endpointName: 'Pixel Agent' });
+          nearbyHandlers.onEndpointFound?.({ endpointID: 'E2', endpointName: 'S23 Agent' });
+          nearbyHandlers.onEndpointLost?.({ endpointID: 'E2' });
+        }, 10);
+      },
+      stopDiscovery: record('nearby.stopDiscovery'),
+      async requestConnection(options: any) {
+        calls.push({ method: 'nearby.requestConnection', args: options });
+        setTimeout(() => nearbyHandlers.onEndpointConnected?.({ endpointID: options.endpointID }), 10);
+      },
+      acceptConnection: record('nearby.acceptConnection'),
+      sendPayload: record('nearby.sendPayload'),
+      async status(_options?: any) { calls.push({ method: 'nearby.status', args: _options }); return { advertising: false, discovering: false } as any; },
+      requestPermissions: record('nearby.requestPermissions'),
+      async addListener(eventName: string, listenerFunc: (data: any) => void) {
+        calls.push({ method: 'nearby.addListener', args: { eventName } });
+        nearbyHandlers[eventName] = listenerFunc;
+        return { remove: () => { delete nearbyHandlers[eventName]; } };
+      },
+    },
+    miniapp: {
+      async install(pkg: any) { calls.push({ method: 'miniapp.install', args: pkg }); return { id: (pkg.manifest as any)?.id ?? 'agent.test' }; },
+      async launch(appId: string, _target: unknown) { calls.push({ method: 'miniapp.launch', args: { appId } }); return { launched: true }; },
+    },
+    clipboard: {
+      async writeText(text: string) { calls.push({ method: 'clipboard.writeText', args: { text } }); },
+      async readText() { calls.push({ method: 'clipboard.readText', args: {} }); return 'ক্লিপবোর্ডে রাখা টেক্সট'; },
     },
     openUrl: (url: string) => calls.push({ method: 'openUrl', args: { url } }),
     fetchImpl: async (url: string, init?: any) => {
@@ -137,6 +218,11 @@ function fakeDeps(overrides: Partial<DeviceToolDeps> = {}, clockStart = 1_000_00
   (deps as any).advanceClock = (ms: number) => { clock += ms; };
   (deps as any).queueFetch = (body: string, ok = true, status = 200) => { fetchResponses.push({ body, ok, status }); };
   (deps as any).setOverlay = (granted: boolean) => { overlayGranted = granted; };
+  (deps as any).putFile = (path: string, text: string) => { files.set(`agent/workspace/${path}`, Buffer.from(text, 'utf8').toString('base64')); };
+  (deps as any).putFileBase64 = (path: string, base64: string) => { files.set(`agent/workspace/${path}`, base64); };
+  (deps as any).readStoredFile = (storedPath: string) => files.get(storedPath);
+  (deps as any).scriptAskUser = (script: (options: string[]) => { answer: string; index: number } | null) => { askUserScript.push(script); };
+  (deps as any).nearbyFire = (event: string, data: any) => { nearbyHandlers[event]?.(data); };
   return { deps, calls };
 }
 
@@ -206,6 +292,11 @@ describe('device tools catalogue', () => {
       'network_status', 'schedule_alarm', 'list_alarms', 'cancel_alarm', 'open_url',
       'web_search', 'download_file', 'upload_file', 'toast', 'app_info', 'stop_ringing',
       'show_floating_ui', 'update_floating_ui', 'hide_floating_ui', 'set_widget', 'pin_widget',
+      'speak', 'stop_speaking', 'listen', 'scan_qr', 'dial_phone', 'compose_sms', 'torch',
+      'battery_status', 'pick_file',
+      'ask_user', 'zip_files', 'unzip_file', 'sql_query',
+      'nearby_status', 'nearby_advertise', 'nearby_discover', 'nearby_connect', 'nearby_accept', 'nearby_send',
+      'stage_miniapp', 'clipboard_write', 'clipboard_read',
     ]);
   });
 
@@ -223,8 +314,25 @@ describe('device tools catalogue', () => {
 
   it('hides tools whose feature flag is disabled', async () => {
     const { deps } = fakeDeps();
-    const tools = await clientFor(deps, { camera: false, advancedAlarms: false, widget: false, fileTransfer: false }).listTools();
+    const tools = await clientFor(deps, {
+      camera: false, advancedAlarms: false, widget: false, fileTransfer: false,
+      filesystem: false, sqlite: false, nearby: false, appBrowser: false,
+    }).listTools();
     const names = tools.map((tool) => tool.name);
+    expect(names).not.toContain('scan_qr');
+    expect(names).not.toContain('pick_file');
+    expect(names).not.toContain('zip_files');
+    expect(names).not.toContain('unzip_file');
+    expect(names).not.toContain('sql_query');
+    expect(names).not.toContain('nearby_status');
+    expect(names).not.toContain('nearby_advertise');
+    expect(names).not.toContain('nearby_discover');
+    expect(names).not.toContain('nearby_connect');
+    expect(names).not.toContain('nearby_accept');
+    expect(names).not.toContain('nearby_send');
+    expect(names).not.toContain('stage_miniapp');
+    expect(names).toContain('speak');
+    expect(names).toContain('ask_user');
     expect(names).not.toContain('take_photo');
     expect(names).not.toContain('schedule_alarm');
     expect(names).not.toContain('list_alarms');
@@ -703,6 +811,252 @@ describe('widgets', () => {
     const result = await callTool(deps, 'pin_widget', { kind: 'agent-dashboard' });
     expect(result.isError).toBeFalsy();
     expect(calls.find((entry) => entry.method === 'requestPin')?.args).toEqual({ kind: 'agent-dashboard' });
+  });
+});
+
+describe('phase 2: speech, scanner and hardware tools', () => {
+  it('speaks with clamped pitch and rate, and warns when the voice is missing', async () => {
+    const { deps, calls } = fakeDeps();
+    const ok = await callTool(deps, 'speak', { text: 'স্বাগতম', language: 'bn-BD', pitch: 5, rate: 0.1 });
+    expect(textOf(ok)).toBe('Speaking.');
+    expect(calls.find((c) => c.method === 'ttsSpeak')?.args).toMatchObject({ text: 'স্বাগতম', language: 'bn-BD', pitch: 2, rate: 0.5 });
+  });
+
+  it('reports a fallback voice when the language is not installed', async () => {
+    const { deps } = fakeDeps({ extras: {
+      ttsSpeak: async () => ({ queued: true, languageSupported: false }),
+      ttsStop: async () => {},
+      listenSpeech: async () => ({ text: '' }),
+      scanQrCode: async () => ({ text: '' }),
+      dialPhone: async () => {},
+      composeSms: async () => {},
+      setTorch: async () => {},
+      batteryStatus: async () => ({}),
+      pickDocument: async () => ({ path: 'picked/x' }),
+    } });
+    const result = await callTool(deps, 'speak', { text: 'hello' });
+    expect(textOf(result)).toContain('no bn-BD voice');
+  });
+
+  it('stops speaking and listens with a clamped timeout', async () => {
+    const { deps, calls } = fakeDeps();
+    await callTool(deps, 'stop_speaking', {});
+    const heard = await callTool(deps, 'listen', { timeoutMs: 999999 });
+    expect(textOf(heard)).toContain('ঢাকার আবহাওয়া ভালো');
+    const listenCall = calls.find((c) => c.method === 'listenSpeech');
+    expect(listenCall?.args.timeoutMs).toBe(25000);
+    expect(calls.some((c) => c.method === 'ttsStop')).toBe(true);
+  });
+
+  it('scans a qr code and reports the format', async () => {
+    const { deps } = fakeDeps();
+    const result = await callTool(deps, 'scan_qr', {});
+    expect(textOf(result)).toContain('https://example.com/qr');
+    expect(result.structuredContent).toMatchObject({ text: 'https://example.com/qr', format: 'QR_CODE' });
+  });
+
+  it('opens the dialer and rejects malformed numbers', async () => {
+    const { deps, calls } = fakeDeps();
+    const ok = await callTool(deps, 'dial_phone', { number: '+880 1712-000000' });
+    expect(textOf(ok)).toContain('Dialer opened');
+    expect(calls.find((c) => c.method === 'dialPhone')?.args).toMatchObject({ number: '+880 1712-000000' });
+    const bad = await callTool(deps, 'dial_phone', { number: '880;drop table' });
+    expect(bad.isError).toBe(true);
+    expect(textOf(bad)).toContain('may only contain digits');
+  });
+
+  it('composes an sms with a body', async () => {
+    const { deps, calls } = fakeDeps();
+    const result = await callTool(deps, 'compose_sms', { number: '+8801712000000', body: 'হ্যালো' });
+    expect(textOf(result)).toContain('SMS composer opened');
+    expect(calls.find((c) => c.method === 'composeSms')?.args).toMatchObject({ number: '+8801712000000', body: 'হ্যালো' });
+  });
+
+  it('toggles the torch and reports the battery', async () => {
+    const { deps, calls } = fakeDeps();
+    const torch = await callTool(deps, 'torch', { on: true });
+    expect(textOf(torch)).toBe('Torch on.');
+    expect(calls.find((c) => c.method === 'setTorch')?.args).toMatchObject({ on: true });
+    const battery = await callTool(deps, 'battery_status', {});
+    expect(textOf(battery)).toContain('73%');
+    expect(textOf(battery)).toContain('charging');
+    const missing = await callTool(deps, 'torch', {});
+    expect(missing.isError).toBe(true);
+  });
+
+  it('picks a document into the workspace picked directory', async () => {
+    const { deps } = fakeDeps();
+    const result = await callTool(deps, 'pick_file', {});
+    expect(textOf(result)).toContain("picked/report.pdf");
+    expect(result.structuredContent).toMatchObject({ path: 'picked/report.pdf', bytes: 20480 });
+  });
+});
+
+describe('ask_user', () => {
+  it('returns the chosen option', async () => {
+    const { deps, calls } = fakeDeps();
+    const result = await callTool(deps, 'ask_user', { question: 'কোন ভাষায় উত্তর দেব?', options: ['বাংলা', 'English'] });
+    expect(textOf(result)).toContain('বাংলা');
+    expect(result.structuredContent).toMatchObject({ answered: true, answer: 'বাংলা', index: 0 });
+    expect(calls.find((c) => c.method === 'askUser')?.args.options).toEqual(['বাংলা', 'English']);
+  });
+
+  it('reports when the user does not answer', async () => {
+    const { deps } = fakeDeps();
+    (deps as any).scriptAskUser(() => null);
+    const result = await callTool(deps, 'ask_user', { question: 'আছো?', options: ['হ্যাঁ', 'না'] });
+    expect(textOf(result)).toContain('did not answer');
+    expect(result.structuredContent).toMatchObject({ answered: false });
+  });
+
+  it('needs at least two options', async () => {
+    const { deps } = fakeDeps();
+    const result = await callTool(deps, 'ask_user', { question: 'q', options: ['একটাই'] });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('2–6');
+  });
+});
+
+describe('zip_files and unzip_file', () => {
+  it('zips workspace files and round-trips the content', async () => {
+    const { deps } = fakeDeps();
+    (deps as any).putFile('notes/a.txt', 'প্রথম লাইন');
+    (deps as any).putFile('notes/b.txt', 'second line');
+    const zipped = await callTool(deps, 'zip_files', { paths: ['notes/a.txt', 'notes/b.txt'], output: 'bundle.zip' });
+    expect(textOf(zipped)).toContain('Zipped 2 file(s)');
+    const stored = (deps as any).readStoredFile('agent/workspace/bundle.zip') as string;
+    const entries = unzipSync(new Uint8Array(Buffer.from(stored, 'base64')));
+    expect(Buffer.from(entries['notes/a.txt']).toString('utf8')).toBe('প্রথম লাইন');
+    expect(Buffer.from(entries['notes/b.txt']).toString('utf8')).toBe('second line');
+  });
+
+  it('unzips an archive into a directory and skips traversal entries', async () => {
+    const { deps } = fakeDeps();
+    const archive = zipSync({
+      'index.html': new TextEncoder().encode('<h1>hi</h1>'),
+      'style.css': new TextEncoder().encode('body{color:#123}'),
+      '../evil.txt': new TextEncoder().encode('nope'),
+    });
+    (deps as any).putFileBase64('app.zip', Buffer.from(archive).toString('base64'));
+    const result = await callTool(deps, 'unzip_file', { path: 'app.zip', outputDir: 'site' });
+    expect(textOf(result)).toContain('Extracted 2 file(s)');
+    const html = (deps as any).readStoredFile('agent/workspace/site/index.html') as string;
+    expect(Buffer.from(html, 'base64').toString('utf8')).toBe('<h1>hi</h1>');
+    expect((deps as any).readStoredFile('agent/workspace/evil.txt')).toBeUndefined();
+  });
+
+  it('validates paths and outputs', async () => {
+    const { deps } = fakeDeps();
+    const traversal = await callTool(deps, 'zip_files', { paths: ['../escape.txt'], output: 'x.zip' });
+    expect(traversal.isError).toBe(true);
+    (deps as any).putFile('doc.txt', 'x');
+    const notZip = await callTool(deps, 'zip_files', { paths: ['doc.txt'], output: 'archive.tar' });
+    expect(notZip.isError).toBe(true);
+    const missing = await callTool(deps, 'unzip_file', { path: 'ghost.zip' });
+    expect(missing.isError).toBe(true);
+  });
+});
+
+describe('sql_query', () => {
+  it('routes reads to query and writes to run on the agent database', async () => {
+    const { deps, calls } = fakeDeps();
+    const read = await callTool(deps, 'sql_query', { sql: 'SELECT * FROM notes WHERE title LIKE ?', params: ['%বাংলা%'] });
+    expect(textOf(read)).toContain('2 row(s)');
+    expect(calls.find((c) => c.method === 'sqlite.query')?.args).toMatchObject({ name: 'agent_tools', values: ['%বাংলা%'] });
+    const write = await callTool(deps, 'sql_query', { sql: "INSERT INTO notes (title) VALUES (?)", params: ['নতুন'] });
+    expect(textOf(write)).toContain('Rows affected: 3');
+    expect(calls.find((c) => c.method === 'sqlite.run')?.args).toMatchObject({ name: 'agent_tools' });
+  });
+
+  it('rejects multi-statement sql and non-array params', async () => {
+    const { deps } = fakeDeps();
+    const multi = await callTool(deps, 'sql_query', { sql: 'DROP TABLE x; DROP TABLE y' });
+    expect(multi.isError).toBe(true);
+    expect(textOf(multi)).toContain('single statement');
+    const badParams = await callTool(deps, 'sql_query', { sql: 'SELECT 1', params: 'nope' });
+    expect(badParams.isError).toBe(true);
+  });
+});
+
+describe('nearby tools', () => {
+  it('advertises after permissions', async () => {
+    const { deps, calls } = fakeDeps();
+    const result = await callTool(deps, 'nearby_advertise', { title: 'আমার ফোন' });
+    expect(textOf(result)).toContain('Advertising started');
+    expect(calls.find((c) => c.method === 'nearby.startAdvertising')?.args).toMatchObject({ endpointName: 'আমার ফোন' });
+  });
+
+  it('discovers endpoints, drops lost ones and stops scanning', async () => {
+    vi.useFakeTimers();
+    try {
+      const { deps, calls } = fakeDeps();
+      const pending = callTool(deps, 'nearby_discover', { durationSeconds: 2 });
+      await vi.advanceTimersByTimeAsync(2200);
+      const result = await pending;
+      expect(textOf(result)).toContain('Found 1 endpoint(s)');
+      expect(result.structuredContent).toMatchObject({ endpoints: [{ endpointId: 'E1', endpointName: 'Pixel Agent' }] });
+      expect(calls.some((c) => c.method === 'nearby.stopDiscovery')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('connects when the endpoint accepts', async () => {
+    const { deps, calls } = fakeDeps();
+    const result = await callTool(deps, 'nearby_connect', { endpointId: 'E1' });
+    expect(textOf(result)).toContain('Connected to endpoint E1');
+    expect(calls.find((c) => c.method === 'nearby.requestConnection')?.args).toMatchObject({ endpointID: 'E1' });
+  });
+
+  it('accepts and sends messages', async () => {
+    const { deps, calls } = fakeDeps();
+    const accept = await callTool(deps, 'nearby_accept', { endpointId: 'E1' });
+    expect(textOf(accept)).toContain('Accepted');
+    const send = await callTool(deps, 'nearby_send', { endpointId: 'E1', text: 'হ্যালো প্রতিবেশী' });
+    expect(textOf(send)).toContain('Sent to E1');
+    expect(calls.find((c) => c.method === 'nearby.sendPayload')?.args).toMatchObject({ endpointID: 'E1', payload: 'হ্যালো প্রতিবেশী' });
+  });
+
+  it('reports nearby status', async () => {
+    const { deps } = fakeDeps();
+    const result = await callTool(deps, 'nearby_status', {});
+    expect(textOf(result)).toContain('advertising');
+  });
+});
+
+describe('stage_miniapp', () => {
+  it('installs workspace files as a mini-app and launches it', async () => {
+    const { deps, calls } = fakeDeps();
+    (deps as any).putFile('mini/index.html', '<h1>অ্যাপ</h1>');
+    (deps as any).putFile('mini/app.js', 'console.log(1)');
+    const result = await callTool(deps, 'stage_miniapp', { name: 'Test Mini App', files: ['mini/index.html', 'mini/app.js'] });
+    expect(textOf(result)).toContain("Mini-app 'Test Mini App' installed and launched");
+    const install = calls.find((c) => c.method === 'miniapp.install');
+    expect(install?.args.manifest).toMatchObject({ id: 'agent.test-mini-app', name: 'Test Mini App', entry: 'mini/index.html' });
+    expect(install?.args.files).toHaveLength(2);
+    expect(calls.find((c) => c.method === 'miniapp.launch')?.args).toMatchObject({ appId: 'agent.test-mini-app' });
+  });
+
+  it('validates the entry file and rejects path traversal', async () => {
+    const { deps } = fakeDeps();
+    (deps as any).putFile('mini/other.html', '<p>x</p>');
+    const entry = await callTool(deps, 'stage_miniapp', { name: 'X', files: ['mini/other.html'], entryFile: 'nope.html' });
+    expect(entry.isError).toBe(true);
+    const traversal = await callTool(deps, 'stage_miniapp', { name: 'X', files: ['../etc/passwd'] });
+    expect(traversal.isError).toBe(true);
+    const badId = await callTool(deps, 'stage_miniapp', { name: 'X', files: ['mini/other.html'], appId: 'Bad Id!' });
+    expect(badId.isError).toBe(true);
+  });
+});
+
+describe('clipboard', () => {
+  it('writes and reads the clipboard', async () => {
+    const { deps, calls } = fakeDeps();
+    const write = await callTool(deps, 'clipboard_write', { text: 'কপি করা টেক্সট' });
+    expect(textOf(write)).toBe('Copied to the clipboard.');
+    const read = await callTool(deps, 'clipboard_read', {});
+    expect(textOf(read)).toContain('ক্লিপবোর্ডে রাখা টেক্সট');
+    expect(calls.find((c) => c.method === 'clipboard.writeText')?.args).toMatchObject({ text: 'কপি করা টেক্সট' });
   });
 });
 
