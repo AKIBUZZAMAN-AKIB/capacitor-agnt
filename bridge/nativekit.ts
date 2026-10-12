@@ -19,6 +19,12 @@ import { NativeAgent } from 'capacitor-native-agent';
 import { InAppBrowser } from '@capgo/capacitor-inappbrowser';
 import { createAppBrowser } from './app-browser';
 import { connectMcpServers, type McpConnection, type McpServerConfig, type McpToolDefinition } from './mcp-client';
+import {
+  createDeviceToolsTransport,
+  defaultDeviceToolDeps,
+  deviceServerConfig,
+  DEVICE_SERVER_NAME,
+} from './device-tools';
 
 interface NativeKitBuildConfig {
   app: { name: string; id: string; versionName: string; versionCode: number; buildNumber: string };
@@ -1021,7 +1027,7 @@ const NativeKit: any = {
     //   ]);
     //   // ... later
     //   await mcp.dispose();
-    connectMcp: async (servers: McpServerConfig[]): Promise<McpConnection> => {
+    connectMcp: async (servers: McpServerConfig[], options: { withDeviceTools?: boolean } = {}): Promise<McpConnection> => {
       feature('agent'); requireNative();
       // Remote MCP providers (Composio, Zapier, any hosted endpoint) are built
       // for server and desktop clients, so they generally do NOT send
@@ -1059,6 +1065,27 @@ const NativeKit: any = {
         };
       }) as unknown as typeof fetch;
 
+      // The built-in device tools are injected as an in-process MCP "server"
+      // through the same makeTransport seam unit tests use. A user-named
+      // 'device' server always wins over the built-in one, and the injection
+      // never weakens HTTPS validation for the remote configs (mcp-client
+      // waives URL checks per config, only where a transport was injected).
+      const deviceTransport =
+        options.withDeviceTools && !servers.some((server) => server.name === DEVICE_SERVER_NAME)
+          ? createDeviceToolsTransport(defaultDeviceToolDeps(), {
+              features: {
+                camera: config.features.camera !== false,
+                location: config.features.location !== false,
+                localNotifications: config.features.localNotifications !== false,
+                haptics: config.features.haptics !== false,
+                sharing: config.features.sharing !== false,
+                networkStatus: config.features.networkStatus !== false,
+                advancedAlarms: config.features.advancedAlarms !== false,
+              },
+            })
+          : null;
+      const allServers = deviceTransport ? [deviceServerConfig(), ...servers] : servers;
+
       return connectMcpServers(
         {
           startMcp: (toolsJson: string) => NativeAgent.startMcp({ toolsJson }),
@@ -1067,8 +1094,13 @@ const NativeKit: any = {
           addListener: (event: string, handler: (payload: any) => void) =>
             (NativeAgent as any).addListener(event, handler),
         },
-        servers,
-        { fetchImpl: isNative ? nativeFetch : undefined },
+        allServers,
+        {
+          fetchImpl: isNative ? nativeFetch : undefined,
+          ...(deviceTransport
+            ? { makeTransport: (serverConfig: McpServerConfig) => (serverConfig.name === DEVICE_SERVER_NAME ? deviceTransport : undefined) }
+            : {}),
+        },
       );
     },
     startMcp: async (tools: string | AgentMcpToolDefinition[]) => { feature('agent'); requireNative(); return NativeAgent.startMcp({ toolsJson: serializeAgentJson(tools, 'startMcp') }); },

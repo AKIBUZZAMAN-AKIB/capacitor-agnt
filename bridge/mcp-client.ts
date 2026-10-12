@@ -79,7 +79,7 @@ export interface McpCallToolResult {
   _meta?: Record<string, unknown>;
 }
 
-interface JsonRpcResponse {
+export interface JsonRpcResponse {
   jsonrpc: '2.0';
   id: number | string;
   result?: unknown;
@@ -442,7 +442,7 @@ export async function connectMcpServers(
   servers: McpServerConfig[],
   options: {
     fetchImpl?: typeof fetch;
-    makeTransport?: (config: McpServerConfig) => McpTransport;
+    makeTransport?: (config: McpServerConfig) => McpTransport | undefined;
     onLog?: (message: string) => void;
   } = {},
 ): Promise<McpConnection> {
@@ -454,14 +454,18 @@ export async function connectMcpServers(
 
   for (const config of servers) {
     try {
+      // An injected transport has no network boundary, so HTTPS checks are
+      // waived for that config only; every config that falls back to
+      // HttpMcpTransport keeps the full credential-free HTTPS validation.
+      const injectedTransport = options.makeTransport?.(config);
       const transport =
-        options.makeTransport?.(config) ??
+        injectedTransport ??
         new HttpMcpTransport(config.url, {
           headers: config.headers,
           fetchImpl: options.fetchImpl,
           timeoutMs: config.timeoutMs,
         });
-      validateServerConfig(config, Boolean(options.makeTransport));
+      validateServerConfig(config, injectedTransport !== undefined);
       const requestedProtocol = config.protocolVersion ?? 'auto';
       const client = new McpClient(
         config.name,
