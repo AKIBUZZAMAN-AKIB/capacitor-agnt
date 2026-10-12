@@ -21,8 +21,8 @@ android {
         applicationId "dev.nativekit.shell"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 30
-        versionName "1.4.16-device-tools"
+        versionCode 31
+        versionName "1.4.17-agent-web-tools"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         // NativeKit ships prebuilt natives for exactly these four ABIs (agent engine,
         // widget, JNA). Restricting them keeps unreachable folders out of the APK —
