@@ -47,6 +47,9 @@ import { LocalNotifications } from '@capacitor/local-notifications';
 import { Share } from '@capacitor/share';
 import { Network } from '@capacitor/network';
 import { Directory, Filesystem } from '@capacitor/filesystem';
+import { FileTransfer } from '@capacitor/file-transfer';
+import { App } from '@capacitor/app';
+import { Widget } from '@nativekit/widget';
 import { NativeKitCustom } from '@nativekit/custom-native';
 import type {
   JsonRpcResponse,
@@ -68,7 +71,9 @@ export type DeviceToolFeature =
   | 'haptics'
   | 'sharing'
   | 'networkStatus'
-  | 'advancedAlarms';
+  | 'advancedAlarms'
+  | 'fileTransfer'
+  | 'widget';
 
 /**
  * The native capabilities this bridge needs, as bare structural types. The
@@ -96,13 +101,47 @@ export interface DeviceToolDeps {
     scheduleAlarm(options: any): Promise<unknown>;
     listAlarms(): Promise<{ alarms: unknown }>;
     cancelAlarm(options: { id: string }): Promise<void>;
+    stopRinging(options?: { id?: string }): Promise<void>;
   };
   filesystem: {
     mkdir(options: any): Promise<void>;
     writeFile(options: any): Promise<void>;
+    getUri(options: any): Promise<{ uri: string }>;
+    stat(options: any): Promise<{ size?: number; type?: string }>;
   };
   /** Opens a URL outside the WebView. Defaults to `window.open`. */
   openUrl: (url: string) => void;
+  /**
+   * Minimal fetch slice for web search. On native, the bridge swaps in a
+   * CapacitorHttp-backed adapter (no WebView CORS rules); in tests it is a
+   * scripted fake.
+   */
+  fetchImpl: (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) => Promise<{
+    ok: boolean;
+    status: number;
+    text(): Promise<string>;
+  }>;
+  /** FileTransfer plugin (download/upload). */
+  transfer: {
+    downloadFile(options: any): Promise<unknown>;
+    uploadFile(options: any): Promise<{ statusCode?: number } | unknown>;
+  };
+  /** App metadata. */
+  appInfo: { getInfo(): Promise<{ name?: string; id?: string; version?: string; build?: string }> };
+  /** Widget + floating overlay plugin. */
+  widget: {
+    checkOverlayPermission(): Promise<{ granted: boolean }>;
+    requestOverlayPermission(): Promise<void>;
+    showFloating(options?: any): Promise<{ shown?: boolean; error?: string }>;
+    hideFloating(): Promise<void>;
+    updateFloating(options?: any): Promise<{ shown?: boolean; error?: string }>;
+    sendToFloating(options: { data: unknown }): Promise<{ delivered?: boolean }>;
+    setConfig(options: any): Promise<unknown>;
+    reload(options?: any): Promise<{ updated?: number }>;
+    requestPin(options: { kind: string }): Promise<{ requested?: boolean; hint?: string }>;
+  };
+  /** Shows an in-app toast for the agent (decoupled via a DOM event). */
+  toast: (message: string) => void;
   /** Millisecond clock, injectable so rate limits are testable. */
   now: () => number;
 }
@@ -224,6 +263,112 @@ class RateLimiter {
   }
 }
 
+// ── Web search helpers ───────────────────────────────────────────────────────
+
+/** Minimal HTML entity decoder (regex parsers run outside a DOM too). */
+function decodeEntities(value: string): string {
+  return value
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(Number(dec)))
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&');
+}
+
+function stripTags(value: string): string {
+  return decodeEntities(value.replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim();
+}
+
+export interface WebSearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+/** Parses Bing's no-JS results page (`li.b_algo` blocks). */
+export function parseBingResults(html: string, limit: number): WebSearchResult[] {
+  const results: WebSearchResult[] = [];
+  const blocks = html.match(/<li class="b_algo"[\s\S]*?<\/li>/g) ?? [];
+  for (const block of blocks) {
+    if (results.length >= limit) break;
+    const h2 = block.match(/<h2[^>]*>([\s\S]*?)<\/h2>/);
+    const h2Anchor = block.match(/<h2[^>]*>\s*<a[^>]*href="(https?:\/\/[^"]+)"/);
+    const headerAnchor = block.match(/<div class="b_algoheader">\s*<a[^>]*href="(https?:\/\/[^"]+)"/);
+    const anyAnchor = block.match(/<a[^>]*href="(https?:\/\/[^"]+)"/);
+    const url = h2Anchor?.[1] ?? headerAnchor?.[1] ?? anyAnchor?.[1];
+    if (!url || /(^|\.)bing\.com$/i.test(new URL(url).hostname)) continue;
+    const title = h2 ? stripTags(h2[1]) : url;
+    if (!title) continue;
+    const snippetMatch =
+      block.match(/<p[^>]*class="[^"]*b_lineclamp[^"]*"[^>]*>([\s\S]*?)<\/p>/) ??
+      block.match(/<div class="b_caption"[^>]*>[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/) ??
+      block.match(/<p[^>]*>([\s\S]*?)<\/p>/);
+    results.push({ title: title.slice(0, 200), url, snippet: (snippetMatch ? stripTags(snippetMatch[1]) : '').slice(0, 320) });
+  }
+  return results;
+}
+
+/** Parses DuckDuckGo's html endpoint results, decoding the `uddg` redirect. */
+export function parseDdgResults(html: string, limit: number): WebSearchResult[] {
+  const anchors = html.match(/<a[^>]*class="result__a"[^>]*>[\s\S]*?<\/a>/g) ?? [];
+  const snippets = html.match(/<a[^>]*class="result__snippet"[^>]*>[\s\S]*?<\/a>/g) ?? [];
+  const results: WebSearchResult[] = [];
+  for (let index = 0; index < anchors.length && results.length < limit; index += 1) {
+    const anchor = anchors[index];
+    const href = anchor.match(/href="([^"]+)"/)?.[1] ?? '';
+    const encoded = href.match(/[?&]uddg=([^&"]+)/)?.[1];
+    let url = '';
+    if (encoded) {
+      try { url = decodeURIComponent(encoded); } catch { url = ''; }
+    } else if (href.startsWith('https://')) {
+      url = href;
+    }
+    if (!url) continue;
+    const title = stripTags(anchor);
+    if (!title) continue;
+    results.push({
+      title: title.slice(0, 200),
+      url,
+      snippet: (snippets[index] ? stripTags(snippets[index]) : '').slice(0, 320),
+    });
+  }
+  return results;
+}
+
+/** Flattens the keyless DuckDuckGo Instant Answer JSON into results. */
+export function parseInstantAnswer(payload: unknown): { abstract: string; abstractUrl: string; results: WebSearchResult[] } {
+  const data = asRecord(payload);
+  const abstractText = typeof data.AbstractText === 'string' ? data.AbstractText : '';
+  const abstractUrl = typeof data.AbstractURL === 'string' ? data.AbstractURL : '';
+  const results: WebSearchResult[] = [];
+  if (abstractText && abstractUrl) {
+    results.push({ title: typeof data.Heading === 'string' && data.Heading ? data.Heading : abstractUrl, url: abstractUrl, snippet: abstractText.slice(0, 400) });
+  }
+  const topics = Array.isArray(data.RelatedTopics) ? data.RelatedTopics : [];
+  for (const topic of topics.slice(0, 8)) {
+    const record = asRecord(topic);
+    const text = typeof record.Text === 'string' ? record.Text : '';
+    const firstUrl = typeof record.FirstURL === 'string' ? record.FirstURL : '';
+    if (text && firstUrl) {
+      results.push({ title: text.split(' - ')[0].slice(0, 160), url: firstUrl, snippet: text.slice(0, 320) });
+    } else if (Array.isArray(record.Topics)) {
+      for (const nested of record.Topics.slice(0, 3)) {
+        const inner = asRecord(nested);
+        if (typeof inner.Text === 'string' && typeof inner.FirstURL === 'string') {
+          results.push({ title: inner.Text.split(' - ')[0].slice(0, 160), url: inner.FirstURL, snippet: inner.Text.slice(0, 320) });
+        }
+      }
+    }
+  }
+  return { abstract: abstractText, abstractUrl, results };
+}
+
+const SEARCH_USER_AGENT = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Mobile Safari/537.36';
+
 // ── Tool implementations ─────────────────────────────────────────────────────
 
 const NOTIFY_LIMIT = { max: 4, windowMs: 60_000 };
@@ -231,6 +376,13 @@ const VIBRATE_LIMIT = { max: 3, windowMs: 60_000 };
 const SHARE_LIMIT = { max: 4, windowMs: 60_000 };
 const OPEN_URL_LIMIT = { max: 6, windowMs: 60_000 };
 const ALARM_LIMIT = { max: 6, windowMs: 60_000 };
+const SEARCH_LIMIT = { max: 6, windowMs: 60_000 };
+const DOWNLOAD_LIMIT = { max: 4, windowMs: 60_000 };
+const UPLOAD_LIMIT = { max: 4, windowMs: 60_000 };
+const TOAST_LIMIT = { max: 6, windowMs: 60_000 };
+const FLOAT_SHOW_LIMIT = { max: 3, windowMs: 60_000 };
+const FLOAT_UPDATE_LIMIT = { max: 10, windowMs: 60_000 };
+const WIDGET_SET_LIMIT = { max: 4, windowMs: 60_000 };
 
 const TOOL_SPECS: DeviceToolSpec[] = [
   {
@@ -563,6 +715,429 @@ const TOOL_SPECS: DeviceToolSpec[] = [
       return textResult(`Opened ${check.url} in the device browser.`);
     },
   },
+  {
+    name: 'web_search',
+    description:
+      'Search the public web and get a compact list of results (title, url, snippet). Use this before web_fetch when you ' +
+      'need to discover pages, facts, or current information. Sources are tried in order (Bing HTML, DuckDuckGo HTML, ' +
+      'DuckDuckGo Instant Answers) until one answers; the result says which source was used.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'The search query (max 300 chars).' },
+        maxResults: { type: 'number', description: 'How many results to return (1–8, default 5).' },
+      },
+      required: ['query'],
+    },
+    rateLimit: SEARCH_LIMIT,
+    run: async (args, deps) => {
+      const query = requiredString(args, 'query', 300);
+      if (!query) return errorResult("'query' is required.");
+      const maxResults = optionalNumber(args, 'maxResults');
+      if (maxResults !== undefined && (maxResults < 1 || maxResults > 8)) {
+        return errorResult("'maxResults' must be between 1 and 8.");
+      }
+      const limit = maxResults ?? 5;
+      const attempts: Array<{ source: string; run: () => Promise<WebSearchResult[]> }> = [
+        {
+          source: 'bing',
+          run: async () => {
+            const response = await deps.fetchImpl(`https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${Math.min(limit * 2, 20)}&format=html`, {
+              headers: { 'user-agent': SEARCH_USER_AGENT, accept: 'text/html' },
+            });
+            if (!response.ok) return [];
+            return parseBingResults(await response.text(), limit);
+          },
+        },
+        {
+          source: 'duckduckgo',
+          run: async () => {
+            const response = await deps.fetchImpl(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
+              headers: { 'user-agent': SEARCH_USER_AGENT, accept: 'text/html' },
+            });
+            if (!response.ok) return [];
+            const body = await response.text();
+            if (/anomaly|challenge/i.test(body) && !body.includes('result__a')) return [];
+            return parseDdgResults(body, limit);
+          },
+        },
+        {
+          source: 'duckduckgo_instant_answers',
+          run: async () => {
+            const response = await deps.fetchImpl(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`, {
+              headers: { accept: 'application/json' },
+            });
+            if (!response.ok) return [];
+            try {
+              return parseInstantAnswer(JSON.parse(await response.text())).results.slice(0, limit);
+            } catch {
+              return [];
+            }
+          },
+        },
+      ];
+      for (const attempt of attempts) {
+        try {
+          const results = await attempt.run();
+          if (!results.length) continue;
+          const lines = results.map((result, index) =>
+            `${index + 1}. ${result.title}\n   ${result.url}${result.snippet ? `\n   ${result.snippet}` : ''}`
+          );
+          return textResult(
+            `Web search results for "${query}" (source: ${attempt.source}):\n\n${lines.join('\n\n')}`,
+            { query, source: attempt.source, results },
+          );
+        } catch {
+          // Try the next source; a failing source is not the user's problem.
+        }
+      }
+      return errorResult(
+        `No search source answered for "${query}". The device may be offline or all engines refused the request; retry once, then tell the user.`,
+      );
+    },
+  },
+  {
+    name: 'download_file',
+    description:
+      'Download a file from a public https: URL into the agent workspace downloads/ directory. Use it for documents, ' +
+      'datasets, images or archives you need to inspect; read or process them afterwards with the file tools.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'Public https: URL to download.' },
+        fileName: { type: 'string', description: 'File name inside downloads/ (letters, digits, -, _, .; 1–80 chars).' },
+      },
+      required: ['url', 'fileName'],
+    },
+    feature: 'fileTransfer',
+    rateLimit: DOWNLOAD_LIMIT,
+    run: async (args, deps) => {
+      const url = requiredString(args, 'url', 1000);
+      const fileName = requiredString(args, 'fileName', 80);
+      if (!url) return errorResult("'url' is required.");
+      if (!fileName) return errorResult("'fileName' is required.");
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(fileName) || fileName.includes('..')) {
+        return errorResult("'fileName' may only contain letters, digits, '.', '-' and '_' (no path separators).");
+      }
+      const check = assertPublicHttpsUrl(url);
+      if (!check.ok) return errorResult(`'url' rejected: ${check.reason}`);
+      const dir = 'agent/workspace/downloads';
+      const path = `${dir}/${fileName}`;
+      try {
+        await deps.filesystem.mkdir({ path: dir, directory: Directory.Data, recursive: true }).catch(() => undefined);
+        const target = await deps.filesystem.getUri({ path, directory: Directory.Data });
+        await deps.transfer.downloadFile({ url: check.url, path: target.uri });
+      } catch (error) {
+        return errorResult(`Download failed: ${String((error as Error)?.message ?? error)}`);
+      }
+      const stat = await deps.filesystem.stat({ path, directory: Directory.Data }).catch(() => undefined);
+      const bytes = stat?.size;
+      return textResult(
+        `Downloaded to the agent workspace at 'downloads/${fileName}'${typeof bytes === 'number' ? ` (${(bytes / 1024).toFixed(0)} KB)` : ''}.`,
+        { path: `downloads/${fileName}`, url: check.url, ...(typeof bytes === 'number' ? { bytes } : {}) },
+      );
+    },
+  },
+  {
+    name: 'upload_file',
+    description:
+      'Upload a file from the agent workspace to a public https: URL (multipart/form-data by default; set an explicit ' +
+      'contentType only when the server needs a raw stream). The upload happens natively, outside the WebView.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Workspace-relative path of the file to upload (e.g. photos/x.jpg).' },
+        url: { type: 'string', description: 'Public https: endpoint that accepts the upload.' },
+        fieldName: { type: 'string', description: 'Form field name for multipart uploads (default "file").' },
+        mimeType: { type: 'string', description: 'Optional content type (e.g. image/jpeg).' },
+      },
+      required: ['path', 'url'],
+    },
+    feature: 'fileTransfer',
+    rateLimit: UPLOAD_LIMIT,
+    run: async (args, deps) => {
+      const path = requiredString(args, 'path', 300);
+      const url = requiredString(args, 'url', 1000);
+      if (!path) return errorResult("'path' is required.");
+      if (!url) return errorResult("'url' is required.");
+      if (path.includes('..') || path.startsWith('/')) return errorResult("'path' must be workspace-relative without '..'.");
+      const check = assertPublicHttpsUrl(url);
+      if (!check.ok) return errorResult(`'url' rejected: ${check.reason}`);
+      const stat = await deps.filesystem.stat({ path: `agent/workspace/${path}`, directory: Directory.Data }).catch(() => undefined);
+      if (stat?.type === 'directory' || (stat && stat.type !== undefined && stat.type !== 'file')) {
+        return errorResult(`'${path}' is not a file in the workspace.`);
+      }
+      try {
+        const source = await deps.filesystem.getUri({ path: `agent/workspace/${path}`, directory: Directory.Data });
+        const result = await deps.transfer.uploadFile({
+          url: check.url,
+          path: source.uri,
+          ...(optionalString(args, 'fieldName', 40) ? { fileName: optionalString(args, 'fieldName', 40) } : {}),
+          ...(optionalString(args, 'mimeType', 100) ? { mimeType: optionalString(args, 'mimeType', 100) } : {}),
+        });
+        const statusCode = (result as { statusCode?: number } | null)?.statusCode;
+        return textResult(
+          `Uploaded '${path}' to ${check.url}${typeof statusCode === 'number' ? ` (HTTP ${statusCode})` : ''}.`,
+          { path, url: check.url, ...(typeof statusCode === 'number' ? { statusCode } : {}) },
+        );
+      } catch (error) {
+        return errorResult(`Upload failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'toast',
+    description:
+      'Show a short, non-intrusive in-app message (a toast) inside the agent workspace. Prefer this over notifications ' +
+      'for quick progress notes while the user is looking at the chat.',
+    inputSchema: {
+      type: 'object',
+      properties: { message: { type: 'string', description: 'Message to show (max 200 chars).' } },
+      required: ['message'],
+    },
+    rateLimit: TOAST_LIMIT,
+    run: async (args, deps) => {
+      const message = requiredString(args, 'message', 200);
+      if (!message) return errorResult("'message' is required.");
+      deps.toast(message);
+      return textResult('Toast shown in the app.');
+    },
+  },
+  {
+    name: 'app_info',
+    description: "Report this app's name, version, platform and language — useful for diagnostics and version-specific behaviour.",
+    inputSchema: { type: 'object', properties: {} },
+    run: async (_args, deps) => {
+      const info = await deps.appInfo.getInfo().catch(() => undefined);
+      const language = typeof navigator !== 'undefined' ? navigator.language : '';
+      const parts = [
+        info?.name ? `app=${info.name}` : '',
+        info?.version ? `version=${info.version}` : '',
+        info?.build ? `build=${info.build}` : '',
+        info?.id ? `id=${info.id}` : '',
+        language ? `language=${language}` : '',
+      ].filter(Boolean);
+      return textResult(`Device app info: ${parts.join(', ')}.`, {
+        ...(info ?? {}),
+        ...(language ? { language } : {}),
+      });
+    },
+  },
+  {
+    name: 'stop_ringing',
+    description: 'Stop an alarm that is currently ringing on the device.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'Optional alarm id; omit to stop whichever is ringing.' } },
+    },
+    feature: 'advancedAlarms',
+    run: async (args, deps) => {
+      const id = optionalString(args, 'id', 64);
+      await deps.alarms.stopRinging(id ? { id } : undefined);
+      return textResult(id ? `Stopped ringing alarm '${id}'.` : 'Stopped the ringing alarm.');
+    },
+  },
+  {
+    name: 'show_floating_ui',
+    description:
+      'Show a floating overlay window over other apps with HTML you author (a small dashboard, a card, a calculator...). ' +
+      'The overlay is draggable, can be resized or fullscreen, and survives while the app runs. Requires the overlay ' +
+      'permission; the user approves this call and the system permission once. Keep the HTML small and self-contained.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        html: { type: 'string', description: 'Self-contained HTML for the overlay (max 100 KB).' },
+        width: { type: 'number', description: 'Bubble width in dp (120–720).' },
+        height: { type: 'number', description: 'Bubble height in dp (120–1280).' },
+        fullscreen: { type: 'boolean', description: 'Fill the whole screen instead of a bubble (default false).' },
+        focusable: { type: 'boolean', description: 'Allow typing inside the overlay (default false).' },
+        collapsed: { type: 'boolean', description: 'Start collapsed to a small bubble (default false).' },
+        title: { type: 'string', description: 'Header title shown in the bubble bar.' },
+        data: { description: 'Initial data posted into the page.' },
+      },
+      required: ['html'],
+    },
+    feature: 'widget',
+    rateLimit: FLOAT_SHOW_LIMIT,
+    run: async (args, deps) => {
+      const html = typeof args.html === 'string' ? args.html : '';
+      if (!html.trim()) return errorResult("'html' is required.");
+      if (html.length > 100_000) return errorResult("'html' exceeds the 100 KB limit; keep the overlay small.");
+      const width = optionalNumber(args, 'width');
+      const height = optionalNumber(args, 'height');
+      if (width !== undefined && (width < 120 || width > 720)) return errorResult("'width' must be between 120 and 720 dp.");
+      if (height !== undefined && (height < 120 || height > 1280)) return errorResult("'height' must be between 120 and 1280 dp.");
+      try {
+        const permission = await deps.widget.checkOverlayPermission();
+        if (!permission?.granted) {
+          await deps.widget.requestOverlayPermission();
+          const recheck = await deps.widget.checkOverlayPermission();
+          if (!recheck?.granted) {
+            return errorResult(
+              'The overlay (display over other apps) permission is not granted. Ask the user to enable it in system settings, then try again.',
+            );
+          }
+        }
+        const result = await deps.widget.showFloating({
+          html,
+          ...(width !== undefined ? { width } : {}),
+          ...(height !== undefined ? { height } : {}),
+          ...(args.fullscreen === true ? { fullscreen: true } : {}),
+          ...(args.focusable === true ? { focusable: true } : {}),
+          ...(args.collapsed === true ? { collapsed: true } : {}),
+          ...(optionalString(args, 'title', 80) ? { title: optionalString(args, 'title', 80) } : {}),
+          ...(args.data !== undefined ? { data: args.data } : {}),
+        });
+        if (result?.error) return errorResult(`Floating UI could not be shown: ${result.error}`);
+        return textResult('Floating UI is showing over the app.');
+      } catch (error) {
+        return errorResult(`Floating UI failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'update_floating_ui',
+    description:
+      'Update the floating overlay: push fresh data into the page (your HTML listens for it) and/or move/resize the bubble. ' +
+      'Cheaper than re-showing the whole HTML.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        data: { description: 'New data posted into the floating page.' },
+        width: { type: 'number', description: 'New width in dp.' },
+        height: { type: 'number', description: 'New height in dp.' },
+        title: { type: 'string', description: 'New header title.' },
+      },
+    },
+    feature: 'widget',
+    rateLimit: FLOAT_UPDATE_LIMIT,
+    run: async (args, deps) => {
+      const hasOptions = args.width !== undefined || args.height !== undefined || args.title !== undefined;
+      if (args.data === undefined && !hasOptions) {
+        return errorResult("Give at least one of 'data', 'width', 'height' or 'title'.");
+      }
+      try {
+        if (hasOptions) {
+          await deps.widget.updateFloating({
+            ...(optionalNumber(args, 'width') !== undefined ? { width: optionalNumber(args, 'width') } : {}),
+            ...(optionalNumber(args, 'height') !== undefined ? { height: optionalNumber(args, 'height') } : {}),
+            ...(optionalString(args, 'title', 80) ? { title: optionalString(args, 'title', 80) } : {}),
+          });
+        }
+        if (args.data !== undefined) {
+          await deps.widget.sendToFloating({ data: args.data });
+        }
+        return textResult('Floating UI updated.');
+      } catch (error) {
+        return errorResult(`Floating UI update failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'hide_floating_ui',
+    description: 'Hide the floating overlay window.',
+    inputSchema: { type: 'object', properties: {} },
+    feature: 'widget',
+    run: async (_args, deps) => {
+      await deps.widget.hideFloating();
+      return textResult('Floating UI hidden.');
+    },
+  },
+  {
+    name: 'set_widget',
+    description:
+      'Create or update a home-screen widget. Two styles: a native card (value/title/subtitle/progress/colors/icon) or an ' +
+      "HTML snapshot (render:'html' with your own HTML). Re-updating refreshes the widget; the user pins it from the " +
+      'launcher or with the pin_widget tool.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', description: "Widget kind id (letters, digits, '-', '_'; e.g. 'agent-dashboard')." },
+        title: { type: 'string', description: 'Native style: heading above the value.' },
+        value: { type: 'string', description: 'Native style: big headline text (a count, time, temperature...).' },
+        subtitle: { type: 'string', description: 'Native style: supporting line.' },
+        progress: { type: 'number', description: 'Native style: 0–progressMax progress bar.' },
+        html: { type: 'string', description: 'HTML snapshot style: self-contained HTML (max 100 KB).' },
+        backgroundColor: { type: 'string', description: 'Hex background color, e.g. #0F172A.' },
+        accentColor: { type: 'string', description: 'Hex accent (value) color.' },
+      },
+      required: ['kind'],
+    },
+    feature: 'widget',
+    rateLimit: WIDGET_SET_LIMIT,
+    run: async (args, deps) => {
+      const kind = requiredString(args, 'kind', 64);
+      if (!kind) return errorResult("'kind' is required.");
+      if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(kind)) {
+        return errorResult("'kind' may only contain letters, digits, '-' and '_'.");
+      }
+      const html = typeof args.html === 'string' ? args.html : undefined;
+      if (html !== undefined && html.length > 100_000) return errorResult("'html' exceeds the 100 KB limit.");
+      const value = optionalString(args, 'value', 120);
+      if (!html && !value) {
+        return errorResult("Give 'value' (native card) or 'html' (HTML snapshot).");
+      }
+      const progress = optionalNumber(args, 'progress');
+      if (progress !== undefined && (progress < 0 || progress > 1_000_000)) {
+        return errorResult("'progress' must be between 0 and 1000000.");
+      }
+      for (const colorKey of ['backgroundColor', 'accentColor'] as const) {
+        const color = optionalString(args, colorKey, 9);
+        if (color && !/^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$/.test(color)) {
+          return errorResult(`'${colorKey}' must be a hex color like #0F172A.`);
+        }
+      }
+      const config: Record<string, unknown> = {};
+      if (html) {
+        config.render = 'html';
+        config.html = html;
+      } else {
+        if (value) config.value = value;
+        if (optionalString(args, 'title', 120)) config.title = optionalString(args, 'title', 120);
+        if (optionalString(args, 'subtitle', 160)) config.subtitle = optionalString(args, 'subtitle', 160);
+        if (progress !== undefined) { config.progress = progress; config.progressMax = 100; }
+        if (optionalString(args, 'backgroundColor', 9)) config.backgroundColor = optionalString(args, 'backgroundColor', 9);
+        if (optionalString(args, 'accentColor', 9)) config.accentColor = optionalString(args, 'accentColor', 9);
+      }
+      try {
+        await deps.widget.setConfig({ kind, config });
+        await deps.widget.reload({ kind });
+        return textResult(
+          `Widget '${kind}' updated${html ? ' (HTML snapshot)' : ''}. It appears on widgets the user has already pinned; new pins need requestPin.`,
+          { kind },
+        );
+      } catch (error) {
+        return errorResult(`Widget update failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'pin_widget',
+    description:
+      "Ask Android to pin a widget kind to the user's home screen (the user confirms). The widget must have been created " +
+      'with set_widget at least once.',
+    inputSchema: {
+      type: 'object',
+      properties: { kind: { type: 'string', description: 'The widget kind id to pin.' } },
+      required: ['kind'],
+    },
+    feature: 'widget',
+    run: async (args, deps) => {
+      const kind = requiredString(args, 'kind', 64);
+      if (!kind) return errorResult("'kind' is required.");
+      try {
+        const result = await deps.widget.requestPin({ kind });
+        return textResult(
+          result?.requested
+            ? `Pin request shown for widget '${kind}'; the user confirms on the home screen.`
+            : `A pin request for '${kind}' could not be shown${result?.hint ? ` (${result.hint})` : ''}.`,
+          { kind },
+        );
+      } catch (error) {
+        return errorResult(`Pin request failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
 ];
 
 // ── Transport ────────────────────────────────────────────────────────────────
@@ -671,6 +1246,17 @@ export function defaultDeviceToolDeps(): DeviceToolDeps {
     alarms: NativeKitCustom as unknown as DeviceToolDeps['alarms'],
     filesystem: Filesystem as unknown as DeviceToolDeps['filesystem'],
     openUrl: (url) => { window.open(url, '_blank', 'noopener,noreferrer'); },
+    // Plain fetch by default; the nativekit bridge swaps in a CapacitorHttp
+    // adapter on devices so WebView CORS rules never block a search.
+    fetchImpl: (url, init) => globalThis.fetch(url, init) as Promise<any>,
+    transfer: FileTransfer as unknown as DeviceToolDeps['transfer'],
+    appInfo: App as unknown as DeviceToolDeps['appInfo'],
+    widget: Widget as unknown as DeviceToolDeps['widget'],
+    // The workspace listens for this DOM event and shows its own toast — the
+    // bridge stays UI-agnostic.
+    toast: (message) => {
+      window.dispatchEvent(new CustomEvent('nativekit:agent-toast', { detail: { message } }));
+    },
     now: () => Date.now(),
   };
 }

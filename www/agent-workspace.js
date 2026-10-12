@@ -401,6 +401,14 @@ function clearEventLog() {
 }
 
 
+// The device-tools bridge (bridge/device-tools.ts) dispatches this DOM event
+// when the agent calls the device__toast tool; the bridge itself stays
+// UI-agnostic so it can be reused outside the workspace.
+window.addEventListener('nativekit:agent-toast', (event) => {
+  const message = String(event?.detail?.message ?? '').slice(0, 160);
+  if (message) toast(message, 'info');
+});
+
 function toast(message, tone = 'muted') {
   const node = $('aw-toast');
   if (!node) return;

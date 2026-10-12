@@ -429,6 +429,38 @@ async function openDatabase(name: string, options: { version?: number; encrypted
   return db;
 }
 
+/**
+ * A fetch-compatible adapter backed by CapacitorHttp so remote calls leave the
+ * WebView's origin rules (hosted MCP servers, web search) instead of dying to
+ * CORS on capacitor://localhost. Shared by connectMcp and the device tools.
+ */
+function buildNativeFetch(): typeof fetch {
+  return (async (input: any, init: any = {}) => {
+    const response: any = await CapacitorHttp.request({
+      url: String(input),
+      method: init.method ?? 'GET',
+      headers: init.headers ?? {},
+      data: init.body,
+      connectTimeout: config.network.connectTimeoutMs,
+      readTimeout: config.network.readTimeoutMs,
+      // MCP replies are JSON or SSE text; never let the plugin guess.
+      responseType: 'text',
+    });
+    const headers = new Map<string, string>(
+      Object.entries(response.headers ?? {}).map(([k, v]) => [k.toLowerCase(), String(v)]),
+    );
+    const body = typeof response.data === 'string'
+      ? response.data
+      : JSON.stringify(response.data ?? '');
+    return {
+      ok: response.status >= 200 && response.status < 300,
+      status: response.status,
+      headers: { get: (name: string) => headers.get(name.toLowerCase()) ?? null },
+      text: async () => body,
+    };
+  }) as unknown as typeof fetch;
+}
+
 const NativeKit: any = {
   version: '1.0.0',
   config,
@@ -1040,30 +1072,7 @@ const NativeKit: any = {
       // origin rules, which is the same reason `NativeKit.http` uses it. The
       // response is adapted back to the small slice of `fetch` the MCP
       // transport needs.
-      const nativeFetch = (async (input: any, init: any = {}) => {
-        const response: any = await CapacitorHttp.request({
-          url: String(input),
-          method: init.method ?? 'GET',
-          headers: init.headers ?? {},
-          data: init.body,
-          connectTimeout: config.network.connectTimeoutMs,
-          readTimeout: config.network.readTimeoutMs,
-          // MCP replies are JSON or SSE text; never let the plugin guess.
-          responseType: 'text',
-        });
-        const headers = new Map<string, string>(
-          Object.entries(response.headers ?? {}).map(([k, v]) => [k.toLowerCase(), String(v)]),
-        );
-        const body = typeof response.data === 'string'
-          ? response.data
-          : JSON.stringify(response.data ?? '');
-        return {
-          ok: response.status >= 200 && response.status < 300,
-          status: response.status,
-          headers: { get: (name: string) => headers.get(name.toLowerCase()) ?? null },
-          text: async () => body,
-        };
-      }) as unknown as typeof fetch;
+      const nativeFetch = buildNativeFetch();
 
       // The built-in device tools are injected as an in-process MCP "server"
       // through the same makeTransport seam unit tests use. A user-named
@@ -1072,17 +1081,27 @@ const NativeKit: any = {
       // waives URL checks per config, only where a transport was injected).
       const deviceTransport =
         options.withDeviceTools && !servers.some((server) => server.name === DEVICE_SERVER_NAME)
-          ? createDeviceToolsTransport(defaultDeviceToolDeps(), {
-              features: {
-                camera: config.features.camera !== false,
-                location: config.features.location !== false,
-                localNotifications: config.features.localNotifications !== false,
-                haptics: config.features.haptics !== false,
-                sharing: config.features.sharing !== false,
-                networkStatus: config.features.networkStatus !== false,
-                advancedAlarms: config.features.advancedAlarms !== false,
+          ? createDeviceToolsTransport(
+              {
+                // Web search and file transfers must leave the WebView: swap
+                // the plain fetch default for the CapacitorHttp adapter.
+                ...defaultDeviceToolDeps(),
+                ...(isNative ? { fetchImpl: buildNativeFetch() } : {}),
               },
-            })
+              {
+                features: {
+                  camera: config.features.camera !== false,
+                  location: config.features.location !== false,
+                  localNotifications: config.features.localNotifications !== false,
+                  haptics: config.features.haptics !== false,
+                  sharing: config.features.sharing !== false,
+                  networkStatus: config.features.networkStatus !== false,
+                  advancedAlarms: config.features.advancedAlarms !== false,
+                  fileTransfer: config.features.fileTransfer !== false,
+                  widget: config.features.widget !== false,
+                },
+              },
+            )
           : null;
       const allServers = deviceTransport ? [deviceServerConfig(), ...servers] : servers;
 

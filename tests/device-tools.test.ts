@@ -29,6 +29,8 @@ type Calls = { method: string; args: any };
 function fakeDeps(overrides: Partial<DeviceToolDeps> = {}, clockStart = 1_000_000) {
   const calls: Calls[] = [];
   let clock = clockStart;
+  const fetchResponses: Array<{ ok: boolean; status: number; body: string }> = [];
+  let overlayGranted = true;
   const record = (method: string) => (args: any) => {
     calls.push({ method, args });
     return Promise.resolve(undefined as any);
@@ -80,16 +82,61 @@ function fakeDeps(overrides: Partial<DeviceToolDeps> = {}, clockStart = 1_000_00
         return { alarms: [{ id: 'a1', title: 'T' }] } as any;
       },
       cancelAlarm: record('cancelAlarm'),
+      stopRinging: record('stopRinging'),
     },
     filesystem: {
       mkdir: record('mkdir'),
       writeFile: record('writeFile'),
+      async getUri(options: any) {
+        calls.push({ method: 'getUri', args: options });
+        return { uri: `file:///data/user/0/dev.nativekit.shell/files/${options.path}` };
+      },
+      async stat(options: any) {
+        calls.push({ method: 'stat', args: options });
+        return { type: 'file', size: 4096 };
+      },
     },
     openUrl: (url: string) => calls.push({ method: 'openUrl', args: { url } }),
+    fetchImpl: async (url: string, init?: any) => {
+      calls.push({ method: 'fetch', args: { url, init } });
+      const scripted = fetchResponses.shift() ?? { ok: true, status: 200, body: '' };
+      return {
+        ok: scripted.ok,
+        status: scripted.status,
+        text: async () => scripted.body,
+      };
+    },
+    transfer: {
+      downloadFile: record('downloadFile'),
+      async uploadFile(options: any) {
+        calls.push({ method: 'uploadFile', args: options });
+        return { statusCode: 201 };
+      },
+    },
+    appInfo: {
+      async getInfo() {
+        calls.push({ method: 'getInfo', args: {} });
+        return { name: 'NativeKit TestLab', id: 'dev.nativekit.shell', version: '1.4.17', build: '31' };
+      },
+    },
+    widget: {
+      async checkOverlayPermission() { calls.push({ method: 'checkOverlayPermission', args: {} }); return { granted: overlayGranted }; },
+      requestOverlayPermission: record('requestOverlayPermission'),
+      async showFloating(options: any) { calls.push({ method: 'showFloating', args: options }); return { shown: true }; },
+      hideFloating: record('hideFloating'),
+      async updateFloating(options: any) { calls.push({ method: 'updateFloating', args: options }); return { shown: true }; },
+      async sendToFloating(options: any) { calls.push({ method: 'sendToFloating', args: options }); return { delivered: true }; },
+      setConfig: record('setConfig'),
+      async reload(options: any) { calls.push({ method: 'reload', args: options }); return { updated: 1 }; },
+      async requestPin(options: any) { calls.push({ method: 'requestPin', args: options }); return { requested: true }; },
+    },
+    toast: (message: string) => calls.push({ method: 'toast', args: { message } }),
     now: () => clock,
     ...overrides,
   } as DeviceToolDeps & { now: () => number };
   (deps as any).advanceClock = (ms: number) => { clock += ms; };
+  (deps as any).queueFetch = (body: string, ok = true, status = 200) => { fetchResponses.push({ body, ok, status }); };
+  (deps as any).setOverlay = (granted: boolean) => { overlayGranted = granted; };
   return { deps, calls };
 }
 
@@ -120,6 +167,36 @@ async function callTool(deps: DeviceToolDeps, name: string, args: Record<string,
   return client.callTool(name, args);
 }
 
+// ── search fixtures (shapes captured from the live endpoints) ───────────────
+
+const BING_HTML = [
+  '<li class="b_algo">',
+  '<div class="b_tpcn"><a class="tilk" href="https://en.wikipedia.org/wiki/Capacitor"><cite>https://en.wikipedia.org</cite></a></div>',
+  '<div class="b_algoheader"><a href="https://en.wikipedia.org/wiki/Capacitor">Capacitor - Wikipedia</a></div>',
+  '<h2><strong>Capacitor</strong> - Wikipedia</h2>',
+  '<p class="b_lineclamp4">A capacitor is a device that stores electrical energy by accumulating electric charge.</p>',
+  '</li>',
+  '<li class="b_algo">',
+  '<div class="b_algoheader"><a href="https://electronics.howstuffworks.com/capacitor.htm">How Capacitors Work</a></div>',
+  '<h2>How Capacitors Work</h2>',
+  '<p class="b_lineclamp2">In a way, a capacitor is a little like a battery.</p>',
+  '</li>',
+].join('');
+
+const DDG_HTML = [
+  '<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FElectric_capacitor&amp;rut=abc">Electric capacitor - Wikipedia</a>',
+  '<a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FElectric_capacitor&amp;rut=abc">A capacitor is a passive electrical component.</a>',
+].join('');
+
+const DDG_ANOMALY = '<html><body><p>If this persists, please send an anomaly report.</p></body></html>';
+
+const IA_JSON = JSON.stringify({
+  Heading: 'Python (programming language)',
+  AbstractText: 'Python is a high-level, general-purpose programming language.',
+  AbstractURL: 'https://en.wikipedia.org/wiki/Python_(programming_language)',
+  RelatedTopics: [{ Text: 'Python Software Foundation - Home', FirstURL: 'https://www.python.org/' }],
+});
+
 // ── catalogue & wiring ──────────────────────────────────────────────────────
 
 describe('device tools catalogue', () => {
@@ -127,6 +204,8 @@ describe('device tools catalogue', () => {
     expect(deviceToolNames()).toEqual([
       'notify', 'take_photo', 'get_location', 'vibrate', 'share',
       'network_status', 'schedule_alarm', 'list_alarms', 'cancel_alarm', 'open_url',
+      'web_search', 'download_file', 'upload_file', 'toast', 'app_info', 'stop_ringing',
+      'show_floating_ui', 'update_floating_ui', 'hide_floating_ui', 'set_widget', 'pin_widget',
     ]);
   });
 
@@ -144,14 +223,23 @@ describe('device tools catalogue', () => {
 
   it('hides tools whose feature flag is disabled', async () => {
     const { deps } = fakeDeps();
-    const tools = await clientFor(deps, { camera: false, advancedAlarms: false }).listTools();
+    const tools = await clientFor(deps, { camera: false, advancedAlarms: false, widget: false, fileTransfer: false }).listTools();
     const names = tools.map((tool) => tool.name);
     expect(names).not.toContain('take_photo');
     expect(names).not.toContain('schedule_alarm');
     expect(names).not.toContain('list_alarms');
     expect(names).not.toContain('cancel_alarm');
+    expect(names).not.toContain('show_floating_ui');
+    expect(names).not.toContain('update_floating_ui');
+    expect(names).not.toContain('hide_floating_ui');
+    expect(names).not.toContain('set_widget');
+    expect(names).not.toContain('pin_widget');
+    expect(names).not.toContain('download_file');
+    expect(names).not.toContain('upload_file');
     expect(names).toContain('notify');
     expect(names).toContain('get_location');
+    expect(names).toContain('web_search');
+    expect(names).toContain('toast');
   });
 
   it('answers initialize for legacy clients too', async () => {
@@ -426,6 +514,195 @@ describe('open_url', () => {
       expect((await client.callTool('open_url', { url: `https://example.com/${index}` })).isError).toBeFalsy();
     }
     expect((await client.callTool('open_url', { url: 'https://example.com/7' })).isError).toBe(true);
+  });
+});
+
+describe('web_search', () => {
+  it('parses Bing results first and reports the source', async () => {
+    const { deps, calls } = fakeDeps();
+    (deps as any).queueFetch(BING_HTML);
+    const result = await callTool(deps, 'web_search', { query: 'capacitor' });
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toContain('source: bing');
+    expect(textOf(result)).toContain('https://en.wikipedia.org/wiki/Capacitor');
+    expect(textOf(result)).toContain('stores electrical energy');
+    expect(calls.filter((entry) => entry.method === 'fetch')).toHaveLength(1);
+    expect((result.structuredContent as { results: unknown[] }).results).toHaveLength(2);
+  });
+
+  it('falls back to DuckDuckGo html when Bing returns nothing', async () => {
+    const { deps } = fakeDeps();
+    (deps as any).queueFetch('<html><body>No results</body></html>');
+    (deps as any).queueFetch(DDG_HTML);
+    const result = await callTool(deps, 'web_search', { query: 'capacitor' });
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toContain('source: duckduckgo');
+    // the uddg redirect is decoded to the real URL
+    expect(textOf(result)).toContain('https://en.wikipedia.org/wiki/Electric_capacitor');
+  });
+
+  it('skips a DuckDuckGo anomaly page and uses instant answers', async () => {
+    const { deps } = fakeDeps();
+    (deps as any).queueFetch('');
+    (deps as any).queueFetch(DDG_ANOMALY);
+    (deps as any).queueFetch(IA_JSON);
+    const result = await callTool(deps, 'web_search', { query: 'python language' });
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toContain('source: duckduckgo_instant_answers');
+    expect(textOf(result)).toContain('high-level, general-purpose');
+  });
+
+  it('fails with guidance when every source is silent', async () => {
+    const { deps } = fakeDeps();
+    (deps as any).queueFetch('');
+    (deps as any).queueFetch('');
+    (deps as any).queueFetch('');
+    const result = await callTool(deps, 'web_search', { query: 'nothing' });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/No search source answered/);
+  });
+
+  it('rate limits to 6 searches per minute on one transport', async () => {
+    const { deps } = fakeDeps();
+    const client = clientFor(deps);
+    for (let index = 0; index < 6; index += 1) {
+      (deps as any).queueFetch(BING_HTML);
+      const ok = await client.callTool('web_search', { query: `q${index}` });
+      expect(ok.isError).toBeFalsy();
+    }
+    const limited = await client.callTool('web_search', { query: 'q7' });
+    expect(limited.isError).toBe(true);
+    expect(textOf(limited)).toMatch(/Rate limit/);
+  });
+});
+
+describe('download_file', () => {
+  it('downloads into the workspace downloads directory', async () => {
+    const { deps, calls } = fakeDeps();
+    const result = await callTool(deps, 'download_file', { url: 'https://example.com/report.pdf', fileName: 'report.pdf' });
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toContain('downloads/report.pdf');
+    const download = calls.find((entry) => entry.method === 'downloadFile');
+    expect(download?.args.path).toMatch(/^file:\/\/\/data\/user\/0\/dev\.nativekit\.shell\/files\/agent\/workspace\/downloads\/report\.pdf$/);
+    expect(result.structuredContent).toMatchObject({ path: 'downloads/report.pdf' });
+  });
+
+  it('rejects unsafe names and non-https urls', async () => {
+    const { deps } = fakeDeps();
+    expect((await callTool(deps, 'download_file', { url: 'https://example.com/x', fileName: '../escape' })).isError).toBe(true);
+    expect((await callTool(deps, 'download_file', { url: 'http://example.com/x', fileName: 'a.pdf' })).isError).toBe(true);
+  });
+});
+
+describe('upload_file', () => {
+  it('stats the workspace file and uploads it natively', async () => {
+    const { deps, calls } = fakeDeps();
+    const result = await callTool(deps, 'upload_file', { path: 'photos/receipt.jpg', url: 'https://example.com/upload' });
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toContain('HTTP 201');
+    const stat = calls.find((entry) => entry.method === 'stat');
+    expect(stat?.args.path).toBe('agent/workspace/photos/receipt.jpg');
+    const upload = calls.find((entry) => entry.method === 'uploadFile');
+    expect(upload?.args.path).toMatch(/^file:\/\/\/.*agent\/workspace\/photos\/receipt\.jpg$/);
+  });
+
+  it('rejects path traversal', async () => {
+    const { deps } = fakeDeps();
+    expect((await callTool(deps, 'upload_file', { path: '../secrets', url: 'https://example.com/u' })).isError).toBe(true);
+  });
+});
+
+describe('toast and app info', () => {
+  it('shows an in-app toast', async () => {
+    const { deps, calls } = fakeDeps();
+    const result = await callTool(deps, 'toast', { message: 'কাজ শেষ!' });
+    expect(result.isError).toBeFalsy();
+    expect(calls.find((entry) => entry.method === 'toast')?.args.message).toBe('কাজ শেষ!');
+  });
+
+  it('reports app metadata', async () => {
+    const { deps } = fakeDeps();
+    const result = await callTool(deps, 'app_info', {});
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toContain('version=1.4.17');
+    expect(textOf(result)).toContain('NativeKit TestLab');
+  });
+});
+
+describe('stop_ringing', () => {
+  it('stops the ringing alarm with or without an id', async () => {
+    const { deps, calls } = fakeDeps();
+    expect((await callTool(deps, 'stop_ringing', { id: 'wake' })).isError).toBeFalsy();
+    expect((await callTool(deps, 'stop_ringing', {})).isError).toBeFalsy();
+    expect(calls.find((entry) => entry.method === 'stopRinging')?.args).toEqual({ id: 'wake' });
+  });
+});
+
+describe('floating ui', () => {
+  it('shows an html overlay after the permission check', async () => {
+    const { deps, calls } = fakeDeps();
+    const result = await callTool(deps, 'show_floating_ui', { html: '<b>hi</b>', width: 300, height: 200 });
+    expect(result.isError).toBeFalsy();
+    const shown = calls.find((entry) => entry.method === 'showFloating');
+    expect(shown?.args).toMatchObject({ html: '<b>hi</b>', width: 300, height: 200 });
+  });
+
+  it('fails closed when the overlay permission is not granted', async () => {
+    const { deps, calls } = fakeDeps();
+    (deps as any).setOverlay(false);
+    const result = await callTool(deps, 'show_floating_ui', { html: '<b>hi</b>' });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/overlay/i);
+    expect(calls.find((entry) => entry.method === 'requestOverlayPermission')).toBeTruthy();
+  });
+
+  it('caps the html size and rate limits shows', async () => {
+    const { deps } = fakeDeps();
+    expect((await callTool(deps, 'show_floating_ui', { html: 'x'.repeat(100_001) })).isError).toBe(true);
+    const client = clientFor(deps);
+    for (let index = 0; index < 3; index += 1) {
+      expect((await client.callTool('show_floating_ui', { html: `<p>${index}</p>` })).isError).toBeFalsy();
+    }
+    expect((await client.callTool('show_floating_ui', { html: '<p>4</p>' })).isError).toBe(true);
+  });
+
+  it('updates data and options, then hides', async () => {
+    const { deps, calls } = fakeDeps();
+    const update = await callTool(deps, 'update_floating_ui', { data: { value: 42 }, title: 'Live' });
+    expect(update.isError).toBeFalsy();
+    expect(calls.find((entry) => entry.method === 'sendToFloating')?.args).toEqual({ data: { value: 42 } });
+    expect(calls.find((entry) => entry.method === 'updateFloating')?.args).toEqual({ title: 'Live' });
+    expect((await callTool(deps, 'update_floating_ui', {})).isError).toBe(true);
+    expect((await callTool(deps, 'hide_floating_ui', {})).isError).toBeFalsy();
+    expect(calls.find((entry) => entry.method === 'hideFloating')).toBeTruthy();
+  });
+});
+
+describe('widgets', () => {
+  it('sets a native card widget and reloads it', async () => {
+    const { deps, calls } = fakeDeps();
+    const result = await callTool(deps, 'set_widget', { kind: 'agent-dashboard', value: '24°', title: 'Dhaka', progress: 40 });
+    expect(result.isError).toBeFalsy();
+    const config = calls.find((entry) => entry.method === 'setConfig')?.args;
+    expect(config.kind).toBe('agent-dashboard');
+    expect(config.config).toMatchObject({ value: '24°', title: 'Dhaka', progress: 40 });
+    expect(calls.find((entry) => entry.method === 'reload')?.args).toEqual({ kind: 'agent-dashboard' });
+  });
+
+  it('sets an html snapshot widget and validates inputs', async () => {
+    const { deps } = fakeDeps();
+    const html = await callTool(deps, 'set_widget', { kind: 'notes', html: '<p>hello</p>' });
+    expect(html.isError).toBeFalsy();
+    expect((await callTool(deps, 'set_widget', { kind: 'bad kind!' })).isError).toBe(true);
+    expect((await callTool(deps, 'set_widget', { kind: 'x', value: 'v', backgroundColor: 'red' })).isError).toBe(true);
+    expect((await callTool(deps, 'set_widget', { kind: 'x' })).isError).toBe(true);
+  });
+
+  it('requests a pin and reports the outcome', async () => {
+    const { deps, calls } = fakeDeps();
+    const result = await callTool(deps, 'pin_widget', { kind: 'agent-dashboard' });
+    expect(result.isError).toBeFalsy();
+    expect(calls.find((entry) => entry.method === 'requestPin')?.args).toEqual({ kind: 'agent-dashboard' });
   });
 });
 
