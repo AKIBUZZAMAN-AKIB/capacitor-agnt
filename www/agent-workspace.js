@@ -749,7 +749,7 @@ async function afterInitialize() {
   // conversation from being usable.
   void Promise.allSettled([
     refreshSettings(), refreshAutomations(), refreshSkills(), refreshMemory(),
-    refreshFiles(), loadMcpConfigs(), loadPersona(),
+    refreshFiles(), connectMcpAtStartup(), loadPersona(),
   ]);
 }
 
@@ -1590,6 +1590,20 @@ async function savePersona() { requireInit(); const content = $('aw-persona-edit
 
 async function loadMcpConfigs() { requireInit(); const configs = await window.NativeKit.preferences.getJSON(MCP_PREF_KEY).catch(() => null); state.mcpConfigs = Array.isArray(configs) ? configs : []; renderMcp(); }
 async function saveMcpConfigs() { await window.NativeKit.preferences.setJSON(MCP_PREF_KEY, state.mcpConfigs); }
+// Startup wiring: the engine starts with an EMPTY MCP catalogue, and the
+// device__* tools only reach the model through connectMcp() -> startMcp().
+// Without this call the AI never learns about any tool added in
+// v1.4.16+ (camera, speech, web_search, sql, nearby, mini-apps, ...).
+// Configs are loaded first so saved remote servers reconnect in the same pass.
+async function connectMcpAtStartup() {
+  await loadMcpConfigs();
+  try {
+    await connectAllMcp();
+  } catch (error) {
+    recordEventLog('mcp.connect_failed', { error: String(error?.message ?? error) }, 'err');
+    toast('Device tools যোগ হয়নি — Settings → MCP → Reconnect চালান।', 'err');
+  }
+}
 function mcpTokenKey(name) { return `${MCP_TOKEN_PREFIX}${name}`; }
 async function connectAllMcp() {
   requireInit(); if (state.mcp) { await state.mcp.dispose(); state.mcp = null; }

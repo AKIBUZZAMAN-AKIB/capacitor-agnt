@@ -166,3 +166,17 @@ describe('agent ask-user card wiring', () => {
     expect(source).toContain('.slice(0, 6)');
   });
 });
+
+describe('device tool catalogue publication at startup', () => {
+  it('connects MCP (with device tools) during initialization, not only from settings actions', () => {
+    // The engine starts with an empty MCP catalogue; connectMcp()/startMcp()
+    // is the only way the model ever learns about the device__* tools.
+    expect(source).toContain('async function connectMcpAtStartup()');
+    expect(source).toContain('await loadMcpConfigs();');
+    expect(source).toContain('await connectAllMcp();');
+    // The startup pass must be wired into afterInitialize's settled batch.
+    expect(source).toContain('refreshFiles(), connectMcpAtStartup(), loadPersona(),');
+    // And the device tools must be requested explicitly.
+    expect(source).toContain('withDeviceTools: true');
+  });
+});
