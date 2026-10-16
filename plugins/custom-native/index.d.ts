@@ -21,6 +21,8 @@ export interface NativeKitCustomPlugin extends Plugin {
   clearBufferedLocations(): Promise<void>;
   openAppSettings(): Promise<void>;
   ttsSpeak(options: { text: string; language?: string; pitch?: number; rate?: number }): Promise<{ queued?: boolean; languageSupported?: boolean }>;
+  /** Verifies the device owner with fingerprint/face; rejects (fails closed) when unavailable. */
+  verifyBiometric(options?: { reason?: string }): Promise<{ verified: boolean }>;
   ttsStop(): Promise<void>;
   listenSpeech(options: { language?: string; timeoutMs?: number }): Promise<{ text: string; confidence?: number }>;
   scanQrCode(): Promise<{ text: string; format?: string }>;

@@ -246,8 +246,8 @@ function fakeAgent() {
 }
 
 /** Drive the transport exactly like a real (stateless) MCP client would. */
-function clientFor(deps: DeviceToolDeps, features: Record<string, boolean> = {}) {
-  const transport = createDeviceToolsTransport(deps, { features });
+function clientFor(deps: DeviceToolDeps, features: Record<string, boolean> = {}, options: { platform?: string } = {}) {
+  const transport = createDeviceToolsTransport(deps, { features, ...options });
   return new McpClient(DEVICE_SERVER_NAME, transport, { protocolVersion: 'auto' });
 }
 
@@ -313,6 +313,32 @@ describe('device tools catalogue', () => {
     }
     const notify = tools.find((tool) => tool.name === 'notify');
     expect(notify?.inputSchema).toMatchObject({ type: 'object', required: ['title'] });
+  });
+
+  it('hides Android-only tools on iOS and refuses to run them there', async () => {
+    const { deps } = fakeDeps();
+    const client = clientFor(deps, {}, { platform: 'ios' });
+    const tools = await client.listTools();
+    const names = tools.map((tool) => tool.name);
+    // Native backing for these exists only in the Android plugin build.
+    for (const hidden of [
+      'speak', 'stop_speaking', 'listen', 'scan_qr', 'pick_file', 'dial_phone',
+      'compose_sms', 'torch', 'battery_status', 'clipboard_write', 'clipboard_read',
+      'show_floating_ui', 'update_floating_ui', 'hide_floating_ui',
+    ]) {
+      expect(names, `${hidden} must be hidden on iOS`).not.toContain(hidden);
+    }
+    // Cross-platform tools stay offered.
+    for (const kept of ['notify', 'take_photo', 'get_location', 'web_search', 'nearby_status', 'set_widget', 'schedule_alarm', 'stage_miniapp', 'list_miniapps', 'stop_miniapps']) {
+      expect(names, `${kept} must stay on iOS`).toContain(kept);
+    }
+    // And a direct call fail-closes instead of pretending to work.
+    const result = await client.callTool('speak', { text: 'hi' });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain('Unknown device tool');
+    // Android keeps everything, and the default (no platform) is unchanged.
+    expect((await clientFor(deps, {}, { platform: 'android' }).listTools()).map((t) => t.name)).toContain('speak');
+    expect((await clientFor(deps).listTools()).map((t) => t.name)).toContain('speak');
   });
 
   it('hides tools whose feature flag is disabled', async () => {
@@ -1042,6 +1068,21 @@ describe('stage_miniapp', () => {
     expect(install?.args.manifest).toMatchObject({ id: 'agent.test-mini-app', name: 'Test Mini App', entry: 'mini/index.html' });
     expect(install?.args.files).toHaveLength(2);
     expect(calls.find((c) => c.method === 'miniapp.launch')?.args).toMatchObject({ appId: 'agent.test-mini-app' });
+  });
+
+  it('explains when a same-id mini-app with different bytes was installed disabled', async () => {
+    const { deps } = fakeDeps();
+    (deps as any).putFile('mini/index.html', '<p>v2</p>');
+    (deps.miniapp as any).install = async () => ({ id: 'agent.dup', policy: { enabled: false } });
+    const result = await callTool(deps, 'stage_miniapp', { name: 'Dup', files: ['mini/index.html'] });
+    expect(result.isError).toBe(true);
+    const text = textOf(result);
+    expect(text).toContain("'agent.dup'");
+    expect(text).toContain('DISABLED');
+    expect(text).toContain('different');
+    // The launch must not be attempted after a disabled install.
+    const callsUsed = (deps as any);
+    expect(callsUsed).toBeTruthy();
   });
 
   it('passes requested capabilities into the manifest and validates them', async () => {

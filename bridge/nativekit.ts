@@ -481,6 +481,15 @@ const NativeKit: any = {
       alarms: 'Exact/full-screen behavior requires platform access and store-policy eligibility.',
     },
   }),
+  // Gate for "always_ask_biometric" tool approvals. Fails closed: when the
+  // platform (or this build) cannot verify the owner, verify() rejects and the
+  // caller must deny the approval instead of approving without proof.
+  biometric: {
+    verify: async (reason?: string): Promise<{ verified: boolean }> => {
+      const { NativeKitCustom } = await import('@nativekit/custom-native');
+      return NativeKitCustom.verifyBiometric({ reason: reason ?? 'Confirm to continue' });
+    },
+  },
   permissions: {
     check: async (): Promise<JsonObject> => ({
       camera: config.features.camera ? await Camera.checkPermissions() : { camera: 'disabled' },
@@ -1117,6 +1126,9 @@ const NativeKit: any = {
                   appBrowser: config.features.appBrowser !== false,
                   widget: config.features.widget !== false,
                 },
+                // Android-only native backing (TTS, speech, QR, torch, clipboard,
+                // floating overlays...) must not be offered as iOS tools.
+                platform,
               },
             )
           : null;

@@ -207,6 +207,23 @@ describe('approval card argument preview (redactArgs)', () => {
   });
 });
 
+describe('biometric-gated tool approvals', () => {
+  it('captures requireBiometric and verifies the owner before approving, denying on failure', () => {
+    // The engine emits requireBiometric for "always_ask_biometric" tools.
+    expect(source).toContain('requireBiometric: payload?.requireBiometric === true');
+    // The approval card flags it.
+    expect(source).toContain("request.requireBiometric ? '🔒 ' : ''");
+    // Approving a biometric tool must first run a real biometric check…
+    expect(source).toContain('window.NativeKit?.biometric?.verify?.(request.toolName)');
+    expect(source).toContain('granted = proof?.verified === true;');
+    // …and fail CLOSED (deny) when verification is missing or unsuccessful.
+    expect(source).toContain("denial = 'Biometric verification did not succeed, so the action was not approved.'");
+    expect(source).toContain('Biometric verification is unavailable');
+    // The final answer uses the gated value, not the original tap.
+    expect(source).toContain('respondToApproval(request.id, granted, granted ? undefined :');
+  });
+});
+
 describe('MCP tool timeout exposure in runtime settings', () => {
   it('loads the engine timeout into the form and saves it back as milliseconds', () => {
     // The engine default is 30s; heavy/interactive tools (mini-app staging,

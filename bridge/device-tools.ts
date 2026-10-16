@@ -216,6 +216,13 @@ interface DeviceToolSpec {
   inputSchema: Record<string, unknown>;
   /** Feature flag that must not be `false` for the tool to be offered. */
   feature?: DeviceToolFeature;
+  /**
+   * The tool's native backing exists only in the Android plugin build (TTS,
+   * speech recognition, QR scanner, document picker, torch, battery, dial/SMS,
+   * clipboard, floating overlays). On iOS these are hidden from the catalogue
+   * so the model is never offered a call that cannot work.
+   */
+  androidOnly?: boolean;
   rateLimit?: { max: number; windowMs: number };
   run: (args: Record<string, unknown>, deps: DeviceToolDeps, ctx: RunContext) => Promise<DeviceOutcome>;
 }
@@ -1127,6 +1134,7 @@ const TOOL_SPECS: DeviceToolSpec[] = [
       required: ['html'],
     },
     feature: 'widget',
+    androidOnly: true,
     rateLimit: FLOAT_SHOW_LIMIT,
     run: async (args, deps) => {
       const html = typeof args.html === 'string' ? args.html : '';
@@ -1179,6 +1187,7 @@ const TOOL_SPECS: DeviceToolSpec[] = [
       },
     },
     feature: 'widget',
+    androidOnly: true,
     rateLimit: FLOAT_UPDATE_LIMIT,
     run: async (args, deps) => {
       const hasOptions = args.width !== undefined || args.height !== undefined || args.title !== undefined;
@@ -1207,6 +1216,7 @@ const TOOL_SPECS: DeviceToolSpec[] = [
     description: 'Hide the floating overlay window.',
     inputSchema: { type: 'object', properties: {} },
     feature: 'widget',
+    androidOnly: true,
     run: async (_args, deps) => {
       await deps.widget.hideFloating();
       return textResult('Floating UI hidden.');
@@ -1325,6 +1335,7 @@ const TOOL_SPECS: DeviceToolSpec[] = [
       },
       required: ['text'],
     },
+    androidOnly: true,
     rateLimit: SPEAK_LIMIT,
     run: async (args, deps) => {
       const text = requiredString(args, 'text', 5000);
@@ -1355,6 +1366,7 @@ const TOOL_SPECS: DeviceToolSpec[] = [
     name: 'stop_speaking',
     description: 'Stops any in-progress text-to-speech playback.',
     inputSchema: { type: 'object', properties: {} },
+    androidOnly: true,
     run: async (_args, deps) => {
       try {
         await deps.extras.ttsStop();
@@ -1376,6 +1388,7 @@ const TOOL_SPECS: DeviceToolSpec[] = [
         timeoutMs: { type: 'number', description: 'Max wait in milliseconds, 2000–25000 (default 12000).' },
       },
     },
+    androidOnly: true,
     rateLimit: LISTEN_LIMIT,
     run: async (args, deps) => {
       const language = optionalString(args, 'language', 20) ?? 'bn-BD';
@@ -1397,6 +1410,7 @@ const TOOL_SPECS: DeviceToolSpec[] = [
     description: 'Opens the camera barcode scanner (QR codes) and returns the decoded text. The user can cancel; camera permission is requested if missing.',
     inputSchema: { type: 'object', properties: {} },
     feature: 'camera',
+    androidOnly: true,
     rateLimit: SCAN_LIMIT,
     run: async (_args, deps) => {
       try {
@@ -1416,6 +1430,7 @@ const TOOL_SPECS: DeviceToolSpec[] = [
       properties: { number: { type: 'string', description: 'Phone number: digits, +, spaces and ( ) . - only.' } },
       required: ['number'],
     },
+    androidOnly: true,
     rateLimit: SMS_LIMIT,
     run: async (args, deps) => {
       const number = requiredString(args, 'number', 30);
@@ -1440,6 +1455,7 @@ const TOOL_SPECS: DeviceToolSpec[] = [
       },
       required: ['number'],
     },
+    androidOnly: true,
     rateLimit: SMS_LIMIT,
     run: async (args, deps) => {
       const number = requiredString(args, 'number', 30);
@@ -1461,6 +1477,7 @@ const TOOL_SPECS: DeviceToolSpec[] = [
       properties: { on: { type: 'boolean', description: 'true to switch the torch on, false for off.' } },
       required: ['on'],
     },
+    androidOnly: true,
     rateLimit: SCAN_LIMIT,
     run: async (args, deps) => {
       if (typeof args.on !== 'boolean') return errorResult("'on' (boolean) is required.");
@@ -1476,6 +1493,7 @@ const TOOL_SPECS: DeviceToolSpec[] = [
     name: 'battery_status',
     description: 'Reports the battery level, whether it is charging and whether a charger is plugged in.',
     inputSchema: { type: 'object', properties: {} },
+    androidOnly: true,
     run: async (_args, deps) => {
       try {
         const result = await deps.extras.batteryStatus();
@@ -1497,6 +1515,7 @@ const TOOL_SPECS: DeviceToolSpec[] = [
       'The user picks the file; nothing is read without that.',
     inputSchema: { type: 'object', properties: {} },
     feature: 'filesystem',
+    androidOnly: true,
     rateLimit: ZIP_LIMIT,
     run: async (_args, deps) => {
       try {
@@ -1947,6 +1966,18 @@ const TOOL_SPECS: DeviceToolSpec[] = [
           manifest: { id: appId, name, entry, version: '1.0.0', requestedCapabilities: capabilities },
         });
         const installedId = String((installResult as Record<string, unknown> | null)?.id ?? appId);
+        // A same-id install with different bytes keeps the package but DISABLES
+        // it (integrity change must be re-reviewed). The stock launch error
+        // ("Third-party app is disabled") never explains that, so answer with
+        // actionable guidance instead of launching into a guaranteed failure.
+        const installedPolicy = (installResult as Record<string, unknown> | null)?.policy as { enabled?: boolean } | undefined;
+        if (installedPolicy?.enabled === false) {
+          return errorResult(
+            `A different mini-app already exists with the id '${installedId}', so the new build was installed DISABLED for safety. ` +
+            `Either stage it again with a different 'name' (or an explicit unique 'appId'), or ask the user to remove the old ` +
+            `'${installedId}' in the main app's App Browser page first.`,
+            );
+        }
         // The launch host MUST be attached to the document: when the isolated
         // renderer is unavailable the app browser falls back to an iframe that
         // renders INSIDE this element. A detached host made fallback launches
@@ -2057,6 +2088,7 @@ const TOOL_SPECS: DeviceToolSpec[] = [
       properties: { text: { type: 'string', description: 'Text to copy (max 20000 chars).' } },
       required: ['text'],
     },
+    androidOnly: true,
     rateLimit: CLIPBOARD_LIMIT,
     run: async (args, deps) => {
       const text = requiredString(args, 'text', 20000);
@@ -2073,6 +2105,7 @@ const TOOL_SPECS: DeviceToolSpec[] = [
     name: 'clipboard_read',
     description: 'Reads the current clipboard text (the device may ask the user for permission). An empty clipboard returns an empty string.',
     inputSchema: { type: 'object', properties: {} },
+    androidOnly: true,
     rateLimit: CLIPBOARD_LIMIT,
     run: async (_args, deps) => {
       try {
@@ -2091,6 +2124,13 @@ const TOOL_SPECS: DeviceToolSpec[] = [
 export interface DeviceToolsOptions {
   /** Feature flags from app.config.json; a `false` value hides matching tools. */
   features?: Partial<Record<DeviceToolFeature, boolean>>;
+  /**
+   * Host platform (`android` | `ios` | `web`, from Capacitor.getPlatform()).
+   * Tools whose native backing is Android-only are hidden from the catalogue
+   * on every other platform so the model is never offered a call that cannot
+   * work there.
+   */
+  platform?: string;
 }
 
 /**
@@ -2107,7 +2147,9 @@ export function createDeviceToolsTransport(
   const ctx: RunContext = { features, rate };
 
   const visible = () =>
-    TOOL_SPECS.filter((spec) => spec.feature === undefined || features[spec.feature] !== false);
+    TOOL_SPECS.filter((spec) =>
+      (spec.feature === undefined || features[spec.feature] !== false)
+      && (spec.androidOnly !== true || options.platform === undefined || options.platform === 'android'));
 
   const jsonRpcOk = (id: number | string, result: unknown): JsonRpcResponse => ({
     jsonrpc: '2.0',

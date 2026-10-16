@@ -672,7 +672,7 @@ function renderApproval() {
     card.className = 'aw-approval';
     const copy = document.createElement('div');
     const title = document.createElement('strong');
-    title.textContent = `অনুমতি প্রয়োজন: ${request.toolName}`;
+    title.textContent = `${request.requireBiometric ? '🔒 ' : ''}অনুমতি প্রয়োজন: ${request.toolName}`;
     const detail = document.createElement('span');
     detail.textContent = redactArgs(request.args) || 'Agent এই tool চালাতে চায়।';
     copy.append(title, detail);
@@ -690,9 +690,24 @@ async function answerApproval(approved) {
   const request = state.pendingApproval;
   if (!request) return;
   try {
-    await nativeAgent().respondToApproval(request.id, approved, approved ? undefined : 'User denied this action in AI Workspace');
-    recordEventLog('approval.responded', { toolName: request.toolName, approved, sessionKey: state.sessionKey }, approved ? '' : 'warn');
-    appendActivity(`${approved ? 'অনুমোদিত' : 'বাতিল'} · ${request.toolName}`, approved ? '' : 'warn');
+    // "Biometric" tool policies must not be satisfiable by a plain tap from
+    // whoever holds the phone: verify the owner first, and fail CLOSED (deny)
+    // when verification cannot run or does not succeed.
+    let granted = approved;
+    let denial;
+    if (approved && request.requireBiometric) {
+      try {
+        const proof = await window.NativeKit?.biometric?.verify?.(request.toolName);
+        granted = proof?.verified === true;
+        if (!granted) denial = 'Biometric verification did not succeed, so the action was not approved.';
+      } catch (error) {
+        granted = false;
+        denial = `Biometric verification is unavailable (${String(error?.message ?? error)}), so the action was not approved.`;
+      }
+    }
+    await nativeAgent().respondToApproval(request.id, granted, granted ? undefined : (denial ?? 'User denied this action in AI Workspace'));
+    recordEventLog('approval.responded', { toolName: request.toolName, approved: granted, biometric: request.requireBiometric === true, sessionKey: state.sessionKey }, granted ? '' : 'warn');
+    appendActivity(`${granted ? 'অনুমোদিত' : 'বাতিল'} · ${request.toolName}`, granted ? '' : 'warn');
     state.pendingApproval = null;
     renderApproval();
   } catch (error) {
@@ -792,6 +807,7 @@ async function wireEvents() {
         id: payload?.toolCallId ?? payload?.tool_call_id,
         toolName: payload?.toolName ?? payload?.tool_name ?? 'unknown tool',
         args: payload?.args ?? payload?.input ?? {},
+        requireBiometric: payload?.requireBiometric === true || payload?.require_biometric === true,
       };
       renderApproval(); appendActivity(`অনুমতি অপেক্ষমান · ${state.pendingApproval.toolName}`, 'warn');
       status(`অনুমতি অপেক্ষমান: ${state.pendingApproval.toolName}`, 'warn'); return;

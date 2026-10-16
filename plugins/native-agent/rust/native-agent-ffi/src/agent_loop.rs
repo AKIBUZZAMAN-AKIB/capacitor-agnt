@@ -1489,12 +1489,28 @@ pub(crate) async fn wait_for_approval(
     }
     event_bus::emit_approval_request(callback, tool_name, tool_call_id, args, require_biometric, session_key);
 
+    // An unanswered approval used to wait forever: if the page was reloaded or
+    // the user walked away, the whole turn silently stalled. Auto-deny after a
+    // generous window so the model gets a definitive answer it can act on.
+    const APPROVAL_TIMEOUT_MS: u64 = 10 * 60 * 1000;
+
     tokio::select! {
         result = rx => {
             // Resolved (or the sender was dropped): drop the slot either way.
             approval_senders.lock().await.remove(tool_call_id);
             result.map_err(|_| NativeAgentError::Agent {
                 msg: format!("Approval channel closed for tool '{}'", tool_call_id),
+            })
+        }
+        _ = tokio::time::sleep(Duration::from_millis(APPROVAL_TIMEOUT_MS)) => {
+            approval_senders.lock().await.remove(tool_call_id);
+            Ok(types::ApprovalResponse {
+                tool_call_id: tool_call_id.to_string(),
+                approved: false,
+                reason: Some(format!(
+                    "The approval request for '{}' timed out after 10 minutes with no answer — the user may be away. Ask again when the user is present.",
+                    tool_name
+                )),
             })
         }
         _ = wait_until_cancelled(abort_flag) => {
@@ -1541,7 +1557,7 @@ async fn wait_for_mcp_tool_result(
             let mut pending = mcp_pending.lock().await;
             pending.remove(tool_call_id);
             Ok(McpToolResult {
-                result_json: r#"{"error":"MCP tool timed out (WebView may be inactive)"}"#.into(),
+                result_json: r#"{"error":"MCP tool timed out (WebView may be inactive). If this tool legitimately needs longer, raise the MCP tool timeout in AI Workspace -> Settings -> Run limits."}"#.into(),
                 is_error: true,
             })
         }

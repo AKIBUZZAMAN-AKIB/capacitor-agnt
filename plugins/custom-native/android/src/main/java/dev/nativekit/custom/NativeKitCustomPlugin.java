@@ -137,6 +137,67 @@ public class NativeKitCustomPlugin extends Plugin {
         super.handleOnDestroy();
     }
 
+    /**
+     * Gate for biometric-gated tool approvals ("always_ask_biometric"). The
+     * engine emits requireBiometric with the approval request; the workspace
+     * calls this BEFORE responding, so a policy can no longer be satisfied by
+     * a plain tap from whoever is holding the phone. Fails closed: any error,
+     * missing hardware or a lockout rejects instead of approving.
+     */
+    @PluginMethod public void verifyBiometric(PluginCall call) {
+        android.app.Activity activity = getActivity();
+        if (activity == null || !(activity instanceof androidx.fragment.app.FragmentActivity)) {
+            call.reject("Biometric verification is unavailable (no activity)");
+            return;
+        }
+        try {
+            androidx.biometric.BiometricManager manager = androidx.biometric.BiometricManager.from(getContext());
+            int strength = android.os.Build.VERSION.SDK_INT >= 30
+                ? androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
+                : androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_WEAK;
+            int can = manager.canAuthenticate(strength);
+            if (can != androidx.biometric.BiometricManager.BIOMETRIC_SUCCESS) {
+                String reason = biometricUnavailableText(can);
+                call.reject("Biometric verification is unavailable: " + reason);
+                return;
+            }
+            String title = call.getString("reason", "Confirm to continue");
+            androidx.biometric.BiometricPrompt.PromptInfo info =
+                new androidx.biometric.BiometricPrompt.PromptInfo.Builder()
+                    .setTitle(title)
+                    .setSubtitle("Agent tool approval")
+                    .setAllowedAuthenticators(strength)
+                    .setConfirmationRequired(false)
+                    .build();
+            androidx.biometric.BiometricPrompt prompt = new androidx.biometric.BiometricPrompt(
+                (androidx.fragment.app.FragmentActivity) activity,
+                androidx.core.content.ContextCompat.getMainExecutor(getContext()),
+                new androidx.biometric.BiometricPrompt.AuthenticationCallback() {
+                    @Override public void onAuthenticationSucceeded(androidx.biometric.BiometricPrompt.AuthenticationResult result) {
+                        JSObject out = new JSObject();
+                        out.put("verified", true);
+                        call.resolve(out);
+                    }
+                    @Override public void onAuthenticationError(int errorCode, CharSequence message) {
+                        call.reject("Biometric verification failed (" + errorCode + "): " + message);
+                    }
+                });
+            prompt.authenticate(info);
+        } catch (Exception error) {
+            call.reject("Biometric verification failed: " + (error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage()), error);
+        }
+    }
+
+    private static String biometricUnavailableText(int code) {
+        switch (code) {
+            case androidx.biometric.BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE: return "no biometric hardware on this device";
+            case androidx.biometric.BiometricManager.BIOMETRIC_ERROR_HW_UNAVAILABLE: return "biometric hardware is unavailable";
+            case androidx.biometric.BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED: return "no fingerprint or face is enrolled";
+            case androidx.biometric.BiometricManager.BIOMETRIC_ERROR_SECURITY_UPDATE_REQUIRED: return "a security update is required first";
+            default: return "biometrics are locked out or unavailable (code " + code + ")";
+        }
+    }
+
     @PluginMethod public void checkAlarmCapabilities(PluginCall call) {
         AlarmScheduler scheduler = new AlarmScheduler(getContext());
         boolean fullScreen = true;
