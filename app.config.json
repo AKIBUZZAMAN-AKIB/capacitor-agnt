@@ -3,7 +3,7 @@
   "app": {
     "name": "NativeKit TestLab",
     "id": "dev.nativekit.shell",
-    "versionName": "1.4.22-miniapp-control",
+    "versionName": "1.4.23-audit-fixes",
     "versionCode": 33,
     "buildNumber": "31",
     "description": "A reusable, locally bundled Capacitor application shell",
