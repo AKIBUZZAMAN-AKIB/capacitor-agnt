@@ -488,7 +488,7 @@ public class NativeKitCustomPlugin extends Plugin {
             case SpeechRecognizer.ERROR_NO_MATCH: return "no speech was matched — try speaking again a little louder";
             case SpeechRecognizer.ERROR_SPEECH_TIMEOUT: return "no speech input was detected in time";
             case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS: return "microphone permission is missing";
-            case SpeechRecognizer.ERROR_AUDIO_RECORD_ERROR: return "the microphone could not be recorded (another app may hold it)";
+            case SpeechRecognizer.ERROR_AUDIO: return "the microphone could not be recorded (another app may hold it)";
             case SpeechRecognizer.ERROR_RECOGNIZER_BUSY: return "the recognition service is busy; try again shortly";
             case SpeechRecognizer.ERROR_NETWORK: return "the recognition service needs network access which is unavailable";
             case SpeechRecognizer.ERROR_NETWORK_TIMEOUT: return "the recognition service timed out on the network";
