@@ -1683,6 +1683,9 @@ async function saveRouter(event) {
 async function refreshSettings() {
   requireInit(); const config = await nativeAgent().getRuntimeConfig(); state.runtimeConfig = config; state.routerDraft = routerDraftFrom(config);
   $('aw-max-turns').value = config.defaultMaxTurns ?? 25; $('aw-max-tokens').value = config.maxTokens ?? 8192; $('aw-temperature').value = config.temperature ?? 0; $('aw-context-budget').value = config.contextCharBudget ?? 1000000;
+  // Engine stores milliseconds; the form works in whole seconds (30–300).
+  const timeoutSeconds = Math.round(Number(config.mcpToolTimeoutMs ?? 30000) / 1000);
+  $('aw-tool-timeout').value = Math.min(300, Math.max(30, Number.isFinite(timeoutSeconds) ? timeoutSeconds : 30));
   // Route choice and key management are intentionally separate: leaving the
   // route untouched means every chat uses native Auto Router.
   const selected = clean($('aw-provider').value) || 'auto'; $('aw-provider').value = selected; $('aw-model-label').textContent = selected === 'auto' ? 'Free Router · verified free only' : selected;
@@ -1720,7 +1723,7 @@ async function refreshKeyStatus() {
     : `${PROVIDER_LABELS[provider] ?? provider}-এর জন্য এখনো কোনো key সংরক্ষিত নেই।`;
 }
 async function saveProviderKey() { requireInit(); const provider = clean($('aw-key-provider').value); const key = $('aw-provider-key').value; if (!provider || provider === 'webllm') throw new Error('Key সংরক্ষণের জন্য একটি নির্দিষ্ট provider বাছুন।'); if (!key) throw new Error('API key/token লিখুন।'); await nativeAgent().setAuthKey(key, provider); $('aw-provider-key').value = ''; await refreshKeyStatus(); toast('Key নিরাপদ auth store-এ সংরক্ষণ হয়েছে।', 'ok'); }
-async function saveRuntime(event) { event.preventDefault(); requireInit(); const patch = { defaultMaxTurns: Number($('aw-max-turns').value), maxTokens: Number($('aw-max-tokens').value), temperature: Number($('aw-temperature').value), contextCharBudget: Number($('aw-context-budget').value), defaultProvider: clean($('aw-provider').value) || 'auto' }; state.runtimeConfig = await nativeAgent().setRuntimeConfig(patch); toast('Runtime settings সংরক্ষণ হয়েছে।', 'ok'); }
+async function saveRuntime(event) { event.preventDefault(); requireInit(); const timeoutSeconds = Number($('aw-tool-timeout').value); if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 30 || timeoutSeconds > 300) throw new Error('MCP tool timeout 30\u2013300 \u09b8\u09c7\u0995\u09c7\u09a8\u09cd\u09a1\u09c7\u09b0 \u09ae\u09a7\u09cd\u09af\u09c7 \u09b9\u09a4\u09c7 \u09b9\u09ac\u09c7\u0964'); const patch = { defaultMaxTurns: Number($('aw-max-turns').value), maxTokens: Number($('aw-max-tokens').value), temperature: Number($('aw-temperature').value), contextCharBudget: Number($('aw-context-budget').value), mcpToolTimeoutMs: Math.round(timeoutSeconds * 1000), defaultProvider: clean($('aw-provider').value) || 'auto' }; state.runtimeConfig = await nativeAgent().setRuntimeConfig(patch); toast('Runtime settings সংরক্ষণ হয়েছে।', 'ok'); }
 
 async function guarded(label, task) {
   recordEventLog('ui.action.started', { action: label });

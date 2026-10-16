@@ -1133,7 +1133,7 @@ const TOOL_SPECS: DeviceToolSpec[] = [
           const recheck = await deps.widget.checkOverlayPermission();
           if (!recheck?.granted) {
             return errorResult(
-              'The overlay (display over other apps) permission is not granted. Ask the user to enable it in system settings, then try again.',
+              "The overlay permission ('Display over other apps') is not granted yet. The system settings screen for this app has just been opened — the user must allow it there, then this tool must be called again to show the overlay.",
             );
           }
         }
@@ -1324,12 +1324,18 @@ const TOOL_SPECS: DeviceToolSpec[] = [
       const rate = clampNumber(optionalNumber(args, 'rate') ?? 1, 0.5, 2);
       try {
         const result = await deps.extras.ttsSpeak({ text, language, pitch, rate });
-        return textResult(
-          result?.languageSupported === false
-            ? `Speaking with the fallback voice — no ${language} voice is installed on this device.`
-            : 'Speaking.',
-          { queued: true, language },
-        );
+        if (result?.queued === false) {
+          // The engine has no voice data for the language; speaking anyway
+          // would play garbage. Give the model actionable guidance instead.
+          return errorResult(
+            `No ${language} voice is installed on this device, so the text was NOT read aloud. ` +
+              'Ask the user to install it once: Android Settings → System → Languages & input → Text-to-speech output → ' +
+              'choose a TTS engine → Install voice data (or download the ' + language + ' voice), then try again. ' +
+              'Alternatively offer to speak the same text with language="en-US" if an English voice exists.',
+            { queued: false, language },
+          );
+        }
+        return textResult('Speaking.', { queued: true, language });
       } catch (error) {
         return errorResult(`Speech failed: ${String((error as Error)?.message ?? error)}`);
       }
@@ -1918,12 +1924,52 @@ const TOOL_SPECS: DeviceToolSpec[] = [
           manifest: { id: appId, name, entry, version: '1.0.0', requestedCapabilities: [] },
         });
         const installedId = String((installResult as Record<string, unknown> | null)?.id ?? appId);
-        const host = typeof document !== 'undefined' && typeof document.createElement === 'function' ? document.createElement('div') : undefined;
-        await deps.miniapp.launch(installedId, host);
-        return textResult(
-          `Mini-app '${name}' installed and launched in the isolated app browser.`,
-          { appId: installedId, files: pkgFiles.length, entry },
-        );
+        // The launch host MUST be attached to the document: when the isolated
+        // renderer is unavailable the app browser falls back to an iframe that
+        // renders INSIDE this element. A detached host made fallback launches
+        // invisible even though the tool reported success.
+        let host: HTMLElement | undefined;
+        const removeHost = () => { try { host?.remove(); } catch { /* already detached */ } };
+        if (typeof document !== 'undefined' && typeof document.createElement === 'function') {
+          host = document.createElement('div');
+          host.setAttribute('data-nativekit-miniapp-host', installedId);
+          host.style.position = 'fixed';
+          host.style.inset = '0';
+          host.style.zIndex = '2147483000';
+          host.style.display = 'flex';
+          host.style.flexDirection = 'column';
+          host.style.background = '#0b0f14';
+          (document.body ?? document.documentElement).appendChild(host);
+        }
+        try {
+          const launched = (await deps.miniapp.launch(installedId, host)) as
+            | { renderer?: string; frame?: HTMLIFrameElement; stop?: () => void }
+            | undefined;
+          const renderer = String(launched?.renderer ?? 'isolated');
+          if (renderer === 'iframe' && host) {
+            // The fallback iframe renders inside `host`: fill the remaining space
+            // and add a close bar so the overlay can be dismissed on the page.
+            const frame = launched?.frame;
+            if (frame?.style) { frame.style.flex = '1 1 auto'; frame.style.width = '100%'; frame.style.height = '100%'; frame.style.border = '0'; }
+            const bar = document.createElement('div');
+            bar.textContent = `✕ বন্ধ করুন — ${name}`;
+            bar.title = 'Close mini-app';
+            bar.style.cssText = 'flex:0 0 auto;display:flex;align-items:center;justify-content:flex-end;padding:10px 14px;font:600 13px system-ui,sans-serif;color:#e6edf3;background:#11161d;cursor:pointer;';
+            bar.addEventListener('click', () => { try { launched?.stop?.(); } catch { /* session already stopped */ } removeHost(); });
+            host.prepend(bar);
+          } else {
+            // The fullscreen isolated activity is the real UI; the host is unused
+            // and must not linger as an invisible fixed overlay.
+            removeHost();
+          }
+          return textResult(
+            `Mini-app '${name}' installed and launched${renderer === 'iframe' ? ' in the in-app fallback frame' : ' in the isolated app browser'}.`,
+            { appId: installedId, renderer, files: pkgFiles.length, entry },
+          );
+        } catch (error) {
+          removeHost();
+          throw error;
+        }
       } catch (error) {
         return errorResult(`Mini-app staging failed: ${String((error as Error)?.message ?? error)}`);
       }
@@ -2118,13 +2164,28 @@ export function defaultDeviceToolDeps(): DeviceToolDeps {
       install: async () => { throw new Error('stage_miniapp is not wired in this host'); },
       launch: async () => { throw new Error('stage_miniapp is not wired in this host'); },
     },
-    clipboard:
-      typeof navigator !== 'undefined' && navigator.clipboard
-        ? navigator.clipboard
-        : {
-            writeText: async () => { throw new Error('Clipboard is unavailable in this host'); },
-            readText: async () => { throw new Error('Clipboard is unavailable in this host'); },
-          },
+    // The WebView clipboard API is gesture-gated and usually rejects calls
+    // made from a tool dispatch (no user gesture at that moment), so the
+    // native plugin is tried first; the web API is only a fallback for
+    // non-native hosts (browser preview).
+    clipboard: {
+      writeText: async (text: string) => {
+        try {
+          await NativeKitCustom.clipboardSetText({ text });
+          return;
+        } catch { /* not a native host — fall through to the web API */ }
+        if (typeof navigator === 'undefined' || !navigator.clipboard) throw new Error('Clipboard is unavailable in this host');
+        await navigator.clipboard.writeText(text);
+      },
+      readText: async () => {
+        try {
+          const result = await NativeKitCustom.clipboardGetText();
+          return String(result?.text ?? '');
+        } catch { /* not a native host — fall through to the web API */ }
+        if (typeof navigator === 'undefined' || !navigator.clipboard) throw new Error('Clipboard is unavailable in this host');
+        return navigator.clipboard.readText();
+      },
+    },
     now: () => Date.now(),
   };
 }

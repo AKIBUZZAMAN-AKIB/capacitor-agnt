@@ -6,6 +6,8 @@ import android.app.AlarmManager;
 import android.app.NotificationManager;
 import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -411,13 +413,22 @@ public class NativeKitCustomPlugin extends Plugin {
         whenTtsReady(call, () -> {
             try {
                 int availability = tts.setLanguage(Locale.forLanguageTag(language));
+                if (availability == TextToSpeech.LANG_MISSING_DATA || availability == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    // Speaking anyway would play garbage or silence; report the
+                    // missing voice so the caller can guide the user instead.
+                    JSObject out = new JSObject();
+                    out.put("queued", false);
+                    out.put("languageSupported", false);
+                    call.resolve(out);
+                    return;
+                }
                 tts.setPitch((float) pitch);
                 tts.setSpeechRate((float) rate);
                 int result = tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "nativekit-agent-" + System.currentTimeMillis());
                 if (result == TextToSpeech.ERROR) { call.reject("The text-to-speech engine refused to speak"); return; }
                 JSObject out = new JSObject();
                 out.put("queued", true);
-                out.put("languageSupported", availability != TextToSpeech.LANG_MISSING_DATA && availability != TextToSpeech.LANG_NOT_SUPPORTED);
+                out.put("languageSupported", true);
                 call.resolve(out);
             } catch (Exception error) { call.reject("Speech failed: " + error.getMessage(), error); }
         });
@@ -471,6 +482,22 @@ public class NativeKitCustomPlugin extends Plugin {
         }
     }
 
+    /** Maps SpeechRecognizer error codes to a message a person can act on. */
+    private static String speechErrorText(int error) {
+        switch (error) {
+            case SpeechRecognizer.ERROR_NO_MATCH: return "no speech was matched — try speaking again a little louder";
+            case SpeechRecognizer.ERROR_SPEECH_TIMEOUT: return "no speech input was detected in time";
+            case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS: return "microphone permission is missing";
+            case SpeechRecognizer.ERROR_AUDIO_RECORD_ERROR: return "the microphone could not be recorded (another app may hold it)";
+            case SpeechRecognizer.ERROR_RECOGNIZER_BUSY: return "the recognition service is busy; try again shortly";
+            case SpeechRecognizer.ERROR_NETWORK: return "the recognition service needs network access which is unavailable";
+            case SpeechRecognizer.ERROR_NETWORK_TIMEOUT: return "the recognition service timed out on the network";
+            case SpeechRecognizer.ERROR_SERVER: return "the recognition service returned a server error";
+            case SpeechRecognizer.ERROR_CLIENT: return "the recognition client hit an internal error";
+            default: return "speech recognition error " + error;
+        }
+    }
+
     private void startListening(PluginCall call) {
         Activity activity = getActivity();
         if (activity == null) { call.reject("No foreground activity is available"); return; }
@@ -506,7 +533,7 @@ public class NativeKitCustomPlugin extends Plugin {
                     public void onError(int error) {
                         if (!settled.compareAndSet(false, true)) return;
                         recognizer.destroy();
-                        call.reject("Speech recognition error " + error);
+                        call.reject("Speech recognition failed: " + speechErrorText(error));
                     }
 
                     @Override public void onReadyForSpeech(Bundle params) {}
@@ -662,8 +689,17 @@ public class NativeKitCustomPlugin extends Plugin {
     private void pickDocumentResult(PluginCall call, ActivityResult result) {
         if (call == null) return;
         if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null) { call.reject("No file was picked"); return; }
+        // The copy can reach 25 MB; ActivityResult callbacks arrive on the main
+        // thread, so the stream work moves to a worker thread (PluginCall
+        // resolve/reject is thread-safe).
+        final Uri data = result.getData().getData();
+        Thread copier = new Thread(() -> copyPickedDocument(call, data), "nativekit-pick-copy");
+        copier.setDaemon(true);
+        copier.start();
+    }
+
+    private void copyPickedDocument(PluginCall call, Uri uri) {
         try {
-            Uri uri = result.getData().getData();
             if (uri == null) { call.reject("No file was picked"); return; }
             String name = "picked-" + Long.toHexString(System.currentTimeMillis());
             Cursor cursor = null;
@@ -707,6 +743,35 @@ public class NativeKitCustomPlugin extends Plugin {
             out2.put("bytes", target.length());
             call.resolve(out2);
         } catch (Exception error) { call.reject("The picked file could not be saved: " + error.getMessage(), error); }
+    }
+
+    @PluginMethod
+    public void clipboardSetText(PluginCall call) {
+        String text = required(call, "text");
+        if (text == null) return;
+        try {
+            ClipboardManager clipboard = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+            if (clipboard == null) { call.reject("No clipboard service is available"); return; }
+            clipboard.setPrimaryClip(ClipData.newPlainText("agent", text));
+            call.resolve();
+        } catch (Exception error) { call.reject("Clipboard write failed: " + error.getMessage(), error); }
+    }
+
+    @PluginMethod
+    public void clipboardGetText(PluginCall call) {
+        try {
+            ClipboardManager clipboard = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+            JSObject out = new JSObject();
+            out.put("text", "");
+            if (clipboard != null && clipboard.hasPrimaryClip()) {
+                android.content.ClipDescription description = clipboard.getPrimaryClipDescription();
+                if (description != null && description.hasMimeType(android.content.ClipDescription.MIMETYPE_TEXT_PLAIN)) {
+                    CharSequence text = clipboard.getPrimaryClip().getItemAt(0).coerceToText(getContext());
+                    if (text != null) out.put("text", text.toString());
+                }
+            }
+            call.resolve(out);
+        } catch (Exception error) { call.reject("Clipboard read failed: " + error.getMessage(), error); }
     }
 
     private String required(PluginCall call, String key) {

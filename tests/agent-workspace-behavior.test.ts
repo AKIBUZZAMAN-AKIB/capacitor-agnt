@@ -180,3 +180,14 @@ describe('device tool catalogue publication at startup', () => {
     expect(source).toContain('withDeviceTools: true');
   });
 });
+
+describe('MCP tool timeout exposure in runtime settings', () => {
+  it('loads the engine timeout into the form and saves it back as milliseconds', () => {
+    // The engine default is 30s; heavy/interactive tools (mini-app staging,
+    // camera, QR) can exceed it. The approved remedy is UI exposure only —
+    // the form works in whole seconds (30–300), the engine stores ms.
+    expect(source).toContain("$('aw-tool-timeout').value = Math.min(300, Math.max(30,");
+    expect(source).toContain('const timeoutSeconds = Number($(\'aw-tool-timeout\').value);');
+    expect(source).toContain('mcpToolTimeoutMs: Math.round(timeoutSeconds * 1000)');
+  });
+});

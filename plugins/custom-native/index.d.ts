@@ -29,6 +29,8 @@ export interface NativeKitCustomPlugin extends Plugin {
   setTorch(options: { on: boolean }): Promise<void>;
   batteryStatus(): Promise<{ percent?: number; charging?: boolean; plugged?: boolean }>;
   pickDocument(): Promise<{ path: string; bytes?: number }>;
+  clipboardSetText(options: { text: string }): Promise<void>;
+  clipboardGetText(): Promise<{ text: string }>;
   addListener(eventName: 'nativeSSEData' | 'nativeSSEEnd' | 'nativeSSEError' | 'nativeLocation' | 'nativeAlarmFired', listenerFunc: (event: any) => void): Promise<PluginListenerHandle>;
 }
 

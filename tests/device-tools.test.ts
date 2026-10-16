@@ -822,9 +822,9 @@ describe('phase 2: speech, scanner and hardware tools', () => {
     expect(calls.find((c) => c.method === 'ttsSpeak')?.args).toMatchObject({ text: 'স্বাগতম', language: 'bn-BD', pitch: 2, rate: 0.5 });
   });
 
-  it('reports a fallback voice when the language is not installed', async () => {
+  it('refuses to speak with a missing voice and returns install guidance', async () => {
     const { deps } = fakeDeps({ extras: {
-      ttsSpeak: async () => ({ queued: true, languageSupported: false }),
+      ttsSpeak: async () => ({ queued: false, languageSupported: false }),
       ttsStop: async () => {},
       listenSpeech: async () => ({ text: '' }),
       scanQrCode: async () => ({ text: '' }),
@@ -835,7 +835,9 @@ describe('phase 2: speech, scanner and hardware tools', () => {
       pickDocument: async () => ({ path: 'picked/x' }),
     } });
     const result = await callTool(deps, 'speak', { text: 'hello' });
-    expect(textOf(result)).toContain('no bn-BD voice');
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('No bn-BD voice is installed');
+    expect(textOf(result)).toContain('Text-to-speech output');
   });
 
   it('stops speaking and listens with a clamped timeout', async () => {
@@ -1035,6 +1037,74 @@ describe('stage_miniapp', () => {
     expect(install?.args.manifest).toMatchObject({ id: 'agent.test-mini-app', name: 'Test Mini App', entry: 'mini/index.html' });
     expect(install?.args.files).toHaveLength(2);
     expect(calls.find((c) => c.method === 'miniapp.launch')?.args).toMatchObject({ appId: 'agent.test-mini-app' });
+  });
+
+  it('attaches the iframe-fallback host to the document with a close bar and reports the fallback renderer', async () => {
+    // The isolated renderer can be unavailable (API < 28, another session open);
+    // the browser then falls back to an iframe rendered inside the launch host.
+    // A detached host made that fallback invisible while the tool said success.
+    const created: any[] = [];
+    const fakeDoc = {
+      createElement: () => {
+        const el: any = { style: {}, children: [], removed: false, listeners: {},
+          setAttribute() {}, prepend(child: any) { el.children.unshift(child); },
+          addEventListener(type: string, fn: any) { (el.listeners[type] ??= []).push(fn); },
+          remove() { el.removed = true; } };
+        created.push(el);
+        return el;
+      },
+      body: { appended: [] as any[], appendChild(el: any) { this.appended.push(el); } },
+    };
+    (globalThis as any).document = fakeDoc;
+    try {
+      const { deps } = fakeDeps();
+      (deps as any).putFile('mini/index.html', '<p>hi</p>');
+      (deps.miniapp as any).launch = async () => ({ renderer: 'iframe', frame: { style: {} }, stop: () => undefined });
+      const result = await callTool(deps, 'stage_miniapp', { name: 'Fallback', files: ['mini/index.html'] });
+      expect(result.isError ?? false).toBe(false);
+      expect(textOf(result)).toContain('in the in-app fallback frame');
+      expect(fakeDoc.body.appended).toHaveLength(1);
+      const host = fakeDoc.body.appended[0];
+      expect(host).toBe(created[0]);
+      expect(host.removed).toBe(false);
+      expect(host.style.position).toBe('fixed');
+      expect(host.children.some((child: any) => child.listeners.click?.length)).toBe(true);
+    } finally { delete (globalThis as any).document; }
+  });
+
+  it('removes the host when the isolated renderer launches (the activity is the UI)', async () => {
+    const fakeDoc: any = {
+      createElement: () => ({ style: {}, children: [], removed: false, setAttribute() {}, prepend(child: any) { (this as any).children.unshift(child); }, addEventListener() {}, remove() { (this as any).removed = true; } }),
+      body: { appended: [] as any[], appendChild(el: any) { this.appended.push(el); } },
+    };
+    (globalThis as any).document = fakeDoc;
+    try {
+      const { deps } = fakeDeps();
+      (deps as any).putFile('mini/index.html', '<p>ok</p>');
+      (deps.miniapp as any).launch = async () => ({ renderer: 'isolated', stop: () => undefined });
+      const result = await callTool(deps, 'stage_miniapp', { name: 'Iso', files: ['mini/index.html'] });
+      expect(textOf(result)).toContain('in the isolated app browser');
+      expect(fakeDoc.body.appended).toHaveLength(1);
+      expect(fakeDoc.body.appended[0].removed).toBe(true);
+    } finally { delete (globalThis as any).document; }
+  });
+
+  it('cleans the host up when launch fails', async () => {
+    const fakeDoc: any = {
+      createElement: () => ({ style: {}, children: [], removed: false, setAttribute() {}, prepend(child: any) { (this as any).children.unshift(child); }, addEventListener() {}, remove() { (this as any).removed = true; } }),
+      body: { appended: [] as any[], appendChild(el: any) { this.appended.push(el); } },
+    };
+    (globalThis as any).document = fakeDoc;
+    try {
+      const { deps } = fakeDeps();
+      (deps as any).putFile('mini/index.html', '<p>x</p>');
+      (deps.miniapp as any).launch = async () => { throw new Error('Another isolated browser session is already open'); };
+      const result = await callTool(deps, 'stage_miniapp', { name: 'Boom', files: ['mini/index.html'] });
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain('Another isolated browser session is already open');
+      expect(fakeDoc.body.appended).toHaveLength(1);
+      expect(fakeDoc.body.appended[0].removed).toBe(true);
+    } finally { delete (globalThis as any).document; }
   });
 
   it('validates the entry file and rejects path traversal', async () => {
