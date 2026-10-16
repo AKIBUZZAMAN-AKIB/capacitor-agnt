@@ -506,7 +506,12 @@ export async function connectMcpServers(
   const listener = agent.addListener?.('nativeAgentEvent', (event: any) => {
     const type = event?.eventType ?? event?.type;
     if (type !== 'mcp_tool_call') return;
-    let payload: any = event?.payload ?? event;
+    // NativeAgentPlugin.kt delivers { eventType, payloadJson: '<json string>' }.
+    // Reading only `event.payload` used to fall back to the whole envelope object,
+    // so toolCallId was undefined, handleToolCall returned silently and every
+    // WebView-executed MCP tool (device__* included) stalled until the engine's
+    // timeout — the tool never ran at all.
+    let payload: any = event?.payloadJson ?? event?.payload ?? event;
     if (typeof payload === 'string') {
       try {
         payload = JSON.parse(payload);
@@ -543,7 +548,12 @@ async function handleToolCall(
 ): Promise<void> {
   const toolCallId = payload?.toolCallId ?? payload?.tool_call_id;
   const fullName = payload?.toolName ?? payload?.tool_name ?? '';
-  if (!toolCallId) return;
+  if (!toolCallId) {
+    // Never silently drop a call: the engine blocks the model's turn on a reply,
+    // so an unanswerable event must at least be visible in the MCP log.
+    log(`mcp_tool_call without a usable toolCallId was ignored: ${JSON.stringify(payload ?? {}).slice(0, 200)}`);
+    return;
+  }
 
   const reply = async (result: McpCallToolResult) => {
     try {

@@ -413,6 +413,47 @@ describe('connectMcpServers', () => {
     await conn.dispose();
   });
 
+  it('answers the real native envelope: eventType + payloadJson string', async () => {
+    const { agent, responses } = agentSpy();
+    const conn = await connectMcpServers(agent, [{ name: 'weather', url: 'x' }], {
+      makeTransport: weatherServer,
+    });
+
+    // NativeAgentPlugin.kt notifyListeners('nativeAgentEvent', { eventType, payloadJson })
+    // — the payload is a JSON STRING under `payloadJson`, never an object under
+    // `payload`. The listener used to read only `event.payload`, fell back to the
+    // whole envelope, found no toolCallId and returned silently, so every
+    // WebView-executed MCP tool (device__* included) stalled for the engine's
+    // full timeout without ever running.
+    agent.emit({
+      eventType: 'mcp_tool_call',
+      payloadJson: JSON.stringify({ toolCallId: 'native-1', toolName: 'weather__forecast', args: { city: 'Sylhet' } }),
+    });
+    await flush();
+
+    expect(responses).toHaveLength(1);
+    expect(responses[0].id).toBe('native-1');
+    expect(responses[0].result.content[0].text).toBe('sunny in Sylhet');
+    expect(responses[0].isError).toBe(false);
+    await conn.dispose();
+  });
+
+  it('logs an mcp_tool_call that carries no toolCallId instead of dropping it silently', async () => {
+    const { agent, responses } = agentSpy();
+    const logs: string[] = [];
+    const conn = await connectMcpServers(agent, [{ name: 'weather', url: 'x' }], {
+      makeTransport: weatherServer,
+      onLog: (message: string) => logs.push(message),
+    });
+
+    agent.emit({ eventType: 'mcp_tool_call', payloadJson: JSON.stringify({ toolName: 'weather__forecast' }) });
+    await flush();
+
+    expect(responses).toHaveLength(0);
+    expect(logs.some((line) => line.includes('without a usable toolCallId'))).toBe(true);
+    await conn.dispose();
+  });
+
   it('one unreachable server does not stop the others', async () => {
     const { agent } = agentSpy();
     const conn = await connectMcpServers(
