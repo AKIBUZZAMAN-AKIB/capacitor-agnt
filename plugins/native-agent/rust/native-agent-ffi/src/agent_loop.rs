@@ -1504,7 +1504,7 @@ pub(crate) async fn wait_for_approval(
         }
         _ = tokio::time::sleep(Duration::from_millis(APPROVAL_TIMEOUT_MS)) => {
             approval_senders.lock().await.remove(tool_call_id);
-            Ok(types::ApprovalResponse {
+            Ok(crate::types::ApprovalResponse {
                 tool_call_id: tool_call_id.to_string(),
                 approved: false,
                 reason: Some(format!(
