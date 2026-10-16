@@ -248,7 +248,7 @@
 .aw-approval>div{min-width:0}
 .aw-approval strong,.aw-approval span{display:block}
 .aw-approval strong{font-size:.85rem;font-weight:740}
-.aw-approval span{margin-top:4px;color:#decf9c;font-size:.72rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.aw-approval span{margin-top:4px;color:#decf9c;font-size:.72rem;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-height:38vh;overflow-y:auto;-webkit-overflow-scrolling:touch;touch-action:pan-y}
 
 /* Provider reasoning (never persisted) */
 .aw-thinking-panel{

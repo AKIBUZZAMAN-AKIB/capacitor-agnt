@@ -654,8 +654,9 @@ function clearChat() {
 
 function redactArgs(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+  // One arg per line so long file lists stay readable on a phone; the CSS wraps and scrolls.
   const secret = /(?:key|token|secret|password|authorization|cookie|content|prompt|command)/i;
-  return Object.entries(value).map(([key, raw]) => `${key}: ${secret.test(key) ? 'গোপন রাখা হয়েছে' : safeText(typeof raw === 'string' ? raw : JSON.stringify(raw), 80)}`).join(' · ');
+  return Object.entries(value).map(([key, raw]) => `${key}: ${secret.test(key) ? 'গোপন রাখা হয়েছে' : safeText(typeof raw === 'string' ? raw : JSON.stringify(raw), 160)}`).join('\n');
 }
 
 function renderApproval() {

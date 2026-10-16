@@ -30,16 +30,17 @@ const helpers = new Function(
     'bytes', 'safeText', 'redactLogText', 'LOG_SECRET_KEY', 'LOG_BODY_KEY', 'safeLogValue',
     'eventTone', 'eventSummary', 'sanitizeStoredEvent',
     'AGENT_ERROR_ADVICE', 'AGENT_ERROR_PATTERNS', 'classifyAgentError',
-  ])}\nreturn { safeLogValue, sanitizeStoredEvent, classifyAgentError, AGENT_ERROR_ADVICE, AGENT_ERROR_PATTERNS };`,
+  ])}\n${extract(['redactArgs'])}\nreturn { safeLogValue, sanitizeStoredEvent, classifyAgentError, AGENT_ERROR_ADVICE, AGENT_ERROR_PATTERNS, redactArgs };`,
 )() as {
   safeLogValue: (value: unknown, key?: string, depth?: number) => any;
   sanitizeStoredEvent: (entry: unknown, index?: number) => any;
   classifyAgentError: (error: unknown, reportedCategory?: string) => { code: string; message: string; detail: string };
   AGENT_ERROR_ADVICE: Record<string, string>;
   AGENT_ERROR_PATTERNS: Array<[string, RegExp]>;
+  redactArgs: (value: unknown) => string;
 };
 
-const { safeLogValue, sanitizeStoredEvent, classifyAgentError, AGENT_ERROR_ADVICE, AGENT_ERROR_PATTERNS } = helpers;
+const { safeLogValue, sanitizeStoredEvent, classifyAgentError, AGENT_ERROR_ADVICE, AGENT_ERROR_PATTERNS, redactArgs } = helpers;
 
 describe('agent audit log values', () => {
   it('keeps the real provider error phrase while masking the secret inside it', () => {
@@ -178,6 +179,31 @@ describe('device tool catalogue publication at startup', () => {
     expect(source).toContain('refreshFiles(), connectMcpAtStartup(), loadPersona(),');
     // And the device tools must be requested explicitly.
     expect(source).toContain('withDeviceTools: true');
+  });
+});
+
+describe('approval card argument preview (redactArgs)', () => {
+  it('puts each argument on its own line and caps long values at 160 chars', () => {
+    const text = redactArgs({
+      name: 'File Dumper',
+      files: ['apps/dump/index.html', 'apps/dump/app.js', 'apps/dump/style.css', 'apps/dump/logo.svg'],
+      longNote: 'x'.repeat(400),
+    });
+    // One arg per line — the approval card wraps and scrolls instead of one
+    // clipped line running off the phone screen.
+    expect(text.split('\n')).toHaveLength(3);
+    expect(text).toContain('name: File Dumper');
+    expect(text).toContain('files: ');
+    expect(text).toContain('x'.repeat(160));
+    expect(text).not.toContain('x'.repeat(161));
+  });
+
+  it('still withholds secret-named arguments and ignores non-objects', () => {
+    const text = redactArgs({ apiKey: 'sk-super-secret', token: 'tok', path: '/tmp/ok' });
+    expect(text).not.toContain('sk-super-secret');
+    expect(text).toContain('path: /tmp/ok');
+    expect(redactArgs('nope')).toBe('');
+    expect(redactArgs(null)).toBe('');
   });
 });
 

@@ -1095,6 +1095,9 @@ const NativeKit: any = {
                 miniapp: {
                   install: (pkg: Parameters<typeof NativeKit.appBrowser.install>[0]) => NativeKit.appBrowser.install(pkg),
                   launch: (appId: string, target: HTMLElement) => NativeKit.appBrowser.launch(appId, target),
+                  list: () => NativeKit.appBrowser.list(),
+                  sessions: () => NativeKit.appBrowser.sessions(),
+                  stopAll: () => NativeKit.appBrowser.stopAll(),
                 },
                 ...(isNative ? { fetchImpl: buildNativeFetch() } : {}),
               },

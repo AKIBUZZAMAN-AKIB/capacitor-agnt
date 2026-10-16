@@ -158,6 +158,9 @@ export interface DeviceToolDeps {
   miniapp: {
     install(pkg: { files: Array<{ path: string; data: string | Uint8Array; type?: string }>; manifest?: Record<string, unknown> }): Promise<unknown>;
     launch(appId: string, target: unknown): Promise<unknown>;
+    list(): Promise<unknown>;
+    sessions(): Promise<unknown>;
+    stopAll(): Promise<void>;
   };
   /** Clipboard, when the host grants it. */
   clipboard: { writeText(text: string): Promise<void>; readText(): Promise<string> };
@@ -541,6 +544,13 @@ const ZIP_LIMIT = { max: 4, windowMs: 60_000 };
 const SQL_LIMIT = { max: 20, windowMs: 60_000 };
 const NEARBY_LIMIT = { max: 6, windowMs: 60_000 };
 const MINIAPP_LIMIT = { max: 3, windowMs: 60_000 };
+// Mirrors APP_BROWSER_CAPABILITIES in bridge/app-browser.ts (kept local so the
+// tool bridge stays import-light for tests and non-app hosts).
+const MINIAPP_CAPABILITIES = [
+  'permissions', 'http', 'camera', 'location', 'backgroundLocation', 'haptics',
+  'notifications', 'alarms', 'background', 'preferences', 'secureStorage', 'sqlite',
+  'filesystem', 'fileTransfer', 'sharing', 'networkStatus', 'appInfo', 'pushNotifications', 'browser',
+] as const;
 const CLIPBOARD_LIMIT = { max: 10, windowMs: 60_000 };
 
 const TOOL_SPECS: DeviceToolSpec[] = [
@@ -1867,7 +1877,11 @@ const TOOL_SPECS: DeviceToolSpec[] = [
     name: 'stage_miniapp',
     description:
       'Builds a mini-app (HTML/CSS/JS bundle) from workspace files and launches it in the isolated app browser, full screen on the device. ' +
-      'files[] lists workspace-relative paths; the entry must be an HTML file among them. Up to 60 files / 5 MB.',
+      'files[] lists workspace-relative paths; the entry must be an HTML file among them. Up to 60 files / 5 MB. ' +
+      'Inside a mini-app, device access goes ONLY through the preloaded window.NativeKit API — kit.location.current(), kit.location.watch(cb), kit.camera.getPhoto(), kit.http.get/post(), kit.notifications.schedule(), kit.haptics.vibrate(), kit.sqlite.*, kit.filesystem.* — ' +
+      'NOT navigator.geolocation/getUserMedia or other raw browser APIs, which the sandbox blocks. Every NativeKit call shows the user a permission prompt unless already granted. ' +
+      'Declare the device access the app needs in capabilities[]; anything not listed there is blocked outright, so a location app must pass ["location", "permissions"]. ' +
+      'The user manages, re-permissions and removes mini-apps in the main app\'s App Browser page.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1875,6 +1889,7 @@ const TOOL_SPECS: DeviceToolSpec[] = [
         files: { type: 'array', items: { type: 'string' }, description: 'Workspace-relative file paths (the HTML entry plus its css/js/assets).' },
         entryFile: { type: 'string', description: 'Entry HTML file (default: the first path ending in index.html).' },
         appId: { type: 'string', description: 'Optional stable app id (lowercase letters/digits/dots/dashes); default "agent.<name>".' },
+        capabilities: { type: 'array', items: { type: 'string' }, description: 'Device capabilities the mini-app may request at runtime, e.g. ["location","permissions","http","camera","notifications"]. Valid: ' + MINIAPP_CAPABILITIES.join(', ') + '. Each use still prompts the user unless granted; unlisted capabilities are blocked.' },
       },
       required: ['name', 'files'],
     },
@@ -1897,6 +1912,14 @@ const TOOL_SPECS: DeviceToolSpec[] = [
       } else {
         const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
         appId = slug ? `agent.${slug}` : 'agent.app';
+      }
+      const rawCaps = Array.isArray(args.capabilities) ? args.capabilities : [];
+      const capabilities = [...new Set(rawCaps.map((cap) => (typeof cap === 'string' ? cap.trim() : '')).filter(Boolean))];
+      if (capabilities.length > 12) return errorResult("'capabilities' may list at most 12 entries.");
+      for (const cap of capabilities) {
+        if (!(MINIAPP_CAPABILITIES as readonly string[]).includes(cap)) {
+          return errorResult(`'${cap}' is not a mini-app capability. Valid capabilities: ${MINIAPP_CAPABILITIES.join(', ')}.`);
+        }
       }
       const pkgFiles: Array<{ path: string; data: string | Uint8Array; type?: string }> = [];
       let total = 0;
@@ -1921,7 +1944,7 @@ const TOOL_SPECS: DeviceToolSpec[] = [
       try {
         const installResult = await deps.miniapp.install({
           files: pkgFiles,
-          manifest: { id: appId, name, entry, version: '1.0.0', requestedCapabilities: [] },
+          manifest: { id: appId, name, entry, version: '1.0.0', requestedCapabilities: capabilities },
         });
         const installedId = String((installResult as Record<string, unknown> | null)?.id ?? appId);
         // The launch host MUST be attached to the document: when the isolated
@@ -1963,8 +1986,10 @@ const TOOL_SPECS: DeviceToolSpec[] = [
             removeHost();
           }
           return textResult(
-            `Mini-app '${name}' installed and launched${renderer === 'iframe' ? ' in the in-app fallback frame' : ' in the isolated app browser'}.`,
-            { appId: installedId, renderer, files: pkgFiles.length, entry },
+            `Mini-app '${name}' installed and launched${renderer === 'iframe' ? ' in the in-app fallback frame' : ' in the isolated app browser'}.` +
+              (capabilities.length ? ` Requested capabilities: ${capabilities.join(', ')} — each use still asks the user unless granted.` : ' No device capabilities were requested, so window.NativeKit calls inside the app will be blocked; restage with capabilities[] to enable them.') +
+              " The user can manage or remove it in the main app's App Browser page.",
+            { appId: installedId, renderer, files: pkgFiles.length, entry, capabilities },
           );
         } catch (error) {
           removeHost();
@@ -1972,6 +1997,55 @@ const TOOL_SPECS: DeviceToolSpec[] = [
         }
       } catch (error) {
         return errorResult(`Mini-app staging failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'list_miniapps',
+    description:
+      'Lists the installed mini-apps (id, name, version, enabled state, requested capabilities, size) and which isolated browser sessions are currently running. ' +
+      "Use this before relaunching, or to tell the user what is installed. The user manages, re-permissions and removes mini-apps in the main app's App Browser page.",
+    inputSchema: { type: 'object', properties: {} },
+    feature: 'appBrowser',
+    rateLimit: MINIAPP_LIMIT,
+    run: async (_args, deps) => {
+      try {
+        const [apps, sessions] = await Promise.all([deps.miniapp.list(), deps.miniapp.sessions()]);
+        const rows = Array.isArray(apps) ? apps : [];
+        const running = Array.isArray(sessions) ? sessions : [];
+        if (!rows.length) {
+          return textResult('No mini-apps are installed yet. Build one with stage_miniapp.', { installed: 0, running: running.length });
+        }
+        const lines = rows.map((app: any) => {
+          const manifest = app?.manifest ?? {};
+          const caps = Array.isArray(manifest.requestedCapabilities) && manifest.requestedCapabilities.length
+            ? ` · capabilities: ${manifest.requestedCapabilities.join(',')}`
+            : ' · no capabilities requested';
+          const enabled = app?.policy?.enabled === false ? 'disabled' : 'enabled';
+          return `${app?.id ?? '?'} · ${manifest.name ?? '?'} v${manifest.version ?? '?'} · ${enabled}${caps} · ${Number(app?.totalBytes ?? 0)} B in ${Number(app?.fileCount ?? 0)} file(s)`;
+        });
+        const runningNote = running.length
+          ? ` Running now: ${running.map((session: any) => `${session?.appId ?? '?'} (${session?.renderer ?? '?'})`).join(', ')}.`
+          : ' No sessions are running.';
+        return textResult(`${rows.length} mini-app(s) installed:\n${lines.join('\n')}\n${runningNote}`, { installed: rows.length, running: running.length });
+      } catch (error) {
+        return errorResult(`Could not list mini-apps: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'stop_miniapps',
+    description:
+      'Stops every running mini-app and isolated browser session (closes the fullscreen app on the device). Installed mini-apps and their files are NOT removed — relaunch with stage_miniapp.',
+    inputSchema: { type: 'object', properties: {} },
+    feature: 'appBrowser',
+    rateLimit: MINIAPP_LIMIT,
+    run: async (_args, deps) => {
+      try {
+        await deps.miniapp.stopAll();
+        return textResult('All running mini-app sessions were stopped. Installed mini-apps are unchanged.');
+      } catch (error) {
+        return errorResult(`Could not stop mini-app sessions: ${String((error as Error)?.message ?? error)}`);
       }
     },
   },
@@ -2163,6 +2237,9 @@ export function defaultDeviceToolDeps(): DeviceToolDeps {
     miniapp: {
       install: async () => { throw new Error('stage_miniapp is not wired in this host'); },
       launch: async () => { throw new Error('stage_miniapp is not wired in this host'); },
+      list: async () => { throw new Error('mini-app listing is not wired in this host'); },
+      sessions: async () => { throw new Error('mini-app session listing is not wired in this host'); },
+      stopAll: async () => { throw new Error('mini-app session stop is not wired in this host'); },
     },
     // The WebView clipboard API is gesture-gated and usually rejects calls
     // made from a tool dispatch (no user gesture at that moment), so the

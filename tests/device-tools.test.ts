@@ -172,6 +172,9 @@ function fakeDeps(overrides: Partial<DeviceToolDeps> = {}, clockStart = 1_000_00
     miniapp: {
       async install(pkg: any) { calls.push({ method: 'miniapp.install', args: pkg }); return { id: (pkg.manifest as any)?.id ?? 'agent.test' }; },
       async launch(appId: string, _target: unknown) { calls.push({ method: 'miniapp.launch', args: { appId } }); return { launched: true }; },
+      async list() { calls.push({ method: 'miniapp.list', args: {} }); return [{ id: 'agent.test-mini-app', manifest: { name: 'Test Mini App', version: '1.0.0', requestedCapabilities: ['location'] }, policy: { enabled: true }, totalBytes: 42, fileCount: 1 }]; },
+      async sessions() { calls.push({ method: 'miniapp.sessions', args: {} }); return [{ appId: 'agent.test-mini-app', renderer: 'isolated' }]; },
+      async stopAll() { calls.push({ method: 'miniapp.stopAll', args: {} }); },
     },
     clipboard: {
       async writeText(text: string) { calls.push({ method: 'clipboard.writeText', args: { text } }); },
@@ -296,7 +299,7 @@ describe('device tools catalogue', () => {
       'battery_status', 'pick_file',
       'ask_user', 'zip_files', 'unzip_file', 'sql_query',
       'nearby_status', 'nearby_advertise', 'nearby_discover', 'nearby_connect', 'nearby_accept', 'nearby_send',
-      'stage_miniapp', 'clipboard_write', 'clipboard_read',
+      'stage_miniapp', 'list_miniapps', 'stop_miniapps', 'clipboard_write', 'clipboard_read',
     ]);
   });
 
@@ -331,6 +334,8 @@ describe('device tools catalogue', () => {
     expect(names).not.toContain('nearby_accept');
     expect(names).not.toContain('nearby_send');
     expect(names).not.toContain('stage_miniapp');
+    expect(names).not.toContain('list_miniapps');
+    expect(names).not.toContain('stop_miniapps');
     expect(names).toContain('speak');
     expect(names).toContain('ask_user');
     expect(names).not.toContain('take_photo');
@@ -1039,6 +1044,26 @@ describe('stage_miniapp', () => {
     expect(calls.find((c) => c.method === 'miniapp.launch')?.args).toMatchObject({ appId: 'agent.test-mini-app' });
   });
 
+  it('passes requested capabilities into the manifest and validates them', async () => {
+    const { deps, calls } = fakeDeps();
+    (deps as any).putFile('mini/index.html', '<p>where am I</p>');
+    const result = await callTool(deps, 'stage_miniapp', { name: 'Loc App', files: ['mini/index.html'], capabilities: ['location', 'permissions'] });
+    expect(result.isError ?? false).toBe(false);
+    const install = calls.find((c) => c.method === 'miniapp.install');
+    expect(install?.args.manifest).toMatchObject({ requestedCapabilities: ['location', 'permissions'] });
+    expect(textOf(result)).toContain('Requested capabilities: location, permissions');
+
+    const bad = await callTool(deps, 'stage_miniapp', { name: 'Bad', files: ['mini/index.html'], capabilities: ['teleport'] });
+    expect(bad.isError).toBe(true);
+    expect(textOf(bad)).toContain('not a mini-app capability');
+
+    const none = await callTool(deps, 'stage_miniapp', { name: 'Plain', files: ['mini/index.html'] });
+    expect(none.isError ?? false).toBe(false);
+    const plainInstall = calls.filter((c) => c.method === 'miniapp.install').at(-1);
+    expect(plainInstall?.args.manifest.requestedCapabilities).toEqual([]);
+    expect(textOf(none)).toContain('No device capabilities were requested');
+  });
+
   it('attaches the iframe-fallback host to the document with a close bar and reports the fallback renderer', async () => {
     // The isolated renderer can be unavailable (API < 28, another session open);
     // the browser then falls back to an iframe rendered inside the launch host.
@@ -1116,6 +1141,38 @@ describe('stage_miniapp', () => {
     expect(traversal.isError).toBe(true);
     const badId = await callTool(deps, 'stage_miniapp', { name: 'X', files: ['mini/other.html'], appId: 'Bad Id!' });
     expect(badId.isError).toBe(true);
+  });
+});
+
+describe('mini-app control', () => {
+  it('lists installed mini-apps and running sessions', async () => {
+    const { deps, calls } = fakeDeps();
+    const result = await callTool(deps, 'list_miniapps', {});
+    expect(result.isError ?? false).toBe(false);
+    const text = textOf(result);
+    expect(text).toContain('agent.test-mini-app');
+    expect(text).toContain('Test Mini App');
+    expect(text).toContain('capabilities: location');
+    expect(text).toContain('Running now: agent.test-mini-app (isolated)');
+    expect(calls.some((c) => c.method === 'miniapp.list')).toBe(true);
+    expect(calls.some((c) => c.method === 'miniapp.sessions')).toBe(true);
+  });
+
+  it('reports when nothing is installed', async () => {
+    const { deps } = fakeDeps();
+    (deps.miniapp as any).list = async () => [];
+    const result = await callTool(deps, 'list_miniapps', {});
+    expect(result.isError ?? false).toBe(false);
+    expect(textOf(result)).toContain('No mini-apps are installed');
+  });
+
+  it('stops all mini-app sessions without removing them', async () => {
+    const { deps, calls } = fakeDeps();
+    const result = await callTool(deps, 'stop_miniapps', {});
+    expect(result.isError ?? false).toBe(false);
+    expect(textOf(result)).toContain('stopped');
+    expect(textOf(result)).toContain('unchanged');
+    expect(calls.some((c) => c.method === 'miniapp.stopAll')).toBe(true);
   });
 });
 
