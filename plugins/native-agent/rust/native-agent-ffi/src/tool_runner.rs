@@ -219,7 +219,7 @@ pub fn get_tool_definitions(_workspace: &str, allowed_json: Option<&str>) -> Vec
 /// Single source of truth: `is_builtin_tool` and `builtin_tool_names` both read
 /// this, so the membership test and the human-readable list can never drift
 /// apart the way a duplicated `matches!` arm and a duplicated array would.
-pub const BUILTIN_TOOL_NAMES: [&str; 21] = [
+pub const BUILTIN_TOOL_NAMES: [&str; 25] = [
     "read_file",
     "write_file",
     "edit_file",

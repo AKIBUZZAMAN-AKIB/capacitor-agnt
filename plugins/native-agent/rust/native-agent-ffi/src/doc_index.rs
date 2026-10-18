@@ -401,7 +401,9 @@ pub(crate) fn tool_index_document(
         Ok(())
     })();
     match result {
-        Ok(()) => conn.execute("COMMIT", []).map_err(sql_err)?,
+        Ok(()) => {
+            conn.execute("COMMIT", []).map_err(sql_err)?;
+        }
         Err(e) => {
             let _ = conn.execute("ROLLBACK", []);
             return Ok(tool_err(format!("Indexing failed: {}", e)));
