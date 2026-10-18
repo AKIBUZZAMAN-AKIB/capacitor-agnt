@@ -4,10 +4,15 @@
 
 Upstream: https://github.com/alibaba/page-agent
 License: MIT (see below).
-Local modification: the demo bundle's `autoInit` flag is forced off so the
-script never self-instantiates (the upstream default for tag-less injection is
-to connect to a Mainland-China demo LLM). The host app instantiates
-`window.PageAgent` explicitly via `bootstrap.js`.
+Local modifications (both listed in the file header):
+ 1. The demo bundle's `autoInit` flag is forced off so the script never
+    self-instantiates (the upstream default for tag-less injection is to
+    connect to a Mainland-China demo LLM). The host app instantiates
+    `window.PageAgent` explicitly via `bootstrap.js`.
+ 2. The top-level CSS injection appends to `(document.head ||
+    document.documentElement)` instead of `document.head` — at true document
+    start `<head>` is not parsed yet, and the upstream code crashed before
+    `window.PageAgent` was ever assigned.
 
 ```
 MIT License
