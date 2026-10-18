@@ -34,6 +34,7 @@ import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
@@ -108,6 +109,12 @@ public final class IsolatedBrowserActivity extends Activity {
     private boolean bound;
     private WebView webView;
     private FrameLayout content;
+    // Loading cover shown until the WebView commits its first visible frame; the
+    // shell background (not white) shows through any launch/swap gap.
+    private FrameLayout cover;
+    private TextView shellTitle;
+    private boolean shellBuilt;
+    private boolean revealed;
     private JavaScriptReplyProxy replyProxy;
     private String sessionId;
     private String token;
@@ -155,6 +162,9 @@ public final class IsolatedBrowserActivity extends Activity {
         }
         try { WebView.setDataDirectorySuffix("nativekit-isolated-v1"); }
         catch (IllegalStateException ignored) { /* This process already initialized WebView with the same fixed suffix. */ }
+        // A real session is taking over this process: hand the warm-up WebView's
+        // memory back immediately (the expensive provider init already happened).
+        IsolatedBrowserWarmupService.releaseForSession();
         incoming = new Messenger(new Handler(Looper.getMainLooper(), message -> {
             Bundle data = message.getData();
             String target = data.getString("sessionId", "");
@@ -348,6 +358,11 @@ public final class IsolatedBrowserActivity extends Activity {
             }
             allowedHosts = Collections.unmodifiableSet(parsedHosts);
             buildShell(title);
+            // Create + start loading the WebView immediately instead of waiting for
+            // the broker bind round-trip: status messages queue in pendingMessages
+            // until the connection lands, so ordering is preserved while one serial
+            // IPC hop disappears from the perceived launch path.
+            createWebView();
             Intent brokerIntent = new Intent(this, IsolatedBrowserBrokerService.class);
             if (!bindService(brokerIntent, connection, Context.BIND_AUTO_CREATE)) throw new IllegalStateException("Could not bind isolated browser broker");
         } catch (Exception error) {
@@ -363,6 +378,13 @@ public final class IsolatedBrowserActivity extends Activity {
     }
 
     private void buildShell(String title) {
+        if (shellBuilt) {
+            // Session swap (onNewIntent): reuse the existing shell so setContentView
+            // never flashes the window background mid-swap. Only the title and the
+            // content area (cleared + re-covered by createWebView) change.
+            if (shellTitle != null) shellTitle.setText(title);
+            return;
+        }
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.rgb(7, 17, 31));
@@ -375,6 +397,7 @@ public final class IsolatedBrowserActivity extends Activity {
         heading.setTextColor(Color.WHITE);
         heading.setTextSize(16);
         heading.setSingleLine(true);
+        shellTitle = heading;
         toolbar.addView(heading, new LinearLayout.LayoutParams(0, dp(44), 1));
         Button close = new Button(this);
         close.setText("Close");
@@ -383,15 +406,69 @@ public final class IsolatedBrowserActivity extends Activity {
         root.addView(toolbar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(60)));
 
         content = new FrameLayout(this);
-        content.setBackgroundColor(Color.WHITE);
+        // Dark shell ground (matches the theme windowBackground): every state the
+        // user can see before the first paint is this color, never white.
+        content.setBackgroundColor(Color.rgb(7, 17, 31));
         root.addView(content, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         setContentView(root);
+        shellBuilt = true;
         ImeInsetsHelper.apply(root);
+    }
+
+    // Dark branded loading cover with a spinner, layered ON TOP of the WebView.
+    // The WebView beneath stays INVISIBLE until its first committed frame, so the
+    // pre-paint white surface can never reach the screen.
+    private void installCover() {
+        FrameLayout layout = new FrameLayout(this);
+        layout.setBackgroundColor(Color.rgb(7, 17, 31));
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setGravity(Gravity.CENTER);
+        box.addView(new ProgressBar(this), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        TextView label = new TextView(this);
+        label.setText("Loading isolated app…");
+        label.setTextColor(Color.rgb(148, 163, 184));
+        label.setTextSize(14);
+        label.setPadding(0, dp(14), 0, 0);
+        box.addView(label, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        layout.addView(box, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        cover = layout;
+        if (content != null) {
+            content.addView(layout, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
+    }
+
+    // Reveal the WebView only after it committed a visible frame (or finished
+    // loading, as a fallback): a short fade hides the last seams.
+    private void reveal() {
+        if (revealed || isFinishing()) return;
+        revealed = true;
+        WebView view = webView;
+        FrameLayout loadingCover = cover;
+        if (view == null) { removeCover(loadingCover); return; }
+        try {
+            view.setAlpha(0f);
+            view.setVisibility(View.VISIBLE);
+            view.animate().alpha(1f).setDuration(150).start();
+        } catch (Throwable ignored) {}
+        removeCover(loadingCover);
+    }
+
+    private void removeCover(FrameLayout loadingCover) {
+        if (loadingCover == null) return;
+        if (cover == loadingCover) cover = null;
+        if (loadingCover.getParent() != content) return;
+        try {
+            loadingCover.animate().alpha(0f).setDuration(150).withEndAction(() -> {
+                if (loadingCover.getParent() == content) content.removeView(loadingCover);
+            }).start();
+        } catch (Throwable ignored) {}
     }
 
     @SuppressLint("SetJavaScriptEnabled")
     private void createWebView() {
         if (isFinishing() || webView != null) return;
+        revealed = false;
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) || !WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
             sendStatus("unsupported", "Android System WebView lacks document-start messaging support");
             showFailure("Android System WebView must be updated before this isolated app can run.", false);
@@ -414,6 +491,19 @@ public final class IsolatedBrowserActivity extends Activity {
         }
         content.removeAllViews();
         content.addView(webView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        // Pre-paint surface color: the WebView stays INVISIBLE under the loading
+        // cover until its first committed frame, and this dark ground prevents
+        // any sub-frame white from ever escaping during the swap.
+        webView.setBackgroundColor(Color.rgb(7, 17, 31));
+        webView.setVisibility(View.INVISIBLE);
+        webView.setAlpha(0f);
+        // IMPORTANT while this activity is visible, waived as soon as it is not:
+        // when the user leaves, the isolated renderer yields its memory instead of
+        // pressuring the (kill-protected) host process.
+        if (Build.VERSION.SDK_INT >= 26) {
+            try { webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true); }
+            catch (Throwable ignored) {}
+        }
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
@@ -439,6 +529,7 @@ public final class IsolatedBrowserActivity extends Activity {
         installRendererWatchdog();
         sendStatus("partitionReady", profilePartition ? "per-app Android WebView profile" : "per-app virtual origin; third-party cookies disabled");
         sendStatus("loading", startUrl);
+        installCover();
         webView.loadUrl(startUrl);
     }
 
@@ -529,8 +620,17 @@ public final class IsolatedBrowserActivity extends Activity {
             return blockedResponse();
         }
 
+        @Override public void onPageCommitVisible(WebView view, String url) {
+            // Earliest point guaranteed to draw the NEW page (not the old content /
+            // pre-paint surface) — the safe signal to reveal + fade in.
+            reveal();
+        }
+
         @Override public void onPageFinished(WebView view, String url) {
             if (startUrl.equals(url) || isLocal(Uri.parse(url))) sendStatus("ready", origin);
+            // Fallback reveal: some error/sparse pages never commit visibly in a
+            // way apps expect; never leave the user stuck on the loading cover.
+            reveal();
         }
 
         @Override public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {

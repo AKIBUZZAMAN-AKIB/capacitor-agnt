@@ -8,6 +8,10 @@ const config: CapacitorConfig = {
   appName: app.name,
   webDir: web.nativeStagingDir,
   loggingBehavior: 'debug',
+  // Match the WebView surface to the app ground color (--bg in styles.css): the
+  // webview paints this instead of white while booting, so a process-death
+  // relaunch or cold start never flashes a white screen before the page draws.
+  backgroundColor: '#060b16',
   // Production uses the bundled webDir. There is deliberately no server.url.
   // Keep the whole server block absent while secure defaults are sufficient.
   ...((network.allowCleartext || security.allowNavigation.length > 0)

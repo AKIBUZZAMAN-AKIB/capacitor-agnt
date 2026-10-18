@@ -9,6 +9,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.ResultReceiver;
 import android.view.Gravity;
+import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
 import android.webkit.GeolocationPermissions;
@@ -24,6 +25,7 @@ import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.TextView;
 
 import androidx.webkit.WebViewCompat;
@@ -49,6 +51,13 @@ public final class RemoteBrowserActivity extends Activity {
     private ResultReceiver resultReceiver;
     private WebView webView;
     private FrameLayout content;
+    // Loading cover until the first committed frame + a slim network progress bar
+    // (remote pages load over the network — the user must see it is progressing).
+    private FrameLayout cover;
+    private ProgressBar progress;
+    private TextView shellTitle;
+    private boolean shellBuilt;
+    private boolean revealed;
     private Set<String> allowedHosts = Collections.emptySet();
     private boolean reported;
 
@@ -57,6 +66,9 @@ public final class RemoteBrowserActivity extends Activity {
         if (Build.VERSION.SDK_INT < 28) { finish(); return; }
         try { WebView.setDataDirectorySuffix("nativekit-isolated-v1"); }
         catch (IllegalStateException ignored) { /* Shared only with this app's isolated-process browser surfaces. */ }
+        // A real session is taking over this process: hand the warm-up WebView's
+        // memory back immediately (the expensive provider init already happened).
+        IsolatedBrowserWarmupService.releaseForSession();
         initialize(getIntent());
     }
 
@@ -93,6 +105,12 @@ public final class RemoteBrowserActivity extends Activity {
     }
 
     private void buildShell(String configuredTitle, String fallbackTitle) {
+        String title = configuredTitle == null || configuredTitle.trim().isEmpty() ? fallbackTitle : configuredTitle.trim();
+        if (shellBuilt) {
+            // Session swap (onNewIntent): reuse the shell — no setContentView flash.
+            if (shellTitle != null) shellTitle.setText(title);
+            return;
+        }
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.rgb(7, 17, 31));
@@ -104,27 +122,82 @@ public final class RemoteBrowserActivity extends Activity {
         back.setOnClickListener(view -> { if (webView != null && webView.canGoBack()) webView.goBack(); });
         toolbar.addView(back, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(44)));
         TextView heading = new TextView(this);
-        String title = configuredTitle == null || configuredTitle.trim().isEmpty() ? fallbackTitle : configuredTitle.trim();
         heading.setText(title);
         heading.setTextColor(Color.WHITE);
         heading.setTextSize(16);
         heading.setSingleLine(true);
         heading.setPadding(dp(10), 0, dp(10), 0);
+        shellTitle = heading;
         toolbar.addView(heading, new LinearLayout.LayoutParams(0, dp(44), 1));
         Button close = new Button(this);
         close.setText("Close");
         close.setOnClickListener(view -> finish());
         toolbar.addView(close, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(44)));
         root.addView(toolbar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(60)));
+        progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        progress.setMax(100);
+        progress.setProgress(0);
+        root.addView(progress, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(3)));
         content = new FrameLayout(this);
-        content.setBackgroundColor(Color.WHITE);
+        // Dark shell ground (matches the theme windowBackground): the whole
+        // pre-paint journey is this color, never white.
+        content.setBackgroundColor(Color.rgb(7, 17, 31));
         root.addView(content, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         setContentView(root);
+        shellBuilt = true;
         ImeInsetsHelper.apply(root);
+    }
+
+    // Dark branded loading cover layered ON TOP of the WebView until its first
+    // committed frame; identical treatment to the mini-app surface.
+    private void installCover() {
+        FrameLayout layout = new FrameLayout(this);
+        layout.setBackgroundColor(Color.rgb(7, 17, 31));
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setGravity(Gravity.CENTER);
+        box.addView(new ProgressBar(this), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        TextView label = new TextView(this);
+        label.setText("Loading page…");
+        label.setTextColor(Color.rgb(148, 163, 184));
+        label.setTextSize(14);
+        label.setPadding(0, dp(14), 0, 0);
+        box.addView(label, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        layout.addView(box, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        cover = layout;
+        if (content != null) {
+            content.addView(layout, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
+    }
+
+    private void reveal() {
+        if (revealed || isFinishing()) return;
+        revealed = true;
+        WebView view = webView;
+        FrameLayout loadingCover = cover;
+        if (view == null) { removeCover(loadingCover); return; }
+        try {
+            view.setAlpha(0f);
+            view.setVisibility(View.VISIBLE);
+            view.animate().alpha(1f).setDuration(150).start();
+        } catch (Throwable ignored) {}
+        removeCover(loadingCover);
+    }
+
+    private void removeCover(FrameLayout loadingCover) {
+        if (loadingCover == null) return;
+        if (cover == loadingCover) cover = null;
+        if (loadingCover.getParent() != content) return;
+        try {
+            loadingCover.animate().alpha(0f).setDuration(150).withEndAction(() -> {
+                if (loadingCover.getParent() == content) content.removeView(loadingCover);
+            }).start();
+        } catch (Throwable ignored) {}
     }
 
     @SuppressLint("SetJavaScriptEnabled")
     private void createWebView(String startUrl) {
+        revealed = false;
         webView = new WebView(this);
         if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
             try { WebViewCompat.setProfile(webView, "nativekit_remote_url_v1"); }
@@ -132,6 +205,15 @@ public final class RemoteBrowserActivity extends Activity {
         }
         content.removeAllViews();
         content.addView(webView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        // Pre-paint surface: INVISIBLE under the cover until the first committed
+        // frame; dark ground so no sub-frame white can escape.
+        webView.setBackgroundColor(Color.rgb(7, 17, 31));
+        webView.setVisibility(View.INVISIBLE);
+        webView.setAlpha(0f);
+        if (Build.VERSION.SDK_INT >= 26) {
+            try { webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true); }
+            catch (Throwable ignored) {}
+        }
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
@@ -153,6 +235,12 @@ public final class RemoteBrowserActivity extends Activity {
             @Override public void onPermissionRequest(PermissionRequest request) { request.deny(); }
             @Override public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) { callback.invoke(origin, false, false); }
             @Override public boolean onShowFileChooser(WebView view, android.webkit.ValueCallback<Uri[]> callback, FileChooserParams params) { callback.onReceiveValue(null); return true; }
+            @Override public void onProgressChanged(WebView view, int newProgress) {
+                ProgressBar bar = progress;
+                if (bar == null) return;
+                bar.setProgress(Math.max(0, Math.min(100, newProgress)));
+                bar.setVisibility(newProgress >= 100 ? View.INVISIBLE : View.VISIBLE);
+            }
         });
         webView.setWebViewClient(new WebViewClient() {
             @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
@@ -160,9 +248,18 @@ public final class RemoteBrowserActivity extends Activity {
                 if (!isAllowed(request.getUrl())) { report("blocked", "navigation outside the HTTPS allowlist was blocked"); return true; }
                 return false;
             }
+            @Override public void onPageCommitVisible(WebView view, String url) {
+                // Earliest point guaranteed to draw the NEW page — reveal + fade in.
+                reveal();
+            }
+            @Override public void onPageFinished(WebView view, String url) {
+                // Fallback: never leave the user stuck on the loading cover.
+                reveal();
+            }
             @Override public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) { handler.cancel(); report("blocked", "TLS certificate error"); }
             @Override public void onSafeBrowsingHit(WebView view, WebResourceRequest request, int threatType, SafeBrowsingResponse callback) { callback.backToSafety(true); }
         });
+        installCover();
         webView.loadUrl(startUrl);
     }
 

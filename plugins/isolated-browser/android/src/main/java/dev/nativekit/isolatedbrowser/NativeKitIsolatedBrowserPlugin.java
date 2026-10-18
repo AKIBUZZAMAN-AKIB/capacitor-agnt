@@ -28,6 +28,9 @@ public final class NativeKitIsolatedBrowserPlugin extends Plugin implements Isol
 
     @Override public void load() {
         IsolatedBrowserBrokerService.setListener(this);
+        // Pre-warm the isolated process (RAM permitting) so the first mini-app
+        // launch skips the Chromium provider cold init.
+        IsolatedBrowserWarmupService.warm(getContext());
     }
 
     @PluginMethod
@@ -170,6 +173,9 @@ public final class NativeKitIsolatedBrowserPlugin extends Plugin implements Isol
             intent.putExtra(IsolatedBrowserActivity.EXTRA_MEDIA_AUTOPLAY, Boolean.TRUE.equals(call.getBoolean("mediaAutoplay", false)));
             intent.putExtra(IsolatedBrowserActivity.EXTRA_HANG_DELAY, requiredLong(call, "hangTerminationDelayMs"));
             getContext().startActivity(intent);
+            // Kill-protect the host process while the mini app is in front —
+            // without this, low-RAM devices cold-restart the agent app on close.
+            IsolatedSessionKeepAliveService.start(getContext());
             JSObject result = new JSObject();
             result.put("origin", "https://" + IsolatedAppStore.originHost(appId));
             call.resolve(result);
@@ -239,7 +245,10 @@ public final class NativeKitIsolatedBrowserPlugin extends Plugin implements Isol
                     event.put("state", state);
                     event.put("reason", data == null ? "" : data.getString("reason", ""));
                     notifyListeners("remoteBrowserStatus", event, true);
-                    if (("closed".equals(state) || "failed".equals(state)) && sessionId.equals(activeRemoteSessionId)) activeRemoteSessionId = null;
+                    if (("closed".equals(state) || "failed".equals(state)) && sessionId.equals(activeRemoteSessionId)) {
+                        activeRemoteSessionId = null;
+                        endSessionHousekeeping();
+                    }
                 }
             };
             Intent intent = new Intent(getContext(), RemoteBrowserActivity.class);
@@ -251,6 +260,7 @@ public final class NativeKitIsolatedBrowserPlugin extends Plugin implements Isol
             intent.putExtra(RemoteBrowserActivity.EXTRA_RESULT, receiver);
             activeRemoteSessionId = sessionId;
             getContext().startActivity(intent);
+            IsolatedSessionKeepAliveService.start(getContext());
             JSObject result = new JSObject(); result.put("sessionId", sessionId); call.resolve(result);
         } catch (Exception error) { activeRemoteSessionId = null; call.reject(message(error), error); }
     }
@@ -265,6 +275,7 @@ public final class NativeKitIsolatedBrowserPlugin extends Plugin implements Isol
             intent.putExtra(RemoteBrowserActivity.EXTRA_SESSION_ID, sessionId);
             getContext().startActivity(intent);
             activeRemoteSessionId = null;
+            endSessionHousekeeping();
         }
         call.resolve();
     }
@@ -284,6 +295,7 @@ public final class NativeKitIsolatedBrowserPlugin extends Plugin implements Isol
         String sessionId = call.getString("sessionId", "");
         if (!sessionId.isEmpty()) IsolatedBrowserBrokerService.unregisterSession(sessionId, true);
         if (sessionId.equals(activeSessionId)) activeSessionId = null;
+        endSessionHousekeeping();
         call.resolve();
     }
 
@@ -307,7 +319,15 @@ public final class NativeKitIsolatedBrowserPlugin extends Plugin implements Isol
         if ("closed".equals(state)) {
             IsolatedBrowserBrokerService.unregisterSession(sessionId, false);
             if (sessionId.equals(activeSessionId)) activeSessionId = null;
+            endSessionHousekeeping();
         }
+    }
+
+    // Session over: release the kill-protection and (RAM permitting) pre-warm the
+    // isolated process again so the NEXT open is warm too.
+    private void endSessionHousekeeping() {
+        IsolatedSessionKeepAliveService.stop(getContext());
+        IsolatedBrowserWarmupService.warm(getContext());
     }
 
     @Override protected void handleOnDestroy() {

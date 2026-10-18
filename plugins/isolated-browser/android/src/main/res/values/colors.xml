@@ -1,0 +1,8 @@
+<resources>
+  <!-- Shell ground color shared by the window background, the toolbar strip and
+       the loading cover. Everything the user can see before the WebView paints
+       its first frame is THIS color, so no launch-preview / reveal gap can ever
+       flash white. -->
+  <color name="nativekit_isolated_bg">#FF07111F</color>
+  <color name="nativekit_isolated_muted">#FF94A3B8</color>
+</resources>

@@ -6,5 +6,19 @@
     <item name="android:navigationBarColor">#07111f</item>
     <item name="android:statusBarColor">#07111f</item>
     <item name="android:windowLightStatusBar">false</item>
+    <!-- The launch preview and any snapshot→live reveal gap draw the window
+         background. Without this item the DayNight default (white in light
+         mode) flashed between the host page and the dark shell. -->
+    <item name="android:windowBackground">@color/nativekit_isolated_bg</item>
+    <!-- Deliberate bottom-sheet motion instead of the OEM default
+         (scale/fade app-launch transition over an undrawn window). -->
+    <item name="android:windowAnimationStyle">@style/NativeKitIsolatedBrowserAnimation</item>
+  </style>
+
+  <style name="NativeKitIsolatedBrowserAnimation" parent="@android:style/Animation.Activity">
+    <item name="android:activityOpenEnterAnimation">@anim/nativekit_slide_up_in</item>
+    <item name="android:activityOpenExitAnimation">@anim/nativekit_no_anim</item>
+    <item name="android:activityCloseEnterAnimation">@anim/nativekit_no_anim</item>
+    <item name="android:activityCloseExitAnimation">@anim/nativekit_slide_down_out</item>
   </style>
 </resources>

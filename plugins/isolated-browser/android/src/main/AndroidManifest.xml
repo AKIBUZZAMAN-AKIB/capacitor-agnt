@@ -4,6 +4,24 @@
       android:name="dev.nativekit.isolatedbrowser.IsolatedBrowserBrokerService"
       android:exported="false"
       android:stopWithTask="false" />
+    <!-- Pre-warms the isolated process (RAM permitting) so the first mini-app /
+         remote-URL launch skips Chromium provider cold init. -->
+    <service
+      android:name="dev.nativekit.isolatedbrowser.IsolatedBrowserWarmupService"
+      android:process=":nativekit_isolated"
+      android:exported="false" />
+    <!-- Kill-protects the HOST process while an isolated session is in front;
+         without it low-RAM devices cold-restarted the whole agent app when the
+         mini app closed. -->
+    <service
+      android:name="dev.nativekit.isolatedbrowser.IsolatedSessionKeepAliveService"
+      android:exported="false"
+      android:foregroundServiceType="specialUse"
+      android:stopWithTask="false">
+      <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="keeps the agent host process alive while an isolated mini app session is in front" />
+    </service>
     <service
       android:name="dev.nativekit.isolatedbrowser.IsolatedStorageCleanupService"
       android:process=":nativekit_isolated"

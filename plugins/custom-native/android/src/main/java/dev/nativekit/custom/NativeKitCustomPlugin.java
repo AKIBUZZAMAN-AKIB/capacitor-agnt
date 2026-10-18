@@ -690,9 +690,62 @@ public class NativeKitCustomPlugin extends Plugin {
         Activity activity = getActivity();
         if (activity == null) { call.reject("No foreground activity is available"); return; }
         try {
-            activity.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+            Uri uri = Uri.parse(url);
+            String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.US);
+            Intent intent = new Intent(Intent.ACTION_VIEW, uri);
+            String tabsPackage = ("http".equals(scheme) || "https".equals(scheme)) ? customTabsPackage(activity) : null;
+            if (tabsPackage != null) {
+                // Custom Tab: in-app look (app-colored toolbar) + bottom-sheet slide
+                // instead of a full app switch into the browser. Deliberately no
+                // session/warmup AIDL — that would need the androidx.browser
+                // dependency; this plain-intent path keeps dependencies at zero.
+                intent.setPackage(tabsPackage);
+                intent.putExtra("android.support.customtabs.extra.SESSION", (android.os.Parcelable) null);
+                intent.putExtra("android.support.customtabs.extra.TOOLBAR_COLOR", 0xFF07111F);
+            }
+            try {
+                android.app.ActivityOptions options = android.app.ActivityOptions.makeCustomAnimation(
+                    activity, R.anim.nativekit_ct_slide_up_in, R.anim.nativekit_ct_none);
+                activity.startActivity(intent, options.toBundle());
+            } catch (Exception animationFailure) {
+                activity.startActivity(intent);
+            }
             call.resolve();
         } catch (Exception error) { call.reject("No app on this device could open that URL", error); }
+    }
+
+    // Default browser first (so cookies/sessions behave as the user expects), then
+    // any installed Custom Tabs provider; null means plain ACTION_VIEW fallback.
+    private static String customTabsPackage(android.content.Context context) {
+        try {
+            android.content.pm.PackageManager pm = context.getPackageManager();
+            Intent view = new Intent(Intent.ACTION_VIEW, Uri.parse("https://example.com"));
+            android.content.pm.ResolveInfo defaultHandler = pm.resolveActivity(view, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY);
+            if (defaultHandler != null && defaultHandler.activityInfo != null
+                && !"android".equals(defaultHandler.activityInfo.packageName)
+                && supportsCustomTabs(pm, defaultHandler.activityInfo.packageName)) {
+                return defaultHandler.activityInfo.packageName;
+            }
+            Intent service = new Intent("android.support.customtabs.action.CustomTabsService");
+            java.util.List<android.content.pm.ResolveInfo> services = pm.queryIntentServices(service, 0);
+            if (services != null) {
+                for (android.content.pm.ResolveInfo info : services) {
+                    if (info.serviceInfo != null && !"android".equals(info.serviceInfo.packageName)) {
+                        return info.serviceInfo.packageName;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    private static boolean supportsCustomTabs(android.content.pm.PackageManager pm, String packageName) {
+        try {
+            Intent service = new Intent("android.support.customtabs.action.CustomTabsService");
+            service.setPackage(packageName);
+            java.util.List<android.content.pm.ResolveInfo> handlers = pm.queryIntentServices(service, 0);
+            return handlers != null && !handlers.isEmpty();
+        } catch (Exception error) { return false; }
     }
 
     @PluginMethod
