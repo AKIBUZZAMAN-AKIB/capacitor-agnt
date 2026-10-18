@@ -234,7 +234,7 @@ public final class PageAgentHost {
 
     private static String readAsset(Context context, String name) {
         try (InputStream stream = context.getAssets().open(name)) {
-            return new String(readCapped(stream), StandardCharsets.UTF_8) + "\n";
+            return readCapped(stream) + "\n";
         } catch (Throwable error) {
             return null;
         }
