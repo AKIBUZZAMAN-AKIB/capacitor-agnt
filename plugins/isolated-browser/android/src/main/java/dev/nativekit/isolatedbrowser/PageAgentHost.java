@@ -42,7 +42,10 @@ import java.util.concurrent.Executors;
  *  - Every relay message must carry this session's token (embedded only in the
  *    document-start config script, same trust boundary as the existing
  *    NativeKit transport).
- *  - Only main-frame messages are honoured, and usage is capped per session.
+ *  - Only main-frame messages are honoured, and LLM usage is capped per session
+ *    (state/history mirroring never counts toward that cap).
+ *  - The session store (task/status/compact history) is in-memory per host and
+ *    only ever flows back to pages of this same WebView session.
  */
 public final class PageAgentHost {
     public static final String JS_OBJECT = "NativeKitPageAgent";
@@ -58,6 +61,7 @@ public final class PageAgentHost {
     private static final int MAX_CALLS_DEFAULT = 60;
     private static final int MAX_REQUEST_CHARS = 2_000_000;
     private static final int MAX_RESPONSE_CHARS = 2_000_000;
+    private static final int MAX_HISTORY_CHARS = 131_072;
 
     private static volatile String cachedInjection;
     // One shared worker for the whole process keeps relay calls serialized.
@@ -73,6 +77,13 @@ public final class PageAgentHost {
     private final int maxCalls;
     private int calls;
     private boolean installed;
+    // Session continuity store: the page (and the agent UI living in it) dies
+    // on every real navigation — this host does not. The page mirrors
+    // {task, status, compact history} here as a run progresses, and the next
+    // page asks it back to resume in-flight work. See bootstrap.js.
+    private String sessionTask;
+    private String sessionStatus;
+    private String sessionHistory;
 
     private PageAgentHost(int maxCalls) {
         this.maxCalls = maxCalls;
@@ -122,26 +133,35 @@ public final class PageAgentHost {
         if (!installed || !isMainFrame) return;
         String data = message.getData();
         if (data == null || data.length() > MAX_REQUEST_CHARS) return;
-        final String id;
-        final String body;
+        final String kind;
         try {
             JSONObject request = new JSONObject(data);
-            if (request.optInt("v", 0) != 1 || !"llm".equals(request.optString("kind"))) return;
-            if (!constantTimeEquals(token, request.optString("token"))) {
-                reply(proxy, errorResponse(request.optString("id"), "unauthorized"));
-                return;
-            }
-            if (!LLM_ENDPOINT.equals(request.optString("url"))) {
-                reply(proxy, errorResponse(request.optString("id"), "endpoint not allowed"));
-                return;
-            }
-            id = request.optString("id", "");
-            body = request.optString("body", "");
-            if (id.isEmpty() || body.isEmpty() || body.length() > MAX_REQUEST_CHARS) {
-                reply(proxy, errorResponse(id, "invalid request"));
-                return;
+            if (request.optInt("v", 0) != 1) return;
+            kind = request.optString("kind", "");
+            if (!constantTimeEquals(token, request.optString("token"))) return;
+            if ("llm".equals(kind)) {
+                handleLlm(request, proxy);
+            } else if ("state".equals(kind)) {
+                handleState(request);
+            } else if ("history".equals(kind)) {
+                handleHistory(request);
+            } else if ("restore".equals(kind)) {
+                handleRestore(proxy);
             }
         } catch (Throwable error) {
+            return;
+        }
+    }
+
+    private void handleLlm(JSONObject request, JavaScriptReplyProxy proxy) {
+        if (!LLM_ENDPOINT.equals(request.optString("url"))) {
+            reply(proxy, errorResponse(request.optString("id"), "endpoint not allowed"));
+            return;
+        }
+        final String id = request.optString("id", "");
+        final String body = request.optString("body", "");
+        if (id.isEmpty() || body.isEmpty() || body.length() > MAX_REQUEST_CHARS) {
+            reply(proxy, errorResponse(id, "invalid request"));
             return;
         }
         if (calls >= maxCalls) {
@@ -150,6 +170,35 @@ public final class PageAgentHost {
         }
         calls += 1;
         NETWORK.execute(() -> relay(id, body, proxy));
+    }
+
+    // Mirrors the in-page agent's task/status so the next page can resume.
+    // Not an LLM call: it never counts toward the call cap.
+    private void handleState(JSONObject request) {
+        String task = request.optString("task", null);
+        if (task != null) sessionTask = task.length() > 2000 ? task.substring(0, 2000) : task;
+        String status = request.optString("status", null);
+        if (status != null) sessionStatus = status.length() > 40 ? status.substring(0, 40) : status;
+    }
+
+    private void handleHistory(JSONObject request) {
+        String body = request.optString("body", "");
+        if (body.isEmpty()) return;
+        sessionHistory = body.length() > MAX_HISTORY_CHARS ? body.substring(0, MAX_HISTORY_CHARS) : body;
+    }
+
+    private void handleRestore(JavaScriptReplyProxy proxy) {
+        try {
+            JSONObject response = new JSONObject();
+            response.put("v", 1);
+            response.put("kind", "state-resp");
+            response.put("task", sessionTask == null ? "" : sessionTask);
+            response.put("status", sessionStatus == null ? "" : sessionStatus);
+            response.put("history", sessionHistory == null ? "" : sessionHistory);
+            reply(proxy, response.toString());
+        } catch (Throwable error) {
+            reply(proxy, errorResponse("", "restore failed"));
+        }
     }
 
     private void relay(String id, String body, JavaScriptReplyProxy proxy) {
