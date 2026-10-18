@@ -3,7 +3,7 @@
   "app": {
     "name": "NativeKit TestLab",
     "id": "dev.nativekit.shell",
-    "versionName": "1.4.28-page-agent-launcher",
+    "versionName": "1.4.29-page-agent-session",
     "versionCode": 33,
     "buildNumber": "31",
     "description": "A reusable, locally bundled Capacitor application shell",
