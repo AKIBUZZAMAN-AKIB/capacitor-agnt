@@ -729,7 +729,7 @@ impl WebLlmDriver {
         // Reuse the OpenAI-shaped Chat Completions request body the WebLLM JS
         // API implements. It remains local to the app; it is never sent over
         // HTTP by this Rust adapter.
-        let body = OpenAiDriver::build_body(req, true, false, false);
+        let body = OpenAiDriver::build_body(req, true, false, false, false);
         crate::event_bus::emit(self.callback.as_deref(), "provider.request", &json!({
             "requestId": request_id,
             "provider": "webllm",

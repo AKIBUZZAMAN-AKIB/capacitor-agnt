@@ -2010,7 +2010,7 @@ mod openai_wire_tests {
         request.messages.push(Message::assistant_blocks(vec![
             ContentBlock::Thinking { thinking: "step one, step two".into() },
             ContentBlock::Text { text: "answer".into() },
-            ContentBlock::ToolUse { id: "t1".into(), name: "web_search".into(), input: serde_json::json!({}) },
+            ContentBlock::ToolUse { id: "t1".into(), name: "web_search".into(), input: serde_json::json!({}), provider_metadata: None },
         ]));
 
         let replayed = OpenAiDriver::build_body(&request, false, false, false, true);
