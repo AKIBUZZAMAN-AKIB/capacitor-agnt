@@ -2059,7 +2059,14 @@ fn create_driver(
                         route.api_key.clone(), base_url, false, false,
                     )
                     // The AI Horde OpenAI shim explicitly does not implement SSE.
-                    .with_streaming_support(route.streaming_supported),
+                    .with_streaming_support(route.streaming_supported)
+                    // Kilo's gateway runs a vLLM-style reasoning parser that
+                    // REJECTS a request whose earlier assistant messages are
+                    // replayed without the reasoning they produced:
+                    // 400 "Missing required parameter: 'messages[N].reasoning_content'".
+                    // DeepSeek-style gateways reject the opposite, so this
+                    // stays scoped to Kilo only.
+                    .with_reasoning_replay(route.provider == "kilo"),
                 )
             }
         }

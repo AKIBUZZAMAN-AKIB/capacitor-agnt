@@ -551,6 +551,7 @@ pub struct OpenAiDriver {
     include_stream_usage: bool,
     completion_path: String,
     streaming_supported: bool,
+    replay_reasoning_content: bool,
 }
 
 impl OpenAiDriver {
@@ -593,6 +594,7 @@ impl OpenAiDriver {
             include_stream_usage,
             completion_path: if completion_path.is_empty() { "chat/completions".into() } else { completion_path.into() },
             streaming_supported: true,
+            replay_reasoning_content: false,
         }
     }
 
@@ -604,13 +606,28 @@ impl OpenAiDriver {
         self
     }
 
+    /// Replay each stored assistant thinking block as the OpenAI-style
+    /// `reasoning_content` field on that assistant message.
+    ///
+    /// Kilo's gateway (a vLLM-style reasoning parser) REQUIRES this: replaying
+    /// earlier assistant messages without the reasoning they produced fails
+    /// the whole request with HTTP 400 "Missing required parameter:
+    /// 'messages[N].reasoning_content'". Other gateways either ignore the
+    /// field or reject it (DeepSeek documents that reasoning_content must NOT
+    /// be sent back), so this is opt-in per provider, and the field is only
+    /// emitted for assistant messages that actually carry a thinking block.
+    pub fn with_reasoning_replay(mut self, enabled: bool) -> Self {
+        self.replay_reasoning_content = enabled;
+        self
+    }
+
     /// Translate the engine's Anthropic-style messages into OpenAI messages.
     ///
     /// The shapes differ in two important ways:
     ///  * tool *calls* live in `assistant.tool_calls`, not as content blocks;
     ///  * tool *results* are their own `role: "tool"` messages keyed by
     ///    `tool_call_id`, rather than user content blocks.
-    fn convert_messages(req: &CompletionRequest) -> Vec<serde_json::Value> {
+    fn convert_messages(req: &CompletionRequest, replay_reasoning_content: bool) -> Vec<serde_json::Value> {
         let mut out: Vec<serde_json::Value> = Vec::new();
 
         if let Some(system) = req.system.as_ref().filter(|s| !s.is_empty()) {
@@ -630,6 +647,7 @@ impl OpenAiDriver {
                 }
                 MessageContent::Blocks(blocks) => {
                     let mut text_parts: Vec<String> = Vec::new();
+                    let mut reasoning_parts: Vec<String> = Vec::new();
                     let mut tool_calls: Vec<serde_json::Value> = Vec::new();
                     // Emitted after the assistant message they belong to.
                     let mut tool_messages: Vec<serde_json::Value> = Vec::new();
@@ -637,7 +655,16 @@ impl OpenAiDriver {
                     for block in blocks {
                         match block {
                             ContentBlock::Text { text } => text_parts.push(text.clone()),
-                            ContentBlock::Thinking { .. } => {}
+                            ContentBlock::Thinking { thinking } => {
+                                // Opt-in (Kilo): the gateway demands the exact
+                                // reasoning_content it produced on that
+                                // assistant message be replayed with it. Empty
+                                // blocks are skipped — an empty field could
+                                // trip the same 400 we are fixing here.
+                                if replay_reasoning_content && !thinking.is_empty() {
+                                    reasoning_parts.push(thinking.clone());
+                                }
+                            }
                             ContentBlock::ToolUse { id, name, input, .. } => {
                                 tool_calls.push(serde_json::json!({
                                     "id": id,
@@ -679,6 +706,12 @@ impl OpenAiDriver {
                         if !tool_calls.is_empty() {
                             msg.insert("tool_calls".into(), serde_json::json!(tool_calls));
                         }
+                        if role == "assistant" && !reasoning_parts.is_empty() {
+                            msg.insert(
+                                "reasoning_content".into(),
+                                serde_json::json!(reasoning_parts.join("")),
+                            );
+                        }
                         out.push(serde_json::Value::Object(msg));
                     }
                     out.extend(tool_messages);
@@ -709,6 +742,7 @@ impl OpenAiDriver {
         stream: bool,
         use_max_completion_tokens: bool,
         include_stream_usage: bool,
+        replay_reasoning_content: bool,
     ) -> serde_json::Value {
         let tools: Vec<serde_json::Value> = req
             .tools
@@ -735,7 +769,7 @@ impl OpenAiDriver {
 
         let mut body = serde_json::json!({
             "model": req.model,
-            "messages": Self::convert_messages(req),
+            "messages": Self::convert_messages(req, replay_reasoning_content),
             "max_tokens": req.max_tokens,
             "stream": stream,
         });
@@ -763,7 +797,7 @@ impl OpenAiDriver {
         if !self.api_key.is_empty() {
             builder = builder.header("Authorization", format!("Bearer {}", self.api_key));
         }
-        builder.json(&Self::build_body(req, stream, self.use_max_completion_tokens, self.include_stream_usage))
+        builder.json(&Self::build_body(req, stream, self.use_max_completion_tokens, self.include_stream_usage, self.replay_reasoning_content))
     }
 
     fn error_from(status: u16, body: &str, retry_after: Option<u64>) -> LlmError {
@@ -1960,21 +1994,54 @@ mod openai_wire_tests {
     #[test]
     fn temperature_is_omitted_only_for_reasoning_models() {
         // Reasoning model: sending temperature is a hard 400.
-        let body = OpenAiDriver::build_body(&req("o4-mini"), false, true, true);
+        let body = OpenAiDriver::build_body(&req("o4-mini"), false, true, true, false);
         assert!(body.get("temperature").is_none());
         // Regular chat model keeps the caller's value.
-        let body = OpenAiDriver::build_body(&req("gpt-4o"), false, true, true);
+        let body = OpenAiDriver::build_body(&req("gpt-4o"), false, true, true, false);
         assert_eq!(body["temperature"].as_f64().unwrap(), 0.2_f32 as f64);
+    }
+
+    #[test]
+    fn reasoning_content_is_replayed_only_when_the_provider_opts_in() {
+        // Kilo's gateway 400s without this field ("Missing required parameter:
+        // 'messages[N].reasoning_content'"), while DeepSeek-style gateways
+        // reject requests that DO include it — so it must be opt-in.
+        let mut request = req("kilo-auto/free");
+        request.messages.push(Message::assistant_blocks(vec![
+            ContentBlock::Thinking { thinking: "step one, step two".into() },
+            ContentBlock::Text { text: "answer".into() },
+            ContentBlock::ToolUse { id: "t1".into(), name: "web_search".into(), input: serde_json::json!({}) },
+        ]));
+
+        let replayed = OpenAiDriver::build_body(&request, false, false, false, true);
+        let assistant = &replayed["messages"][1];
+        assert_eq!(assistant["role"], "assistant");
+        assert_eq!(assistant["reasoning_content"], "step one, step two");
+        assert_eq!(assistant["content"], "answer");
+        assert_eq!(assistant["tool_calls"][0]["id"], "t1");
+
+        let omitted = OpenAiDriver::build_body(&request, false, false, false, false);
+        assert!(
+            omitted["messages"][1].get("reasoning_content").is_none(),
+            "default providers must not receive reasoning_content"
+        );
+
+        // With the flag on, an assistant message without thinking still emits
+        // no field — non-reasoning turns stay untouched.
+        let mut plain = req("kilo-auto/free");
+        plain.messages.push(Message::assistant_blocks(vec![ContentBlock::Text { text: "hi".into() }]));
+        let body = OpenAiDriver::build_body(&plain, false, false, false, true);
+        assert!(body["messages"][1].get("reasoning_content").is_none());
     }
 
     #[test]
     fn token_limit_field_is_provider_specific() {
         for m in ["gpt-4o", "o4-mini"] {
-            let body = OpenAiDriver::build_body(&req(m), false, true, true);
+            let body = OpenAiDriver::build_body(&req(m), false, true, true, false);
             assert_eq!(body["max_completion_tokens"], 1024);
             assert!(body.get("max_tokens").is_none());
         }
-        let compatible = OpenAiDriver::build_body(&req("model"), false, false, false);
+        let compatible = OpenAiDriver::build_body(&req("model"), false, false, false, false);
         assert_eq!(compatible["max_tokens"], 1024);
         assert!(compatible.get("max_completion_tokens").is_none());
     }
@@ -2075,11 +2142,11 @@ mod openai_wire_tests {
 
     #[test]
     fn streaming_requests_ask_for_usage() {
-        let body = OpenAiDriver::build_body(&req("gpt-4o"), true, true, true);
+        let body = OpenAiDriver::build_body(&req("gpt-4o"), true, true, true, false);
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
         // Non-streaming must not carry stream_options.
-        let body = OpenAiDriver::build_body(&req("gpt-4o"), false, true, true);
+        let body = OpenAiDriver::build_body(&req("gpt-4o"), false, true, true, false);
         assert!(body.get("stream_options").is_none());
     }
 
