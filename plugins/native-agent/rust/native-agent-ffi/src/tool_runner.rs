@@ -88,7 +88,7 @@ fn truncate_with_notice(s: &str, max_bytes: usize) -> String {
 
 // ── Path safety ─────────────────────────────────────────────────────────────
 
-fn resolve_path(workspace: &str, relative: &str) -> Result<PathBuf, NativeAgentError> {
+pub(crate) fn resolve_path(workspace: &str, relative: &str) -> Result<PathBuf, NativeAgentError> {
     if relative.len() > MAX_PATH_ARGUMENT_BYTES {
         return Err(NativeAgentError::Tool {
             msg: format!("Path exceeds the {} byte limit", MAX_PATH_ARGUMENT_BYTES),
@@ -241,6 +241,10 @@ pub const BUILTIN_TOOL_NAMES: [&str; 21] = [
     "memory_forget",
     "memory_search",
     "memory_list",
+    "index_document",
+    "search_documents",
+    "list_documents",
+    "forget_document",
 ];
 
 pub fn is_builtin_tool(name: &str) -> bool {
@@ -411,6 +415,10 @@ pub async fn execute_tool(
         "memory_recall" | "memory_store" | "memory_forget" | "memory_search" | "memory_list" => {
             execute_memory_tool(name, args, memory_provider)
         }
+        "index_document" => crate::doc_index::tool_index_document(args, workspace, db_path),
+        "search_documents" => crate::doc_index::tool_search_documents(args, db_path),
+        "list_documents" => crate::doc_index::tool_list_documents(args, db_path),
+        "forget_document" => crate::doc_index::tool_forget_document(args, db_path),
         _ => Err(NativeAgentError::Tool {
             msg: format!("Unknown tool: {}", name),
         }),
@@ -2636,6 +2644,60 @@ fn all_tool_definitions() -> Vec<ToolDefinition> {
                     "notificationTitle": { "type": "string", "maxLength": 512 }
                 },
                 "required": ["action"],
+                "additionalProperties": false
+            }),
+        ),
+        tool_def(
+            "index_document",
+            "Index a document into the on-device knowledge base for later keyword retrieval (SQLite FTS5, BM25). Pass inline `content`, or a workspace-relative `path` to index a UTF-8 file without loading it into the conversation (saves context). Re-indexing the same `doc_id` replaces the old version. Use this for reference material you will search later (notes, articles, manuals, transcripts); use memory_store for short personal facts. Mutating: asks for approval by default.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "maxLength": 300, "description": "Human-readable document title (used in search results and citations)" },
+                    "content": { "type": "string", "maxLength": 256000, "description": "Inline text to index (max 256,000 characters); prefer `path` for long documents" },
+                    "path": { "type": "string", "maxLength": 4096, "description": "UTF-8 workspace file to index (max 1,000,000 characters) — the content never enters the conversation" },
+                    "doc_id": { "type": "string", "maxLength": 120, "description": "Stable id (letters, digits, '.', '-', '_'); default: slug of title plus content hash" },
+                    "source": { "type": "string", "maxLength": 1000, "description": "Where the document came from (URL, file path, 'user note') — shown in citations" }
+                },
+                "required": ["title"],
+                "additionalProperties": false
+            }),
+        ),
+        tool_def(
+            "search_documents",
+            "Keyword search (BM25-ranked) over documents indexed with index_document. Returns matching passages with title, source, doc_id and a snippet — cite them in answers. Matches words, not meaning: different phrasings with no shared word will not match. Read-only.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "maxLength": 400, "description": "Words that must appear in the passage (AND-ed, max 16 words)" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Maximum passages to return (default 5)" },
+                    "doc_id": { "type": "string", "maxLength": 120, "description": "Restrict the search to one indexed document" }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        ),
+        tool_def(
+            "list_documents",
+            "List documents in the knowledge base (docId, title, source, size) newest first. Read-only.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prefix": { "type": "string", "maxLength": 120, "description": "Only ids starting with this prefix" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum documents to return (default 20)" }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        tool_def(
+            "forget_document",
+            "Remove one document and all its passages from the knowledge base. Mutating: asks for approval by default.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "doc_id": { "type": "string", "maxLength": 120, "description": "The id shown by list_documents" }
+                },
+                "required": ["doc_id"],
                 "additionalProperties": false
             }),
         ),

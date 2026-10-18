@@ -1616,6 +1616,10 @@ pub(crate) fn requires_approval(
             | "manage_cron"
             | "memory_store"
             | "memory_forget"
+            // The knowledge-base index is shared, persistent state: writing to
+            // or removing from it mutates what future searches return.
+            | "index_document"
+            | "forget_document"
     )
 }
 
@@ -2808,10 +2812,14 @@ mod tests {
         for name in [
             "write_file", "edit_file", "delete_file", "execute_command", "git_init", "git_add",
             "git_commit", "web_fetch", "manage_cron", "memory_store", "memory_forget",
+            "index_document", "forget_document",
         ] {
             assert!(requires_approval(name, &permissions, None), "{name} must ask by default");
         }
         assert!(!requires_approval("read_file", &permissions, None));
+        // Knowledge-base reads stay frictionless like memory_search.
+        assert!(!requires_approval("search_documents", &permissions, None));
+        assert!(!requires_approval("list_documents", &permissions, None));
         assert!(!requires_approval("memory_search", &permissions, None));
         assert!(requires_approval("some_mcp_tool", &permissions, None));
         assert!(!requires_approval("some_mcp_tool", &permissions, Some("always_allow")));

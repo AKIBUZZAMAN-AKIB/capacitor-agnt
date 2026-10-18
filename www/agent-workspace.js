@@ -46,6 +46,7 @@ const TOOL_DEFAULTS = Object.freeze([
   ['memory_search', 'always_allow'], ['memory_list', 'always_allow'], ['write_file', 'always_ask'], ['edit_file', 'always_ask'],
   ['delete_file', 'always_ask'], ['execute_command', 'always_ask'], ['git_init', 'always_ask'], ['git_add', 'always_ask'],
   ['git_commit', 'always_ask'], ['web_fetch', 'always_ask'], ['manage_cron', 'always_ask'], ['memory_store', 'always_ask'], ['memory_forget', 'always_ask'],
+  ['search_documents', 'always_allow'], ['list_documents', 'always_allow'], ['index_document', 'always_ask'], ['forget_document', 'always_ask'],
 ]);
 
 const ROUTABLE_PROVIDERS = Object.freeze([

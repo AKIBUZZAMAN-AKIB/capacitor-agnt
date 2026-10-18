@@ -8,6 +8,7 @@ pub mod agent_loop;
 pub mod auth;
 pub mod config_store;
 pub mod db;
+pub mod doc_index;
 pub mod error_taxonomy;
 pub mod event_bus;
 pub mod llm_driver;
