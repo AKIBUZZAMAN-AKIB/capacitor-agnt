@@ -5,6 +5,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.webkit.WebView;
 
 import androidx.annotation.NonNull;
@@ -49,6 +50,7 @@ import java.util.concurrent.Executors;
  */
 public final class PageAgentHost {
     public static final String JS_OBJECT = "NativeKitPageAgent";
+    private static final String TAG = "NativeKitPageAgent";
     static final String EXTRA_ENABLED = "pageAgentEnabled";
     static final String EXTRA_LANGUAGE = "pageAgentLanguage";
 
@@ -202,6 +204,45 @@ public final class PageAgentHost {
     }
 
     private void relay(String id, String body, JavaScriptReplyProxy proxy) {
+        try {
+            PostResult first = post(body);
+            if (first.status / 100 != 2) {
+                // The free gateway's upstream pool is inconsistent about
+                // tool_choice:"required" / parallel_tool_calls (the bundle's
+                // own modelPatch relaxes these per provider, but has no entry
+                // for the kilo route). Retry exactly once with them relaxed.
+                if (first.status == 400) {
+                    String adapted = adaptRequest(body);
+                    if (adapted != null) {
+                        PostResult second = post(adapted);
+                        if (second.status / 100 == 2) {
+                            replyOk(proxy, id, second.status, second.text);
+                            return;
+                        }
+                    }
+                }
+                // Never hand back an opaque "HTTP 400:" — surface the gateway's
+                // actual error text so the panel shows the real reason.
+                Log.w(TAG, "free route HTTP " + first.status + ": " + snippet(first.text, 600));
+                replyOk(proxy, id, first.status, wrapGatewayError(first.status, first.text));
+                return;
+            }
+            replyOk(proxy, id, first.status, first.text);
+        } catch (Throwable error) {
+            reply(proxy, errorResponse(id, error.getMessage() == null ? "relay failed" : error.getMessage()));
+        }
+    }
+
+    private static final class PostResult {
+        final int status;
+        final String text;
+        PostResult(int status, String text) {
+            this.status = status;
+            this.text = text;
+        }
+    }
+
+    private PostResult post(String body) throws Exception {
         HttpURLConnection connection = null;
         try {
             connection = (HttpURLConnection) new URL(LLM_ENDPOINT).openConnection();
@@ -216,7 +257,61 @@ public final class PageAgentHost {
             }
             int status = connection.getResponseCode();
             InputStream stream = status / 100 == 2 ? connection.getInputStream() : connection.getErrorStream();
-            String text = readCapped(stream);
+            return new PostResult(status, readCapped(stream));
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    /** Mirrors what the bundle's modelPatch does for other providers: relax the
+     *  strict tool-calling fields the kilo free pool tends to reject. */
+    private static String adaptRequest(String body) {
+        try {
+            JSONObject request = new JSONObject(body);
+            boolean changed = false;
+            if ("required".equals(request.optString("tool_choice", ""))) {
+                request.put("tool_choice", "auto");
+                changed = true;
+            }
+            if (request.has("parallel_tool_calls")) {
+                request.remove("parallel_tool_calls");
+                changed = true;
+            }
+            if (request.has("thinking")) {
+                request.remove("thinking");
+                changed = true;
+            }
+            if (request.has("enable_thinking")) {
+                request.remove("enable_thinking");
+                changed = true;
+            }
+            return changed ? request.toString() : null;
+        } catch (Throwable error) {
+            return null;
+        }
+    }
+
+    private static String snippet(String text, int limit) {
+        if (text == null) return "";
+        String flat = text.replace('\n', ' ');
+        return flat.length() > limit ? flat.substring(0, limit) : flat;
+    }
+
+    /** Rewrap a non-2xx gateway body so the in-page agent's error extraction
+     *  (``HTTP <status>: <error.message>``) shows the real reason. */
+    private static String wrapGatewayError(int status, String rawBody) {
+        try {
+            String message = "gateway HTTP " + status + ": " + snippet(rawBody, 400);
+            JSONObject wrapped = new JSONObject();
+            wrapped.put("error", new JSONObject().put("message", message));
+            return wrapped.toString();
+        } catch (Throwable error) {
+            return "{\"error\":{\"message\":\"gateway HTTP " + status + "\"}}";
+        }
+    }
+
+    private void replyOk(JavaScriptReplyProxy proxy, String id, int status, String text) {
+        try {
             JSONObject response = new JSONObject();
             response.put("v", 1);
             response.put("kind", "llm-resp");
@@ -226,9 +321,7 @@ public final class PageAgentHost {
             response.put("body", text);
             reply(proxy, response.toString());
         } catch (Throwable error) {
-            reply(proxy, errorResponse(id, error.getMessage() == null ? "relay failed" : error.getMessage()));
-        } finally {
-            if (connection != null) connection.disconnect();
+            // fall through: the page times out and retries on its own
         }
     }
 

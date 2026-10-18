@@ -219,6 +219,12 @@ public final class RemoteBrowserActivity extends Activity {
         }
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
+        // Sites like LinkedIn/Google refuse sign-in from embedded WebViews (the
+        // "; wv" token in the default UA). Present as plain Chrome Mobile.
+        String defaultUa = settings.getUserAgentString();
+        if (defaultUa != null && defaultUa.contains("; wv")) {
+            settings.setUserAgentString(defaultUa.replace("; wv", ""));
+        }
         settings.setDomStorageEnabled(true);
         settings.setDatabaseEnabled(true);
         settings.setAllowFileAccess(false);
