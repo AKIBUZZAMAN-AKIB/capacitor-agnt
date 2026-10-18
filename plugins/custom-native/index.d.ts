@@ -20,6 +20,8 @@ export interface NativeKitCustomPlugin extends Plugin {
   getBufferedLocations(): Promise<Record<string, any>>;
   clearBufferedLocations(): Promise<void>;
   openAppSettings(): Promise<void>;
+  /** Opens a validated https: URL with the system browser/app; rejects when nothing can open it. */
+  openUrl(options: { url: string }): Promise<void>;
   ttsSpeak(options: { text: string; language?: string; pitch?: number; rate?: number }): Promise<{ queued?: boolean; languageSupported?: boolean }>;
   /** Verifies the device owner with fingerprint/face; rejects (fails closed) when unavailable. */
   verifyBiometric(options?: { reason?: string }): Promise<{ verified: boolean }>;

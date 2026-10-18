@@ -28,6 +28,7 @@ public class NativeKitCustomPlugin: CAPPlugin, CAPBridgedPlugin, CLLocationManag
         CAPPluginMethod(name: "getBufferedLocations", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "clearBufferedLocations", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "openAppSettings", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "openUrl", returnType: CAPPluginReturnPromise),
     ]
 
     private final class StreamHandle {
@@ -244,6 +245,22 @@ public class NativeKitCustomPlugin: CAPPlugin, CAPBridgedPlugin, CLLocationManag
         DispatchQueue.main.async {
             guard let url = URL(string: UIApplication.openSettingsURLString), UIApplication.shared.canOpenURL(url) else { call.reject("Unable to open app settings"); return }
             UIApplication.shared.open(url) { opened in opened ? call.resolve() : call.reject("Unable to open app settings") }
+        }
+    }
+
+    /// Opens a URL with the system's choice of app (normally the browser).
+    /// window.open() is not reliable inside a Capacitor WKWebView, so the
+    /// open_url device tool routes through here where failures reject and
+    /// can be reported honestly. The JS caller validated the https: scheme.
+    @objc func openUrl(_ call: CAPPluginCall) {
+        guard let urlString = call.getString("url"), let url = URL(string: urlString), url.scheme?.lowercased() == "https" else {
+            call.reject("A valid https: url is required")
+            return
+        }
+        DispatchQueue.main.async {
+            UIApplication.shared.open(url) { opened in
+                opened ? call.resolve() : call.reject("No app on this device could open that URL")
+            }
         }
     }
 

@@ -646,6 +646,27 @@ describe('open_url', () => {
     }
   });
 
+  it('reports an error when the URL cannot actually be opened (no silent success)', async () => {
+    // Regression: the old implementation called window.open() without waiting
+    // or checking, so a WebView that silently drops popups still produced
+    // "Opened <url> in the device browser." — the exact bug report this guards.
+    const { deps } = fakeDeps();
+    deps.openUrl = () => Promise.reject(new Error('No app on this device could open that URL'));
+    const result = await callTool(deps, 'open_url', { url: 'https://example.com/unreachable' });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('Could not open https://example.com/unreachable');
+    expect(textOf(result)).toContain('No app on this device could open that URL');
+    expect(textOf(result)).not.toContain('Opened ');
+
+    // A deps.openUrl that resolves synchronously (old-style mock/host) still works.
+    const { deps: syncDeps } = fakeDeps();
+    let fired = false;
+    syncDeps.openUrl = () => { fired = true; };
+    const syncResult = await callTool(syncDeps, 'open_url', { url: 'https://example.com/ok' });
+    expect(syncResult.isError).toBeFalsy();
+    expect(fired).toBe(true);
+  });
+
   it('rate limits how many pages the model may open per minute', async () => {
     const { deps } = fakeDeps();
     const client = clientFor(deps);

@@ -676,6 +676,25 @@ public class NativeKitCustomPlugin extends Plugin {
         } catch (Exception error) { call.reject("Dialer could not be opened", error); }
     }
 
+    /**
+     * Opens a URL in the app chosen by the system (normally the browser).
+     * Unlike window.open() from the WebView — which Android drops silently
+     * unless a WebChromeClient implements onCreateWindow — this either opens
+     * the URL or rejects the call so the tool can report a real error.
+     * The JS caller has already validated the https: scheme.
+     */
+    @PluginMethod
+    public void openUrl(PluginCall call) {
+        String url = required(call, "url");
+        if (url == null) return;
+        Activity activity = getActivity();
+        if (activity == null) { call.reject("No foreground activity is available"); return; }
+        try {
+            activity.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+            call.resolve();
+        } catch (Exception error) { call.reject("No app on this device could open that URL", error); }
+    }
+
     @PluginMethod
     public void composeSms(PluginCall call) {
         String number = required(call, "number");

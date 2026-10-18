@@ -49,6 +49,7 @@ import { Network } from '@capacitor/network';
 import { Directory, Encoding, Filesystem } from '@capacitor/filesystem';
 import { FileTransfer } from '@capacitor/file-transfer';
 import { App } from '@capacitor/app';
+import { Capacitor } from '@capacitor/core';
 import { NearbyConnections } from '@capacitor-trancee/nearby-connections';
 import { Widget } from '@nativekit/widget';
 import { NativeKitCustom } from '@nativekit/custom-native';
@@ -164,8 +165,13 @@ export interface DeviceToolDeps {
   };
   /** Clipboard, when the host grants it. */
   clipboard: { writeText(text: string): Promise<void>; readText(): Promise<string> };
-  /** Opens a URL outside the WebView. Defaults to `window.open`. */
-  openUrl: (url: string) => void;
+  /**
+   * Opens a URL outside the WebView. On native hosts this MUST go through the
+   * custom plugin's ACTION_VIEW / UIApplication.open path — `window.open` is
+   * silently dropped by the Android WebView (no onCreateWindow handler), which
+   * is exactly the "says opened, nothing happened" failure mode.
+   */
+  openUrl: (url: string) => void | Promise<void>;
   /**
    * Minimal fetch slice for web search. On native, the bridge swaps in a
    * CapacitorHttp-backed adapter (no WebView CORS rules); in tests it is a
@@ -887,8 +893,15 @@ const TOOL_SPECS: DeviceToolSpec[] = [
       if (!url) return errorResult("'url' is required.");
       const check = assertPublicHttpsUrl(url);
       if (!check.ok) return errorResult(check.reason);
-      deps.openUrl(check.url);
-      return textResult(`Opened ${check.url} in the device browser.`);
+      try {
+        await deps.openUrl(check.url);
+        return textResult(`Opened ${check.url} in the device browser.`);
+      } catch (error) {
+        return errorResult(
+          `Could not open ${check.url} on this device: ${String((error as Error)?.message ?? error)} ` +
+            'Tell the user the page could not be opened, and show them the URL instead.',
+        );
+      }
     },
   },
   {
@@ -2233,7 +2246,18 @@ export function defaultDeviceToolDeps(): DeviceToolDeps {
     network: Network as unknown as DeviceToolDeps['network'],
     alarms: NativeKitCustom as unknown as DeviceToolDeps['alarms'],
     filesystem: Filesystem as unknown as DeviceToolDeps['filesystem'],
-    openUrl: (url) => { window.open(url, '_blank', 'noopener,noreferrer'); },
+    openUrl: (url) => {
+      if (Capacitor.isNativePlatform()) {
+        // Native ACTION_VIEW (Android) / UIApplication.open (iOS): either the
+        // page really opens or the plugin rejects and the tool reports it.
+        return NativeKitCustom.openUrl({ url });
+      }
+      // Web-preview fallback: a real browser honors window.open; a null return
+      // means a popup blocker ate it, so surface that as an error too.
+      const opened = window.open(url, '_blank', 'noopener,noreferrer');
+      if (!opened) return Promise.reject(new Error('The host blocked the popup window.'));
+      return undefined;
+    },
     // Plain fetch by default; the nativekit bridge swaps in a CapacitorHttp
     // adapter on devices so WebView CORS rules never block a search.
     fetchImpl: (url, init) => globalThis.fetch(url, init) as Promise<any>,
