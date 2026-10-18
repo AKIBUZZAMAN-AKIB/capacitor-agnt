@@ -172,6 +172,8 @@ public final class NativeKitIsolatedBrowserPlugin extends Plugin implements Isol
             intent.putExtra(IsolatedBrowserActivity.EXTRA_COLOR_SCHEME, call.getString("colorScheme", "dark"));
             intent.putExtra(IsolatedBrowserActivity.EXTRA_MEDIA_AUTOPLAY, Boolean.TRUE.equals(call.getBoolean("mediaAutoplay", false)));
             intent.putExtra(IsolatedBrowserActivity.EXTRA_HANG_DELAY, requiredLong(call, "hangTerminationDelayMs"));
+            intent.putExtra(PageAgentHost.EXTRA_ENABLED, !Boolean.FALSE.equals(call.getBoolean("pageAgent", Boolean.TRUE)));
+            intent.putExtra(PageAgentHost.EXTRA_LANGUAGE, call.getString("pageAgentLanguage", "en-US"));
             getContext().startActivity(intent);
             // Kill-protect the host process while the mini app is in front —
             // without this, low-RAM devices cold-restart the agent app on close.
@@ -258,6 +260,8 @@ public final class NativeKitIsolatedBrowserPlugin extends Plugin implements Isol
             intent.putExtra(RemoteBrowserActivity.EXTRA_TITLE, title);
             intent.putExtra(RemoteBrowserActivity.EXTRA_ALLOWED_HOSTS, allowedHosts);
             intent.putExtra(RemoteBrowserActivity.EXTRA_RESULT, receiver);
+            intent.putExtra(PageAgentHost.EXTRA_ENABLED, !Boolean.FALSE.equals(call.getBoolean("pageAgent", Boolean.TRUE)));
+            intent.putExtra(PageAgentHost.EXTRA_LANGUAGE, call.getString("pageAgentLanguage", "en-US"));
             activeRemoteSessionId = sessionId;
             getContext().startActivity(intent);
             IsolatedSessionKeepAliveService.start(getContext());

@@ -181,6 +181,7 @@ function fakeDeps(overrides: Partial<DeviceToolDeps> = {}, clockStart = 1_000_00
       async readText() { calls.push({ method: 'clipboard.readText', args: {} }); return 'ক্লিপবোর্ডে রাখা টেক্সট'; },
     },
     openUrl: (url: string) => calls.push({ method: 'openUrl', args: { url } }),
+    openAgentUrl: (url: string) => calls.push({ method: 'openAgentUrl', args: { url } }),
     fetchImpl: async (url: string, init?: any) => {
       calls.push({ method: 'fetch', args: { url, init } });
       const scripted = fetchResponses.shift() ?? { ok: true, status: 200, body: '' };
@@ -674,6 +675,48 @@ describe('open_url', () => {
       expect((await client.callTool('open_url', { url: `https://example.com/${index}` })).isError).toBeFalsy();
     }
     expect((await client.callTool('open_url', { url: 'https://example.com/7' })).isError).toBe(true);
+  });
+
+  it('mode "agent" opens the in-app agent browser via deps.openAgentUrl', async () => {
+    const { deps, calls } = fakeDeps();
+    const result = await callTool(deps, 'open_url', { url: 'https://example.com/agent-page', mode: 'agent' });
+    expect(result.isError).toBeFalsy();
+    expect(calls.find((entry: any) => entry.method === 'openAgentUrl')?.args.url).toBe('https://example.com/agent-page');
+    // Agent mode must NOT fall back to the system browser.
+    expect(calls.find((entry: any) => entry.method === 'openUrl')).toBeUndefined();
+    expect(textOf(result)).toContain('agent browser');
+
+    // Explicit mode "external" keeps the old behaviour bit-for-bit.
+    const external = await callTool(deps, 'open_url', { url: 'https://example.com/normal', mode: 'external' });
+    expect(external.isError).toBeFalsy();
+    expect(calls.find((entry: any) => entry.method === 'openUrl')?.args.url).toBe('https://example.com/normal');
+  });
+
+  it('mode "agent" reports unavailability instead of silently downgrading', async () => {
+    const { deps, calls } = fakeDeps();
+    delete (deps as any).openAgentUrl;
+    const result = await callTool(deps, 'open_url', { url: 'https://example.com/no-agent', mode: 'agent' });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('not available');
+    expect(calls.find((entry: any) => entry.method === 'openUrl')).toBeUndefined();
+  });
+
+  it('mode "agent" validates the URL exactly like external mode', async () => {
+    const { deps } = fakeDeps();
+    for (const url of ['http://example.com', 'file:///etc/passwd', 'https://localhost/x', 'https://192.168.1.4/x']) {
+      const result = await callTool(deps, 'open_url', { url, mode: 'agent' });
+      expect(result.isError, `${url} must be rejected in agent mode`).toBe(true);
+    }
+    const badMode = await callTool(deps, 'open_url', { url: 'https://example.com/x', mode: 'popup' });
+    expect(badMode.isError).toBe(true);
+
+    // Agent-mode failures surface the error and teach the external fallback.
+    const { deps: failing } = fakeDeps();
+    (failing as any).openAgentUrl = () => Promise.reject(new Error('agent session is starting'));
+    const failure = await callTool(failing, 'open_url', { url: 'https://example.com/busy', mode: 'agent' });
+    expect(failure.isError).toBe(true);
+    expect(textOf(failure)).toContain('agent session is starting');
+    expect(textOf(failure)).toContain('mode "external"');
   });
 });
 

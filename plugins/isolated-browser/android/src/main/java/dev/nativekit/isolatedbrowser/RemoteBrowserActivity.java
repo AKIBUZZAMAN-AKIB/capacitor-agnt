@@ -51,6 +51,9 @@ public final class RemoteBrowserActivity extends Activity {
     private ResultReceiver resultReceiver;
     private WebView webView;
     private FrameLayout content;
+    // PageAgent host (null when disabled/unsupported): injects the vendored
+    // in-page agent and relays its LLM calls through the free route.
+    private PageAgentHost pageAgent;
     // Loading cover until the first committed frame + a slim network progress bar
     // (remote pages load over the network — the user must see it is progressing).
     private FrameLayout cover;
@@ -260,6 +263,14 @@ public final class RemoteBrowserActivity extends Activity {
             @Override public void onSafeBrowsingHit(WebView view, WebResourceRequest request, int threatType, SafeBrowsingResponse callback) { callback.backToSafety(true); }
         });
         installCover();
+        // In-page agent on every remote page ("url open korlew jeno agent browser
+        // thake"): the bundle is injected at document start and its model calls
+        // are relayed natively — the page's own CSP cannot break it.
+        pageAgent = PageAgentHost.install(
+            webView,
+            getApplicationContext(),
+            getIntent().getBooleanExtra(PageAgentHost.EXTRA_ENABLED, true),
+            getIntent().getStringExtra(PageAgentHost.EXTRA_LANGUAGE));
         webView.loadUrl(startUrl);
     }
 

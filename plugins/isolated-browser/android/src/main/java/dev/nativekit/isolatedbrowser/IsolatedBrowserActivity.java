@@ -109,6 +109,10 @@ public final class IsolatedBrowserActivity extends Activity {
     private boolean bound;
     private WebView webView;
     private FrameLayout content;
+    // PageAgent host (null when disabled/unsupported): the in-page agent runs in
+    // EVERY mini app; its LLM calls are relayed natively so the mini app's
+    // network sandbox and CSP stay fully intact.
+    private PageAgentHost pageAgent;
     // Loading cover shown until the WebView commits its first visible frame; the
     // shell background (not white) shows through any launch/swap gap.
     private FrameLayout cover;
@@ -530,6 +534,16 @@ public final class IsolatedBrowserActivity extends Activity {
         sendStatus("partitionReady", profilePartition ? "per-app Android WebView profile" : "per-app virtual origin; third-party cookies disabled");
         sendStatus("loading", startUrl);
         installCover();
+        // In-page agent for mini apps too ("sob jaigai jeno kaj kore"). The relay
+        // is a WebView message channel, NOT page networking, so the sandboxed
+        // network mode and the CSP are untouched; DOM actions stay in-page, and
+        // any native capability a mini app requests mid-run still goes through
+        // the existing broker permission prompts.
+        pageAgent = PageAgentHost.install(
+            webView,
+            getApplicationContext(),
+            getIntent().getBooleanExtra(PageAgentHost.EXTRA_ENABLED, true),
+            getIntent().getStringExtra(PageAgentHost.EXTRA_LANGUAGE));
         webView.loadUrl(startUrl);
     }
 

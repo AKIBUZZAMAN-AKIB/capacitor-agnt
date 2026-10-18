@@ -173,6 +173,12 @@ export interface DeviceToolDeps {
    */
   openUrl: (url: string) => void | Promise<void>;
   /**
+   * Opens a URL on the in-app agent browser surface (the isolated WebView with
+   * the vendored PageAgent injected). Optional: when absent the open_url tool
+   * reports that agent mode is unavailable instead of silently downgrading.
+   */
+  openAgentUrl?: (url: string, options?: { title?: string }) => unknown | Promise<unknown>;
+  /**
    * Minimal fetch slice for web search. On native, the bridge swaps in a
    * CapacitorHttp-backed adapter (no WebView CORS rules); in tests it is a
    * scripted fake.
@@ -881,18 +887,46 @@ const TOOL_SPECS: DeviceToolSpec[] = [
   {
     name: 'open_url',
     description:
-      'Open a public https: URL outside the app (system browser). Use it to show the user a page you found — never to fetch its content; use your web fetch tool for that.',
+      'Open a public https: URL for the user. mode "external" (default) opens the system browser — use it to show a page. ' +
+      'mode "agent" opens the in-app agent browser, where the user gets an in-page agent that can operate that page ' +
+      '(click, fill forms, extract) — use it when the task involves interacting with the page, and only after the user ' +
+      'asked for that. Never use this tool to fetch content for yourself; use your web fetch tool for that.',
     inputSchema: {
       type: 'object',
-      properties: { url: { type: 'string', description: 'The public https: URL to open.' } },
+      properties: {
+        url: { type: 'string', description: 'The public https: URL to open.' },
+        mode: {
+          type: 'string',
+          enum: ['external', 'agent'],
+          description: '"external" (default) = system browser; "agent" = in-app agent browser with the page agent.',
+        },
+      },
       required: ['url'],
     },
     rateLimit: OPEN_URL_LIMIT,
     run: async (args, deps) => {
       const url = requiredString(args, 'url', 1000);
       if (!url) return errorResult("'url' is required.");
+      const mode = args.mode === undefined || args.mode === null ? 'external' : String(args.mode);
+      if (mode !== 'external' && mode !== 'agent') return errorResult("'mode' must be 'external' or 'agent'.");
       const check = assertPublicHttpsUrl(url);
       if (!check.ok) return errorResult(check.reason);
+      if (mode === 'agent') {
+        if (typeof deps.openAgentUrl !== 'function') {
+          return errorResult('The in-app agent browser is not available here. Retry with mode "external".');
+        }
+        try {
+          await deps.openAgentUrl(check.url);
+          return textResult(
+            `Opened ${check.url} in the in-app agent browser — the user can now direct the page agent on it.`,
+          );
+        } catch (error) {
+          return errorResult(
+            `Could not open ${check.url} in the agent browser: ${String((error as Error)?.message ?? error)} ` +
+              'If another mini app or browser session is open, it may need to close first — you can retry with mode "external".',
+          );
+        }
+      }
       try {
         await deps.openUrl(check.url);
         return textResult(`Opened ${check.url} in the device browser.`);

@@ -1095,6 +1095,11 @@ const NativeKit: any = {
                 // Web search and file transfers must leave the WebView: swap
                 // the plain fetch default for the CapacitorHttp adapter.
                 ...defaultDeviceToolDeps(),
+                // open_url mode "agent" opens the in-app agent browser. Referenced
+                // lazily like the facades below so wiring order never matters; on
+                // non-native platforms createAppBrowser falls back to a popup
+                // window, and urlMode config/allowed-hosts still gate the open.
+                openAgentUrl: (url: string) => NativeKit.appBrowser.openUrl(url),
                 // sql_query and stage_miniapp reach the facades assembled on
                 // NativeKit below — referenced lazily so wiring order never matters.
                 sqlite: {
