@@ -635,9 +635,27 @@ describe('alarms', () => {
 });
 
 describe('open_url', () => {
-  it('opens only public https urls', async () => {
+  it('defaults to the agent browser when it is available, external otherwise', async () => {
+    // Default (no mode): with deps.openAgentUrl present the URL opens in the
+    // in-app agent browser — the agent travels WITH the page now.
     const { deps, calls } = fakeDeps();
     const ok = await callTool(deps, 'open_url', { url: 'https://example.com/page' });
+    expect(ok.isError).toBeFalsy();
+    expect(calls.find((entry) => entry.method === 'openAgentUrl')?.args.url).toBe('https://example.com/page');
+    expect(calls.find((entry) => entry.method === 'openUrl')).toBeUndefined();
+
+    // No agent browser around (older host): the default falls back to external
+    // instead of erroring.
+    const { deps: plain, calls: plainCalls } = fakeDeps();
+    delete (plain as any).openAgentUrl;
+    const fallback = await callTool(plain, 'open_url', { url: 'https://example.com/page' });
+    expect(fallback.isError).toBeFalsy();
+    expect(plainCalls.find((entry) => entry.method === 'openUrl')?.args.url).toBe('https://example.com/page');
+  });
+
+  it('opens only public https urls', async () => {
+    const { deps, calls } = fakeDeps();
+    const ok = await callTool(deps, 'open_url', { url: 'https://example.com/page', mode: 'external' });
     expect(ok.isError).toBeFalsy();
     expect(calls.find((entry) => entry.method === 'openUrl')?.args.url).toBe('https://example.com/page');
 
@@ -653,7 +671,7 @@ describe('open_url', () => {
     // "Opened <url> in the device browser." — the exact bug report this guards.
     const { deps } = fakeDeps();
     deps.openUrl = () => Promise.reject(new Error('No app on this device could open that URL'));
-    const result = await callTool(deps, 'open_url', { url: 'https://example.com/unreachable' });
+    const result = await callTool(deps, 'open_url', { url: 'https://example.com/unreachable', mode: 'external' });
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain('Could not open https://example.com/unreachable');
     expect(textOf(result)).toContain('No app on this device could open that URL');
@@ -663,7 +681,7 @@ describe('open_url', () => {
     const { deps: syncDeps } = fakeDeps();
     let fired = false;
     syncDeps.openUrl = () => { fired = true; };
-    const syncResult = await callTool(syncDeps, 'open_url', { url: 'https://example.com/ok' });
+    const syncResult = await callTool(syncDeps, 'open_url', { url: 'https://example.com/ok', mode: 'external' });
     expect(syncResult.isError).toBeFalsy();
     expect(fired).toBe(true);
   });

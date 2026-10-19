@@ -32,6 +32,7 @@ import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 
 import java.util.Collections;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
@@ -61,7 +62,8 @@ public final class RemoteBrowserActivity extends Activity {
     private TextView shellTitle;
     private boolean shellBuilt;
     private boolean revealed;
-    private Set<String> allowedHosts = Collections.emptySet();
+    // Mutable: user-approved cross-site navigations extend it at runtime.
+    private final Set<String> allowedHosts = new HashSet<>();
     private boolean reported;
 
     @Override protected void onCreate(Bundle state) {
@@ -94,8 +96,21 @@ public final class RemoteBrowserActivity extends Activity {
             String[] configured = intent.getStringArrayExtra(EXTRA_ALLOWED_HOSTS);
             Set<String> rules = new HashSet<>();
             if (configured != null) for (String value : configured) rules.add(validateRule(value));
-            if (rules.isEmpty()) rules.add(hostAndPort(start));
-            allowedHosts = Collections.unmodifiableSet(rules);
+            if (rules.isEmpty()) {
+                // No configured global allowlist: the initial URL's site is the
+                // boundary — but a REAL site's first hop is almost always a
+                // sibling host (www./m./consent./accounts.), which the old
+                // exact-host rule blanked out. Allow the whole registrable
+                // site so youtube.com -> consent.youtube.com and
+                // linkedin.com -> www.linkedin.com actually load.
+                rules.add(hostAndPort(start));
+                String site = registrableSite(start.getHost());
+                if (site != null) {
+                    rules.add(site + ":443");
+                    rules.add("*." + site + ":443");
+                }
+            }
+            allowedHosts.addAll(rules);
             if (!isAllowed(start)) throw new IllegalArgumentException("Initial URL host is not allowed");
             buildShell(intent.getStringExtra(EXTRA_TITLE), start.getHost());
             createWebView(start.toString());
@@ -254,7 +269,13 @@ public final class RemoteBrowserActivity extends Activity {
         webView.setWebViewClient(new WebViewClient() {
             @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 if (!request.isForMainFrame()) return !isAllowed(request.getUrl());
-                if (!isAllowed(request.getUrl())) { report("blocked", "navigation outside the HTTPS allowlist was blocked"); return true; }
+                if (!isAllowed(request.getUrl())) {
+                    // Cross-site hop (e.g. LinkedIn -> Microsoft sign-in): the user
+                    // decides — a silent blank page helps nobody and hides attacks.
+                    report("prompted", "cross-site navigation awaiting user approval");
+                    showNavigationPrompt(request.getUrl());
+                    return true;
+                }
                 return false;
             }
             @Override public void onPageCommitVisible(WebView view, String url) {
@@ -294,6 +315,69 @@ public final class RemoteBrowserActivity extends Activity {
             if (matches && port == expectedPort) return true;
         }
         return false;
+    }
+
+    /** Common second-level suffixes where the registrable domain is 3 labels
+     *  (com.bd, co.uk, com.br, ...); everywhere else it is the last 2 labels. */
+    private static final Set<String> SECOND_LEVEL_SUFFIXES = new HashSet<>(Arrays.asList(
+        "com", "net", "org", "gov", "edu", "co", "ac", "or", "ne", "gv", "info", "biz", "name", "web"));
+
+    private static String registrableSite(String host) {
+        if (host == null) return null;
+        String[] labels = host.toLowerCase(Locale.ROOT).split("\\.");
+        if (labels.length <= 2) return host;
+        String middle = labels[labels.length - 2];
+        if (SECOND_LEVEL_SUFFIXES.contains(middle) && labels.length >= 3) {
+            return labels[labels.length - 3] + "." + middle + "." + labels[labels.length - 1];
+        }
+        return middle + "." + labels[labels.length - 1];
+    }
+
+    /** Inline approval bar for cross-site navigations (never a silent blank). */
+    private void showNavigationPrompt(Uri target) {
+        if (content == null || target == null || target.getHost() == null) return;
+        FrameLayout prompt = new FrameLayout(this);
+        prompt.setBackgroundColor(Color.rgb(124, 45, 18));
+        prompt.setTag("navPrompt");
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(6), dp(8), dp(6));
+        TextView label = new TextView(this);
+        String host = target.getHost().toLowerCase(Locale.ROOT);
+        label.setText("This site wants to continue on " + host + ".");
+        label.setTextColor(Color.WHITE);
+        label.setTextSize(13);
+        label.setSingleLine(true);
+        row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        Button allow = new Button(this);
+        allow.setText("Allow");
+        allow.setOnClickListener(view -> {
+            dismissNavigationPrompt();
+            allowedHosts.add(host + ":443");
+            String site = registrableSite(host);
+            if (site != null) { allowedHosts.add(site + ":443"); allowedHosts.add("*." + site + ":443"); }
+            report("allowed", "user approved navigation to " + host);
+            if (webView != null) webView.loadUrl(target.toString());
+        });
+        row.addView(allow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)));
+        Button deny = new Button(this);
+        deny.setText("Keep out");
+        deny.setOnClickListener(view -> {
+            dismissNavigationPrompt();
+            report("blocked", "user declined navigation to " + host);
+        });
+        row.addView(deny, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)));
+        prompt.addView(row, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        dismissNavigationPrompt();
+        content.addView(prompt, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP));
+    }
+
+    private void dismissNavigationPrompt() {
+        if (content == null) return;
+        for (int index = content.getChildCount() - 1; index >= 0; index -= 1) {
+            if ("navPrompt".equals(content.getChildAt(index).getTag())) content.removeViewAt(index);
+        }
     }
 
     private static Uri validatedHttps(String value) {

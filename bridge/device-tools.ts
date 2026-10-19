@@ -887,10 +887,11 @@ const TOOL_SPECS: DeviceToolSpec[] = [
   {
     name: 'open_url',
     description:
-      'Open a public https: URL for the user. mode "external" (default) opens the system browser — use it to show a page. ' +
-      'mode "agent" opens the in-app agent browser, where the user gets an in-page agent that can operate that page ' +
-      '(click, fill forms, extract) — use it when the task involves interacting with the page, and only after the user ' +
-      'asked for that. Never use this tool to fetch content for yourself; use your web fetch tool for that.',
+      'Open a public https: URL for the user. mode "agent" (the default whenever the in-app agent browser is available) ' +
+      'opens the URL inside the app with an in-page agent the user can direct (click, fill forms, extract) — prefer it ' +
+      'whenever the task involves interacting with the page, and only when the user asked for that. mode "external" opens ' +
+      'the system browser — use it to show a page when the agent browser is unavailable or the user explicitly wants the ' +
+      'outside browser. Never use this tool to fetch content for yourself; use your web fetch tool for that.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -898,7 +899,7 @@ const TOOL_SPECS: DeviceToolSpec[] = [
         mode: {
           type: 'string',
           enum: ['external', 'agent'],
-          description: '"external" (default) = system browser; "agent" = in-app agent browser with the page agent.',
+          description: '"agent" = in-app agent browser (default when available); "external" = system browser.',
         },
       },
       required: ['url'],
@@ -907,7 +908,10 @@ const TOOL_SPECS: DeviceToolSpec[] = [
     run: async (args, deps) => {
       const url = requiredString(args, 'url', 1000);
       if (!url) return errorResult("'url' is required.");
-      const mode = args.mode === undefined || args.mode === null ? 'external' : String(args.mode);
+      const agentAvailable = typeof deps.openAgentUrl === 'function';
+      const mode = args.mode === undefined || args.mode === null
+        ? (agentAvailable ? 'agent' : 'external')
+        : String(args.mode);
       if (mode !== 'external' && mode !== 'agent') return errorResult("'mode' must be 'external' or 'agent'.");
       const check = assertPublicHttpsUrl(url);
       if (!check.ok) return errorResult(check.reason);
