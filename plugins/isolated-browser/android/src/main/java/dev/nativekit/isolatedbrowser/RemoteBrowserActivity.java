@@ -568,7 +568,7 @@ public final class RemoteBrowserActivity extends Activity {
         proceed.setOnClickListener(view -> {
             removeView(prompt);
             report("safeBrowsingContinued", "user continued past threat " + threatType);
-            try { decision.proceed(); } catch (Throwable ignored) {}
+            try { decision.proceed(true); } catch (Throwable ignored) {}
         });
         row.addView(proceed, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)));
         Button back = new Button(this);
