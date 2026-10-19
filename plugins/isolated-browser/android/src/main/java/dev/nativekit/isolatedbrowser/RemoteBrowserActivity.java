@@ -4,8 +4,13 @@ import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
+import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceResponse;
 import android.os.Bundle;
 import android.os.ResultReceiver;
 import android.view.Gravity;
@@ -23,6 +28,7 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
+import android.widget.Toast;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
@@ -65,6 +71,15 @@ public final class RemoteBrowserActivity extends Activity {
     // Mutable: user-approved cross-site navigations extend it at runtime.
     private final Set<String> allowedHosts = new HashSet<>();
     private boolean reported;
+    // Error visibility: a browsing surface must never dead-end on a silent
+    // blank page. Every failure mode below ends in something the user can SEE
+    // (and act on) instead of the old eternal loading cover.
+    private String lastUrl;
+    private Runnable loadTimeout;
+    private View customView;
+    private WebChromeClient.CustomViewCallback customViewCallback;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private static final long LOAD_TIMEOUT_MS = 25_000L;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -246,7 +261,9 @@ public final class RemoteBrowserActivity extends Activity {
         settings.setAllowContentAccess(false);
         settings.setAllowFileAccessFromFileURLs(false);
         settings.setAllowUniversalAccessFromFileURLs(false);
-        settings.setJavaScriptCanOpenWindowsAutomatically(false);
+        // Many OAuth flows (Google/Apple sign-in buttons) use window.open();
+        // with multi-window off this navigates the SAME controlled WebView.
+        settings.setJavaScriptCanOpenWindowsAutomatically(true);
         settings.setSupportMultipleWindows(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         settings.setMediaPlaybackRequiresUserGesture(true);
@@ -254,7 +271,10 @@ public final class RemoteBrowserActivity extends Activity {
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, false);
         WebView.setWebContentsDebuggingEnabled(false);
-        webView.setDownloadListener((url, userAgent, disposition, type, length) -> report("blocked", "browser download blocked"));
+        webView.setDownloadListener((url, userAgent, disposition, type, length) -> {
+            report("blocked", "browser download blocked");
+            try { Toast.makeText(this, "Downloads are blocked by NativeKit policy", Toast.LENGTH_SHORT).show(); } catch (Throwable ignored) {}
+        });
         webView.setWebChromeClient(new WebChromeClient() {
             @Override public void onPermissionRequest(PermissionRequest request) { request.deny(); }
             @Override public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) { callback.invoke(origin, false, false); }
@@ -264,6 +284,29 @@ public final class RemoteBrowserActivity extends Activity {
                 if (bar == null) return;
                 bar.setProgress(Math.max(0, Math.min(100, newProgress)));
                 bar.setVisibility(newProgress >= 100 ? View.INVISIBLE : View.VISIBLE);
+            }
+            // Fullscreen <video> on video sites (YouTube etc.): without these the
+            // fullscreen button does nothing at all in the remote browser.
+            @Override public void onShowCustomView(View view, WebChromeClient.CustomViewCallback callback) {
+                if (customView != null) { try { callback.onCustomViewHidden(); } catch (Throwable ignored) {} return; }
+                customView = view;
+                customViewCallback = callback;
+                try {
+                    content.addView(view, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                    view.bringToFront();
+                } catch (Throwable error) {
+                    exitCustomView();
+                }
+            }
+            @Override public void onHideCustomView() {
+                View view = customView;
+                customView = null;
+                WebChromeClient.CustomViewCallback callback = customViewCallback;
+                customViewCallback = null;
+                if (view != null && view.getParent() instanceof ViewGroup) {
+                    try { ((ViewGroup) view.getParent()).removeView(view); } catch (Throwable ignored) {}
+                }
+                if (callback != null) { try { callback.onCustomViewHidden(); } catch (Throwable ignored) {} }
             }
         });
         webView.setWebViewClient(new WebViewClient() {
@@ -278,16 +321,45 @@ public final class RemoteBrowserActivity extends Activity {
                 }
                 return false;
             }
+            @Override public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                lastUrl = url;
+                dismissHttpBanner();
+                armLoadTimeout(url);
+            }
             @Override public void onPageCommitVisible(WebView view, String url) {
                 // Earliest point guaranteed to draw the NEW page — reveal + fade in.
+                cancelLoadTimeout();
                 reveal();
             }
             @Override public void onPageFinished(WebView view, String url) {
                 // Fallback: never leave the user stuck on the loading cover.
+                cancelLoadTimeout();
                 reveal();
             }
-            @Override public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) { handler.cancel(); report("blocked", "TLS certificate error"); }
-            @Override public void onSafeBrowsingHit(WebView view, WebResourceRequest request, int threatType, SafeBrowsingResponse callback) { callback.backToSafety(true); }
+            @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                if (!request.isForMainFrame()) return; // subresource failures are normal
+                CharSequence raw = error == null ? null : error.getDescription();
+                String description = raw == null ? "network error" : raw.toString();
+                if (description.contains("ERR_ABORTED")) return; // user navigated away mid-load
+                cancelLoadTimeout();
+                String reason = description + " (code " + (error == null ? "?" : error.getErrorCode()) + ")";
+                report("netError", reason);
+                showLoadError("This page could not load", reason + " — the network, DNS or the site itself refused the connection.");
+            }
+            @Override public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse response) {
+                if (!request.isForMainFrame()) return; // assets 404 constantly; ignore
+                int code = response == null ? 0 : response.getStatusCode();
+                if (code < 400) return;
+                String phrase = response != null && response.getReasonPhrase() != null ? " " + response.getReasonPhrase() : "";
+                report("httpError", "HTTP " + code);
+                showHttpBanner("HTTP " + code + phrase + " — the site may block in-app browsers or this region.");
+            }
+            @Override public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) { handler.cancel(); report("blocked", "TLS certificate error"); showLoadError("Secure connection failed", "The TLS certificate of this site is not trusted (blocked)."); }
+            @Override public void onSafeBrowsingHit(WebView view, WebResourceRequest request, int threatType, SafeBrowsingResponse callback) {
+                // Never a silent bounce-back: the user decides, eyes open.
+                report("safeBrowsingPrompted", "threat " + threatType);
+                showSafeBrowsingPrompt(threatType, callback);
+            }
         });
         installCover();
         // In-page agent on every remote page ("url open korlew jeno agent browser
@@ -380,6 +452,152 @@ public final class RemoteBrowserActivity extends Activity {
         }
     }
 
+    // ---------- load timeout (silent ISP drops / blackholed networks) --------
+    private void armLoadTimeout(String url) {
+        cancelLoadTimeout();
+        final String host = Uri.parse(url).getHost() == null ? url : Uri.parse(url).getHost();
+        loadTimeout = () -> {
+            loadTimeout = null;
+            if (isFinishing() || webView == null) return;
+            report("timeout", "no data within " + (LOAD_TIMEOUT_MS / 1000) + "s");
+            showLoadError("This site did not respond",
+                host + " sent nothing for 25 seconds. The network may be blocking or filtering this site (common for ISP-filtered content), or the site is down.");
+        };
+        handler.postDelayed(loadTimeout, LOAD_TIMEOUT_MS);
+    }
+
+    private void cancelLoadTimeout() {
+        if (loadTimeout != null) {
+            handler.removeCallbacks(loadTimeout);
+            loadTimeout = null;
+        }
+    }
+
+    /** Slim top banner for HTTP-level main-document failures (403 bot walls,
+     *  451 legal blocks, 404s that still render content) — the page stays. */
+    private void showHttpBanner(String text) {
+        if (content == null) return;
+        dismissHttpBanner();
+        FrameLayout banner = new FrameLayout(this);
+        banner.setBackgroundColor(Color.rgb(124, 45, 18));
+        banner.setTag("httpBanner");
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(6), dp(8), dp(6));
+        TextView label = new TextView(this);
+        label.setText(text);
+        label.setTextColor(Color.WHITE);
+        label.setTextSize(13);
+        label.setSingleLine(true);
+        row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        Button dismiss = new Button(this);
+        dismiss.setText("Dismiss");
+        dismiss.setOnClickListener(view -> dismissHttpBanner());
+        row.addView(dismiss, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)));
+        banner.addView(row, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        content.addView(banner, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP));
+    }
+
+    private void dismissHttpBanner() {
+        if (content == null) return;
+        for (int index = content.getChildCount() - 1; index >= 0; index -= 1) {
+            if ("httpBanner".equals(content.getChildAt(index).getTag())) content.removeViewAt(index);
+        }
+    }
+
+    /** Full-page dark error screen with the REAL reason + Retry/Close. */
+    private void showLoadError(String title, String detail) {
+        if (content == null || isFinishing()) return;
+        dismissNavigationPrompt();
+        dismissHttpBanner();
+        cancelLoadTimeout();
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setGravity(Gravity.CENTER);
+        box.setPadding(dp(24), dp(24), dp(24), dp(24));
+        TextView heading = new TextView(this);
+        heading.setText(title);
+        heading.setTextColor(Color.WHITE);
+        heading.setTextSize(17);
+        heading.setGravity(Gravity.CENTER);
+        box.addView(heading, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        TextView body = new TextView(this);
+        body.setText(detail);
+        body.setTextColor(Color.rgb(148, 163, 184));
+        body.setTextSize(13);
+        body.setGravity(Gravity.CENTER);
+        body.setPadding(0, dp(8), 0, dp(16));
+        box.addView(body, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        Button retry = new Button(this);
+        retry.setText("Retry");
+        retry.setEnabled(lastUrl != null);
+        retry.setOnClickListener(view -> {
+            String again = lastUrl;
+            if (again == null) return;
+            destroyWebView();
+            createWebView(again);
+        });
+        box.addView(retry, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        Button close = new Button(this);
+        close.setText("Close");
+        close.setOnClickListener(view -> finish());
+        box.addView(close, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        content.removeAllViews();
+        content.addView(box, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+    }
+
+    /** Safe Browsing: an explicit, visible Continue / Go back choice. */
+    private void showSafeBrowsingPrompt(int threatType, SafeBrowsingResponse decision) {
+        if (content == null || decision == null) { try { decision.backToSafety(true); } catch (Throwable ignored) {} return; }
+        FrameLayout prompt = new FrameLayout(this);
+        prompt.setBackgroundColor(Color.rgb(124, 45, 18));
+        prompt.setTag("safePrompt");
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(6), dp(8), dp(6));
+        TextView label = new TextView(this);
+        label.setText("Safe Browsing flagged this site (threat " + threatType + ").");
+        label.setTextColor(Color.WHITE);
+        label.setTextSize(13);
+        label.setSingleLine(true);
+        row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        Button proceed = new Button(this);
+        proceed.setText("Continue");
+        proceed.setOnClickListener(view -> {
+            removeView(prompt);
+            report("safeBrowsingContinued", "user continued past threat " + threatType);
+            try { decision.proceed(); } catch (Throwable ignored) {}
+        });
+        row.addView(proceed, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)));
+        Button back = new Button(this);
+        back.setText("Go back");
+        back.setOnClickListener(view -> {
+            removeView(prompt);
+            report("safeBrowsingBlocked", "user went back from threat " + threatType);
+            try { decision.backToSafety(true); } catch (Throwable ignored) {}
+        });
+        row.addView(back, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)));
+        prompt.addView(row, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        content.addView(prompt, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP));
+    }
+
+    private void removeView(View view) {
+        if (view != null && view.getParent() instanceof ViewGroup) {
+            try { ((ViewGroup) view.getParent()).removeView(view); } catch (Throwable ignored) {}
+        }
+    }
+
+    private void exitCustomView() {
+        View view = customView;
+        customView = null;
+        WebChromeClient.CustomViewCallback callback = customViewCallback;
+        customViewCallback = null;
+        removeView(view);
+        if (callback != null) { try { callback.onCustomViewHidden(); } catch (Throwable ignored) {} }
+    }
+
     private static Uri validatedHttps(String value) {
         Uri uri = Uri.parse(value);
         if (!uri.isHierarchical() || !"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null || uri.getUserInfo() != null) throw new IllegalArgumentException("Remote URL mode accepts HTTPS URLs without embedded credentials only");
@@ -425,6 +643,8 @@ public final class RemoteBrowserActivity extends Activity {
     }
 
     private void destroyWebView() {
+        cancelLoadTimeout();
+        exitCustomView();
         WebView current = webView;
         webView = null;
         if (current == null) return;
@@ -432,6 +652,12 @@ public final class RemoteBrowserActivity extends Activity {
         try { current.loadUrl("about:blank"); } catch (Exception ignored) {}
         if (current.getParent() instanceof ViewGroup) ((ViewGroup) current.getParent()).removeView(current);
         try { current.destroy(); } catch (Exception ignored) {}
+    }
+
+    @Override public void onBackPressed() {
+        if (customView != null) { exitCustomView(); return; }
+        if (webView != null && webView.canGoBack()) { webView.goBack(); return; }
+        super.onBackPressed();
     }
 
     @Override protected void onDestroy() {
