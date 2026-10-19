@@ -3,7 +3,7 @@
   "app": {
     "name": "NativeKit TestLab",
     "id": "dev.nativekit.shell",
-    "versionName": "1.4.31-site-allowlist",
+    "versionName": "1.4.32-pageagent-tt",
     "versionCode": 33,
     "buildNumber": "31",
     "description": "A reusable, locally bundled Capacitor application shell",
