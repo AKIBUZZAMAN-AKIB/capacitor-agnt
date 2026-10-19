@@ -3,7 +3,7 @@
   "app": {
     "name": "NativeKit TestLab",
     "id": "dev.nativekit.shell",
-    "versionName": "1.4.33-error-visibility",
+    "versionName": "1.4.34-relay-wirefilter",
     "versionCode": 33,
     "buildNumber": "31",
     "description": "A reusable, locally bundled Capacitor application shell",

@@ -57,6 +57,51 @@
     else entry.reject(new Error(String(data.error || 'NativeKit relay failed')));
   };
 
+  function sanitizeWireRequest(bodyStr) {
+    try {
+      var body = JSON.parse(bodyStr);
+      var changed = false;
+      var disallowed = ["parallel_tool_calls","thinking","enable_thinking","reasoning","reasoning_effort","verbosity","temperature","top_p","top_k","top_logprobs","logprobs","logit_bias","store","metadata","safety_identifier","prompt_cache_key","max_tokens","max_completion_tokens","n","presence_penalty","frequency_penalty","stop","stream_options","service_tier","seed"];
+      for (var i=0;i<disallowed.length;i++) {
+        var k = disallowed[i];
+        if (k in body) { delete body[k]; changed = true; }
+      }
+      for (var key in body) {
+        if (key.indexOf("reasoning_")===0 || key.indexOf("thinking_")===0) { delete body[key]; changed = true; }
+      }
+      if (body.model && body.model !== cfg.model) { body.model = cfg.model; changed = true; }
+      if (body.tool_choice) {
+        if (typeof body.tool_choice === "string" && (body.tool_choice === "required" || body.tool_choice.indexOf("function")>=0)) {
+          body.tool_choice = "auto"; changed = true;
+        } else if (typeof body.tool_choice === "object") {
+          body.tool_choice = "auto"; changed = true;
+        }
+      }
+      if (body.response_format) {
+        try {
+          if (body.response_format.type && body.response_format.type.indexOf("json_schema")>=0) { delete body.response_format; changed = true; }
+          else if (body.response_format.json_schema) { delete body.response_format; changed = true; }
+        } catch(e) { delete body.response_format; changed = true; }
+      }
+      if (Array.isArray(body.tools)) {
+        for (var t=0;t<body.tools.length;t++) {
+          var tool = body.tools[t];
+          if (tool && tool.function && tool.function.strict) { delete tool.function.strict; changed = true; }
+        }
+      }
+      if (Array.isArray(body.messages)) {
+        for (var m=0;m<body.messages.length;m++) {
+          var msg = body.messages[m];
+          if (msg && msg.name) {
+            if (!/^[a-zA-Z0-9_-]{1,64}$/.test(msg.name)) { delete msg.name; changed = true; }
+          }
+          if (msg && msg.cache_control) { delete msg.cache_control; changed = true; }
+        }
+      }
+      return changed ? JSON.stringify(body) : bodyStr;
+    } catch(e) { return bodyStr; }
+  }
+
   function relayFetch(url, init) {
     return new Promise(function (resolve, reject) {
       var id = 'nk' + (++seq);
@@ -65,10 +110,12 @@
         reject(new Error('NativeKit LLM relay timed out'));
       }, 150000);
       pending[id] = { resolve: resolve, reject: reject, timer: timer };
+      var rawBody = init && init.body ? String(init.body) : '';
+      var cleanBody = sanitizeWireRequest(rawBody);
       send({
         v: 1, kind: 'llm', token: cfg.token, id: id,
         url: String(url),
-        body: init && init.body ? String(init.body) : '',
+        body: cleanBody,
       });
     });
   }

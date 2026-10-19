@@ -209,35 +209,62 @@ public final class PageAgentHost {
 
     private void relay(String id, String body, JavaScriptReplyProxy proxy) {
         try {
-            PostResult first = post(body);
-            if (first.status / 100 != 2) {
-                // The free gateway's upstream pool is inconsistent about
-                // tool_choice:"required" / parallel_tool_calls (the bundle's
-                // own modelPatch relaxes these per provider, but has no entry
-                // for the kilo route). Retry exactly once with them relaxed.
-                if (first.status == 400) {
-                    String adapted = adaptRequest(body);
-                    if (adapted != null) {
-                        PostResult second = post(adapted);
+            String currentBody = body;
+            PostResult result = null;
+            int attempts = 0;
+            final int maxAttempts = 4; // 1 initial + 3 retries
+            final long[] backoffs = {0L, 300L, 900L, 2000L};
+
+            while (true) {
+                attempts++;
+                if (attempts > 1) {
+                    long delay = attempts - 1 < backoffs.length ? backoffs[attempts - 1] : 2000L;
+                    try { Thread.sleep(delay); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+                }
+
+                PostResult attemptResult = post(currentBody);
+                result = attemptResult;
+
+                if (attemptResult.status / 100 == 2) {
+                    replyOk(proxy, id, attemptResult.status, attemptResult.text);
+                    return;
+                }
+
+                // First 400 -> try sanitized wire-filter
+                if (attempts == 1 && attemptResult.status == 400) {
+                    String sanitized = sanitizeRequest(currentBody);
+                    if (sanitized != null && !sanitized.equals(currentBody)) {
+                        Log.i(TAG, "wire-filter sanitized request (attempt 1 -> 2), retrying");
+                        currentBody = sanitized;
+                        PostResult second = post(currentBody);
+                        attempts++;
+                        result = second;
                         if (second.status / 100 == 2) {
                             replyOk(proxy, id, second.status, second.text);
                             return;
                         }
+                        // fall through to retryable check with sanitized body
                     }
                 }
-                // Never hand back an opaque "HTTP 400:" — surface the gateway's
-                // actual error text so the panel shows the real reason.
-                Log.w(TAG, "free route HTTP " + first.status + ": " + snippet(first.text, 600));
-                replyOk(proxy, id, first.status, wrapGatewayError(first.status, first.text));
-                return;
+
+                if (attempts >= maxAttempts || !isRetryable(result.status, result.text)) {
+                    break;
+                }
+
+                Log.w(TAG, "retryable gateway error HTTP " + result.status + " attempt " + attempts + "/" + maxAttempts + ": " + snippet(result.text, 400) + " -> retrying same body");
             }
-            replyOk(proxy, id, first.status, first.text);
+
+            // All attempts failed -> surface full diagnostics
+            Log.w(TAG, "free route HTTP " + (result != null ? result.status : -1) + " after " + attempts + " attempts: " + snippet(result != null ? result.text : "", 600));
+            String wrapped = wrapGatewayErrorWithDiagnostics(result != null ? result.status : 0, result != null ? result.text : "", attempts);
+            replyOk(proxy, id, result != null ? result.status : 400, wrapped);
         } catch (Throwable error) {
             reply(proxy, errorResponse(id, error.getMessage() == null ? "relay failed" : error.getMessage()));
         }
     }
 
     private static final class PostResult {
+
         final int status;
         final String text;
         PostResult(int status, String text) {
@@ -268,32 +295,230 @@ public final class PageAgentHost {
     }
 
     /** Mirrors what the bundle's modelPatch does for other providers: relax the
-     *  strict tool-calling fields the kilo free pool tends to reject. */
+     *  strict tool-calling fields the kilo free pool tends to reject.
+     *  Now expanded to a full wire-filter for AtlasCloud and other free providers. */
     private static String adaptRequest(String body) {
+        return sanitizeRequest(body);
+    }
+
+    private static boolean isRetryable(int status, String body) {
+        if (status == 429) return true;
+        if (status >= 500 && status < 600) return true;
+        if (status == 400 && body != null) {
+            String lower = body.toLowerCase();
+            // Kilo free-pool transient: gateway wraps provider error
+            if (lower.contains("upstream_error")) return true;
+            if (lower.contains("provider returned error")) return true;
+            if (lower.contains("bad request")) return true;
+            if (lower.contains("invalid request params")) return true;
+            if (lower.contains("rate limit")) return true;
+            if (lower.contains("temporarily unavailable")) return true;
+            if (lower.contains("overloaded")) return true;
+        }
+        return false;
+    }
+
+    private static String sanitizeRequest(String body) {
         try {
-            JSONObject request = new JSONObject(body);
+            org.json.JSONObject request = new org.json.JSONObject(body);
             boolean changed = false;
-            if ("required".equals(request.optString("tool_choice", ""))) {
-                request.put("tool_choice", "auto");
+
+            // --- top-level disallowed fields (Kilo docs only allow model,messages,tools,tool_choice,response_format,user,seed,stream) ---
+            String[] disallowed = new String[]{
+                "parallel_tool_calls",
+                "thinking",
+                "enable_thinking",
+                "reasoning",
+                "reasoning_effort",
+                "verbosity",
+                "temperature",
+                "top_p",
+                "top_k",
+                "top_logprobs",
+                "logprobs",
+                "logit_bias",
+                "store",
+                "metadata",
+                "safety_identifier",
+                "prompt_cache_key",
+                "max_tokens",
+                "max_completion_tokens",
+                "n",
+                "presence_penalty",
+                "frequency_penalty",
+                "stop",
+                "stream_options",
+                "service_tier",
+                "seed" // keep? kilo docs allow seed, but some providers reject it - remove to be safe
+            };
+            for (String key : disallowed) {
+                if (request.has(key)) {
+                    request.remove(key);
+                    changed = true;
+                }
+            }
+            // Remove any key starting with reasoning_ or thinking_
+            java.util.Iterator<String> keys = request.keys();
+            java.util.List<String> toRemove = new java.util.ArrayList<>();
+            while (keys.hasNext()) {
+                String k = keys.next();
+                if (k.startsWith("reasoning_") || k.startsWith("thinking_")) {
+                    toRemove.add(k);
+                }
+            }
+            for (String k : toRemove) {
+                request.remove(k);
                 changed = true;
             }
-            if (request.has("parallel_tool_calls")) {
-                request.remove("parallel_tool_calls");
-                changed = true;
+
+            // --- model must be kilo-auto/free ---
+            if (request.has("model")) {
+                String m = request.optString("model", "");
+                if (!LLM_MODEL.equals(m)) {
+                    request.put("model", LLM_MODEL);
+                    changed = true;
+                }
             }
-            if (request.has("thinking")) {
-                request.remove("thinking");
-                changed = true;
+
+            // --- tool_choice: required or object -> auto (AtlasCloud does not support required/named) ---
+            if (request.has("tool_choice")) {
+                Object tc = request.opt("tool_choice");
+                if (tc instanceof String) {
+                    String s = (String) tc;
+                    if ("required".equals(s) || s.contains("function")) {
+                        request.put("tool_choice", "auto");
+                        changed = true;
+                    }
+                } else if (tc instanceof org.json.JSONObject) {
+                    // named tool choice -> auto for free pool compatibility
+                    request.put("tool_choice", "auto");
+                    changed = true;
+                }
             }
-            if (request.has("enable_thinking")) {
-                request.remove("enable_thinking");
-                changed = true;
+
+            // --- response_format: remove if json_schema (many free providers reject) ---
+            if (request.has("response_format")) {
+                try {
+                    Object rf = request.opt("response_format");
+                    if (rf instanceof org.json.JSONObject) {
+                        org.json.JSONObject rfo = (org.json.JSONObject) rf;
+                        String type = rfo.optString("type", "");
+                        if (type.contains("json_schema") || rfo.has("json_schema")) {
+                            request.remove("response_format");
+                            changed = true;
+                        }
+                    }
+                } catch (Throwable ignored) {
+                    request.remove("response_format");
+                    changed = true;
+                }
             }
+
+            // --- tools: strip strict and unsupported fields ---
+            if (request.has("tools")) {
+                try {
+                    org.json.JSONArray tools = request.optJSONArray("tools");
+                    if (tools != null) {
+                        for (int i = 0; i < tools.length(); i++) {
+                            org.json.JSONObject tool = tools.optJSONObject(i);
+                            if (tool == null) continue;
+                            if (tool.has("function")) {
+                                org.json.JSONObject func = tool.optJSONObject("function");
+                                if (func != null) {
+                                    if (func.has("strict")) {
+                                        func.remove("strict");
+                                        changed = true;
+                                    }
+                                    // remove additionalProperties that some providers reject if not boolean
+                                    // keep only name, description, parameters
+                                    // parameters should be valid JSON schema
+                                }
+                            }
+                        }
+                    }
+                } catch (Throwable ignored) {}
+            }
+
+            // --- messages: sanitize name field (AtlasCloud validates ^[a-zA-Z0-9_-]{1,64}$) ---
+            if (request.has("messages")) {
+                try {
+                    org.json.JSONArray msgs = request.optJSONArray("messages");
+                    if (msgs != null) {
+                        for (int i = 0; i < msgs.length(); i++) {
+                            org.json.JSONObject msg = msgs.optJSONObject(i);
+                            if (msg == null) continue;
+                            if (msg.has("name")) {
+                                String name = msg.optString("name", "");
+                                if (!name.matches("^[a-zA-Z0-9_-]{1,64}$")) {
+                                    msg.remove("name");
+                                    changed = true;
+                                }
+                            }
+                            // remove disallowed message fields like cache_control, etc.
+                            if (msg.has("cache_control")) { msg.remove("cache_control"); changed = true; }
+                        }
+                    }
+                } catch (Throwable ignored) {}
+            }
+
             return changed ? request.toString() : null;
         } catch (Throwable error) {
             return null;
         }
     }
+
+    private static String wrapGatewayErrorWithDiagnostics(int status, String rawBody, int attempts) {
+        try {
+            String provider = "unknown";
+            String requestId = "";
+            String msg = "";
+            String rawSnippet = snippet(rawBody, 600);
+            try {
+                org.json.JSONObject root = new org.json.JSONObject(rawBody);
+                if (root.has("error")) {
+                    org.json.JSONObject err = root.optJSONObject("error");
+                    if (err != null) {
+                        msg = err.optString("message", "");
+                        if (err.has("metadata")) {
+                            org.json.JSONObject meta = err.optJSONObject("metadata");
+                            if (meta != null) {
+                                provider = meta.optString("provider_name", provider);
+                                String raw = meta.optString("raw", "");
+                                requestId = meta.optString("request_id", "");
+                                if (raw.isEmpty()) raw = meta.optString("raw", "");
+                                // try parse raw as JSON for inner code/msg
+                                try {
+                                    org.json.JSONObject inner = new org.json.JSONObject(raw);
+                                    String innerMsg = inner.optString("msg", "");
+                                    String innerCode = inner.optString("code", "");
+                                    if (!innerMsg.isEmpty()) msg = msg + " | inner: " + innerMsg + " (" + innerCode + ")";
+                                    if (inner.has("request_id")) requestId = inner.optString("request_id", requestId);
+                                } catch (Throwable ignored) {}
+                                if (!raw.isEmpty()) rawSnippet = snippet(raw, 400);
+                            }
+                        }
+                        if (err.has("code")) {
+                            msg = msg + " [code " + err.opt("code") + "]";
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {}
+
+            StringBuilder detailed = new StringBuilder();
+            detailed.append("gateway HTTP ").append(status).append(" after ").append(attempts).append(" attempts");
+            if (!provider.equals("unknown")) detailed.append(" (provider ").append(provider).append(")");
+            if (!requestId.isEmpty()) detailed.append(" [req ").append(requestId).append("]");
+            detailed.append(": ").append(msg.isEmpty() ? rawSnippet : msg);
+            detailed.append(" | wire-filter sanitized + retry with backoff applied");
+
+            org.json.JSONObject wrapped = new org.json.JSONObject();
+            wrapped.put("error", new org.json.JSONObject().put("message", detailed.toString()));
+            return wrapped.toString();
+        } catch (Throwable error) {
+            return "{\"error\":{\"message\":\"gateway HTTP " + status + " after " + attempts + " attempts\"}}";
+        }
+    }
+
 
     private static String snippet(String text, int limit) {
         if (text == null) return "";
