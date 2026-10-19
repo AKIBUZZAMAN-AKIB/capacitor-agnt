@@ -56,6 +56,10 @@ public final class PageAgentHost {
 
     private static final String BUNDLE_ASSET = "pageagent/page-agent.iife.js";
     private static final String BOOTSTRAP_ASSET = "pageagent/bootstrap.js";
+    // MUST run before the bundle: sites enforcing Trusted Types (YouTube,
+    // Google sign-in) throw on the bundle's innerHTML panel building unless
+    // this shim wraps the HTML sinks first.
+    private static final String TT_SHIM_ASSET = "pageagent/tt-shim.js";
     // The free anonymous OpenAI-compatible route the whole app already uses.
     private static final String LLM_ENDPOINT = "https://api.kilo.ai/api/gateway/chat/completions";
     private static final String LLM_BASE_URL = "https://api.kilo.ai/api/gateway";
@@ -366,7 +370,8 @@ public final class PageAgentHost {
             String bundle = readAsset(context, BUNDLE_ASSET);
             String bootstrap = readAsset(context, BOOTSTRAP_ASSET);
             if (bundle == null || bootstrap == null) return null;
-            cached = bundle + "\n" + bootstrap;
+            String shim = readAsset(context, TT_SHIM_ASSET);
+            cached = (shim == null ? "" : shim + "\n") + bundle + "\n" + bootstrap;
             cachedInjection = cached;
             return cached;
         } catch (Throwable error) {
