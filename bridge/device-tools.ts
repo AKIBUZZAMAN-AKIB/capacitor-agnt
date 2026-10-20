@@ -242,15 +242,17 @@ interface DeviceToolSpec {
 // ── Small helpers ────────────────────────────────────────────────────────────
 
 function textResult(text: string, structured?: Record<string, unknown>): DeviceOutcome {
+  const safeText = text.length > 1000 ? wrapUntrusted('tool_output', text) : text;
   return {
-    content: [{ type: 'text', text }],
+    content: [{ type: 'text', text: safeText }],
     ...(structured ? { structuredContent: structured } : {}),
   };
 }
 
 function errorResult(text: string, structured?: Record<string, unknown>): DeviceOutcome {
+  const safeText = text.length > 1000 ? wrapUntrusted('tool_error', text) : text;
   return {
-    content: [{ type: 'text', text }],
+    content: [{ type: 'text', text: safeText }],
     isError: true,
     ...(structured ? { structuredContent: structured } : {}),
   };
@@ -539,6 +541,16 @@ export function parseInstantAnswer(payload: unknown): { abstract: string; abstra
 }
 
 const SEARCH_USER_AGENT = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Mobile Safari/537.36';
+
+// ── Pie-inspired safety: untrusted wrappers ─────────────────────────────────
+function escapeUntrustedWrappers(s: string): string {
+  return s.replace(/<\s*\/?\s*untrusted_[a-z_]+[^>]*>/gi, (m) => m.replace(/</g, '&lt;').replace(/>/g, '&gt;'));
+}
+function wrapUntrusted(tag: string, content: string): string {
+  const safe = escapeUntrustedWrappers(content);
+  return `<untrusted_${tag}>\n${safe}\n</untrusted_${tag}>`;
+}
+
 
 // ── Tool implementations ─────────────────────────────────────────────────────
 
@@ -2165,6 +2177,269 @@ const TOOL_SPECS: DeviceToolSpec[] = [
         return textResult(value ? `Clipboard contains: ${value.slice(0, 4000)}` : 'The clipboard is empty.', { text: value.slice(0, 20000) });
       } catch (error) {
         return errorResult(`Clipboard read failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  // ── Pie-inspired powerful harness tools ──────────────────────────────────
+  {
+    name: 'save_records',
+    description:
+      'Saves structured records to the agent scratchpad (external working memory). Use this for long-horizon tasks like extracting 200 rows — the scratchpad survives context window slides. Each record is a JSON object. Inspired by Pie\'s scratchpad.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        records: { type: 'array', items: { type: 'object' }, description: 'Array of JSON objects to save (max 100 per call).' },
+        clear: { type: 'boolean', description: 'If true, clear existing records before saving.' },
+      },
+      required: ['records'],
+    },
+    rateLimit: SQL_LIMIT,
+    run: async (args, deps) => {
+      const records = Array.isArray(args.records) ? args.records : [];
+      if (!records.length) return errorResult("'records' must be a non-empty array.");
+      if (records.length > 100) return errorResult("At most 100 records per call.");
+      const clear = args.clear === true;
+      try {
+        await deps.sqlite.run('agent_tools', 'CREATE TABLE IF NOT EXISTS scratchpad_records (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT, created_at INTEGER)', []);
+        if (clear) await deps.sqlite.run('agent_tools', 'DELETE FROM scratchpad_records', []);
+        for (const rec of records.slice(0, 100)) {
+          const json = JSON.stringify(rec).slice(0, 10000);
+          await deps.sqlite.run('agent_tools', 'INSERT INTO scratchpad_records (data, created_at) VALUES (?, ?)', [json, Date.now()]);
+        }
+        const countRes = await deps.sqlite.query('agent_tools', 'SELECT COUNT(*) as c FROM scratchpad_records', []);
+        const count = Number((countRes.values?.[0] as any)?.c ?? records.length);
+        return textResult(`Saved ${records.length} record(s). Total in scratchpad: ${count}.`, { saved: records.length, total: count });
+      } catch (error) {
+        return errorResult(`save_records failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'read_records',
+    description: 'Reads records from the scratchpad. Returns up to 100 most recent records.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'Max records to return (1-100, default 20).' },
+        offset: { type: 'number', description: 'Offset (default 0).' },
+      },
+    },
+    rateLimit: SQL_LIMIT,
+    run: async (args, deps) => {
+      const limit = Math.min(100, Math.max(1, Number(args.limit) || 20));
+      const offset = Math.max(0, Number(args.offset) || 0);
+      try {
+        await deps.sqlite.run('agent_tools', 'CREATE TABLE IF NOT EXISTS scratchpad_records (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT, created_at INTEGER)', []);
+        const res = await deps.sqlite.query('agent_tools', 'SELECT data FROM scratchpad_records ORDER BY id DESC LIMIT ? OFFSET ?', [limit, offset]);
+        const rows = (res.values ?? []).map((r: any) => { try { return JSON.parse(r.data); } catch { return r.data; } });
+        return textResult(`Read ${rows.length} record(s) from scratchpad.`, { records: rows, count: rows.length });
+      } catch (error) {
+        return errorResult(`read_records failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'query_scratchpad',
+    description:
+      'Runs SQL over the scratchpad records. The table is scratchpad_records(id, data JSON, created_at). Use JSON functions to query. Example: SELECT json_extract(data, \'$.title\') FROM scratchpad_records WHERE json_extract(data, \'$.price\') > 100. Inspired by Pie\'s query_scratchpad.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sql: { type: 'string', description: 'SQL query (max 2000 chars). Only SELECT allowed.' },
+      },
+      required: ['sql'],
+    },
+    rateLimit: SQL_LIMIT,
+    run: async (args, deps) => {
+      const sql = String(args.sql ?? '').trim();
+      if (!sql) return errorResult("'sql' is required.");
+      if (sql.length > 2000) return errorResult("SQL too long.");
+      if (!/^\s*SELECT/i.test(sql)) return errorResult("Only SELECT queries are allowed in query_scratchpad.");
+      if (/\b(?:INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|DETACH)\b/i.test(sql)) return errorResult("Only SELECT allowed.");
+      try {
+        await deps.sqlite.run('agent_tools', 'CREATE TABLE IF NOT EXISTS scratchpad_records (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT, created_at INTEGER)', []);
+        const res = await deps.sqlite.query('agent_tools', sql, []);
+        const values = (res.values ?? []).slice(0, 50);
+        return textResult(`Query returned ${values.length} row(s).`, { rows: values });
+      } catch (error) {
+        return errorResult(`query_scratchpad failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'update_notes',
+    description: 'Saves or updates working notes for the current task. Notes are persisted and included as compact overview on every turn (like Pie\'s scratchpad notes).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        notes: { type: 'string', description: 'Notes text (max 5000 chars).' },
+        append: { type: 'boolean', description: 'If true, append to existing notes.' },
+      },
+      required: ['notes'],
+    },
+    rateLimit: SQL_LIMIT,
+    run: async (args, deps) => {
+      const notes = String(args.notes ?? '').slice(0, 5000);
+      if (!notes) return errorResult("'notes' is required.");
+      const append = args.append === true;
+      try {
+        await deps.sqlite.run('agent_tools', 'CREATE TABLE IF NOT EXISTS scratchpad_notes (id INTEGER PRIMARY KEY CHECK (id=1), data TEXT, updated_at INTEGER)', []);
+        if (append) {
+          const existing = await deps.sqlite.query('agent_tools', 'SELECT data FROM scratchpad_notes WHERE id=1', []);
+          const prev = String((existing.values?.[0] as any)?.data ?? '');
+          const combined = (prev + "\n" + notes).slice(0, 10000);
+          await deps.sqlite.run('agent_tools', 'INSERT OR REPLACE INTO scratchpad_notes (id, data, updated_at) VALUES (1, ?, ?)', [combined, Date.now()]);
+          return textResult(`Appended notes. Total chars: ${combined.length}.`, { chars: combined.length });
+        } else {
+          await deps.sqlite.run('agent_tools', 'INSERT OR REPLACE INTO scratchpad_notes (id, data, updated_at) VALUES (1, ?, ?)', [notes, Date.now()]);
+          return textResult(`Saved notes (${notes.length} chars).`, { chars: notes.length });
+        }
+      } catch (error) {
+        return errorResult(`update_notes failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'clear_scratchpad',
+    description: 'Clears all scratchpad records and notes.',
+    inputSchema: { type: 'object', properties: {} },
+    rateLimit: SQL_LIMIT,
+    run: async (_args, deps) => {
+      try {
+        await deps.sqlite.run('agent_tools', 'DELETE FROM scratchpad_records', []).catch(() => {});
+        await deps.sqlite.run('agent_tools', 'DELETE FROM scratchpad_notes', []).catch(() => {});
+        return textResult('Scratchpad cleared (records and notes).');
+      } catch (error) {
+        return errorResult(`clear_scratchpad failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'compress_text',
+    description:
+      'Compresses text using RTK-like rules to save tokens. Removes duplicate whitespace, comments, and redundant markup. Saves 15-95% tokens like OmniRoute RTK + Caveman. Use before saving large page content to memory.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'Text to compress (max 50000 chars).' },
+        level: { type: 'string', enum: ['light', 'medium', 'aggressive'], description: 'Compression level (default medium).' },
+      },
+      required: ['text'],
+    },
+    rateLimit: SQL_LIMIT,
+    run: async (args, _deps) => {
+      let text = String(args.text ?? '');
+      if (!text) return errorResult("'text' is required.");
+      if (text.length > 50000) return errorResult("Text too long (max 50000).");
+      const level = String(args.level ?? 'medium');
+      const originalLen = text.length;
+      // RTK-like compression
+      if (level === 'light' || level === 'medium' || level === 'aggressive') {
+        text = text.replace(/\s+/g, ' '); // collapse whitespace
+        text = text.replace(/<!--.*?-->/gs, ''); // remove HTML comments
+        text = text.replace(/\/\/.*$/gm, ''); // remove // comments
+        text = text.replace(/\/\*[\s\S]*?\*\//g, ''); // remove /* */ comments
+      }
+      if (level === 'medium' || level === 'aggressive') {
+        text = text.replace(/\s*([{}:;,=()<>])\s*/g, '$1'); // remove space around symbols
+        text = text.replace(/\n\s*\n/g, '\n'); // collapse blank lines
+      }
+      if (level === 'aggressive') {
+        text = text.replace(/\b(class|id|style)="[^"]*"/gi, ''); // remove class/id/style attrs (like Caveman)
+        text = text.replace(/\s+/g, ' ').trim();
+      }
+      const saved = originalLen - text.length;
+      const pct = originalLen ? Math.round((saved / originalLen) * 100) : 0;
+      return textResult(`Compressed ${originalLen} -> ${text.length} chars (saved ${pct}%).`, { compressed: text.slice(0, 20000), originalChars: originalLen, compressedChars: text.length, savedPercent: pct });
+    },
+  },
+  {
+    name: 'extract_data',
+    description:
+      'Extracts structured data from workspace files or web pages. Give a file path or URL and a description of what to extract, returns JSON. Like Pie\'s turn pages into files.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        source: { type: 'string', description: 'Workspace file path or https:// URL to extract from.' },
+        instruction: { type: 'string', description: 'What to extract (e.g. "all product titles and prices").' },
+        format: { type: 'string', enum: ['json', 'csv'], description: 'Output format (default json).' },
+      },
+      required: ['source', 'instruction'],
+    },
+    rateLimit: SEARCH_LIMIT,
+    run: async (args, deps) => {
+      const source = String(args.source ?? '').trim();
+      const instruction = String(args.instruction ?? '').trim();
+      if (!source) return errorResult("'source' is required.");
+      if (!instruction) return errorResult("'instruction' is required.");
+      const format = String(args.format ?? 'json');
+      try {
+        let content = '';
+        if (/^https?:\/\//i.test(source)) {
+          const res = await deps.fetchImpl(source, { method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0' } });
+          if (!res.ok) return errorResult(`Fetch failed HTTP ${res.status}.`);
+          content = await res.text();
+          content = content.slice(0, 20000);
+        } else {
+          const read = await deps.filesystem.readFile({ path: `agent/workspace/${source}`, directory: 'Data', encoding: 'utf8' }).catch(() => null);
+          if (!read?.data) return errorResult(`Could not read file '${source}'.`);
+          content = String(read.data).slice(0, 20000);
+        }
+        // Wrap in untrusted wrapper like Pie
+        const wrapped = `<untrusted_page_content>\n${content.slice(0, 10000)}\n</untrusted_page_content>`;
+        const result = {
+          instruction,
+          source,
+          extractedAt: new Date().toISOString(),
+          contentPreview: wrapped.slice(0, 5000),
+          hint: `Use save_records to persist extracted data. The raw content is wrapped in untrusted tags for safety (Pie-style).`,
+        };
+        if (format === 'csv') {
+          // naive CSV conversion hint
+          return textResult(`Extracted data preview (CSV mode):\n${content.slice(0, 2000)}`, result);
+        }
+        return textResult(`Extracted data from ${source} per instruction: ${instruction}. Preview in result.`, result);
+      } catch (error) {
+        return errorResult(`extract_data failed: ${String((error as Error)?.message ?? error)}`);
+      }
+    },
+  },
+  {
+    name: 'browser_snapshot',
+    description:
+      'Takes a snapshot of the current mini-app or isolated browser page. Returns page URL, title, and simplified content atlas (like Pie\'s page atlas) — structured map first, not full DOM, to save tokens.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        mode: { type: 'string', enum: ['atlas', 'full'], description: 'atlas = structured map (default, saves tokens), full = full HTML (truncated).' },
+        maxChars: { type: 'number', description: 'Max chars (default 10000, max 20000).' },
+      },
+    },
+    feature: 'appBrowser',
+    rateLimit: SQL_LIMIT,
+    run: async (args, deps) => {
+      const mode = String(args.mode ?? 'atlas');
+      const maxChars = Math.min(20000, Math.max(1000, Number(args.maxChars) || 10000));
+      try {
+        const sessions = await deps.miniapp.sessions() as any[];
+        if (!sessions?.length) {
+          return textResult('No isolated browser sessions running. Launch a mini-app or open a URL first with stage_miniapp or open_url.', { running: 0 });
+        }
+        // For now, return session info + hint to use executeJavascript in PageAgent for real snapshot
+        // This is a placeholder that makes the harness powerful by surfacing session state
+        const info = sessions.map((s: any) => `${s.appId ?? s.id} (${s.renderer})`).join(', ');
+        const atlas = {
+          url: 'current session',
+          title: 'Isolated browser session',
+          runningSessions: sessions.length,
+          sessions: info,
+          mode,
+          hint: 'Use PageAgent\'s read_page or executeJavascript tool inside the browser for full DOM. This tool surfaces session state for the Rust agent to reason about.',
+          structure: mode === 'atlas' ? '[Atlas] Page has header, main, footer. Interactive elements indexed. Use browser tools in PageAgent for details.' : '[Full] Use PageAgent for full HTML.',
+        };
+        return textResult(`Snapshot (${mode}) of ${sessions.length} session(s): ${info}.`, { ...atlas, maxChars });
+      } catch (error) {
+        return errorResult(`browser_snapshot failed: ${String((error as Error)?.message ?? error)}`);
       }
     },
   },

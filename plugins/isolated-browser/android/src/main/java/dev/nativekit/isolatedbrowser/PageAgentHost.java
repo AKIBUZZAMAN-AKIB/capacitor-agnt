@@ -51,6 +51,11 @@ import java.util.concurrent.Executors;
 public final class PageAgentHost {
     public static final String JS_OBJECT = "NativeKitPageAgent";
     private static final String TAG = "NativeKitPageAgent";
+    // OmniRoute-inspired circuit breaker for free-pool providers
+    private static final java.util.Map<String, Long> providerBlacklist = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final java.util.Map<String, Integer> providerFailures = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long BLACKLIST_MS = 5 * 60 * 1000L; // 5 minutes
+    private static final int BLACKLIST_THRESHOLD = 3;
     static final String EXTRA_ENABLED = "pageAgentEnabled";
     static final String EXTRA_LANGUAGE = "pageAgentLanguage";
 
@@ -226,6 +231,7 @@ public final class PageAgentHost {
                 result = attemptResult;
 
                 if (attemptResult.status / 100 == 2) {
+                    recordProviderSuccess(extractProvider(attemptResult.text));
                     replyOk(proxy, id, attemptResult.status, attemptResult.text);
                     return;
                 }
@@ -240,6 +246,7 @@ public final class PageAgentHost {
                         attempts++;
                         result = second;
                         if (second.status / 100 == 2) {
+                            recordProviderSuccess(extractProvider(second.text));
                             replyOk(proxy, id, second.status, second.text);
                             return;
                         }
@@ -251,7 +258,12 @@ public final class PageAgentHost {
                     break;
                 }
 
-                Log.w(TAG, "retryable gateway error HTTP " + result.status + " attempt " + attempts + "/" + maxAttempts + ": " + snippet(result.text, 400) + " -> retrying same body");
+                String failedProvider = extractProvider(result.text);
+                if (isProviderBlacklisted(failedProvider)) {
+                    Log.w(TAG, "provider " + failedProvider + " is blacklisted, retrying to get different provider");
+                }
+                recordProviderFailure(failedProvider);
+                Log.w(TAG, "retryable gateway error HTTP " + result.status + " attempt " + attempts + "/" + maxAttempts + " provider=" + failedProvider + ": " + snippet(result.text, 400) + " -> retrying same body");
             }
 
             // All attempts failed -> surface full diagnostics
@@ -299,6 +311,47 @@ public final class PageAgentHost {
      *  Now expanded to a full wire-filter for AtlasCloud and other free providers. */
     private static String adaptRequest(String body) {
         return sanitizeRequest(body);
+    }
+
+    private static boolean isProviderBlacklisted(String provider) {
+        if (provider == null) return false;
+        Long until = providerBlacklist.get(provider);
+        if (until == null) return false;
+        if (System.currentTimeMillis() > until) {
+            providerBlacklist.remove(provider);
+            providerFailures.remove(provider);
+            return false;
+        }
+        return true;
+    }
+
+    private static void recordProviderFailure(String provider) {
+        if (provider == null || provider.equals("unknown")) return;
+        int fails = providerFailures.getOrDefault(provider, 0) + 1;
+        providerFailures.put(provider, fails);
+        if (fails >= BLACKLIST_THRESHOLD) {
+            providerBlacklist.put(provider, System.currentTimeMillis() + BLACKLIST_MS);
+            android.util.Log.w(TAG, "circuit-breaker: blacklisted provider " + provider + " for 5m after " + fails + " failures");
+        }
+    }
+
+    private static void recordProviderSuccess(String provider) {
+        if (provider == null) return;
+        providerFailures.remove(provider);
+    }
+
+    private static String extractProvider(String body) {
+        try {
+            org.json.JSONObject root = new org.json.JSONObject(body);
+            if (root.has("error")) {
+                org.json.JSONObject err = root.optJSONObject("error");
+                if (err != null && err.has("metadata")) {
+                    org.json.JSONObject meta = err.optJSONObject("metadata");
+                    if (meta != null) return meta.optString("provider_name", "unknown");
+                }
+            }
+        } catch (Throwable ignored) {}
+        return "unknown";
     }
 
     private static boolean isRetryable(int status, String body) {

@@ -176,6 +176,8 @@ public final class IsolatedBrowserActivity extends Activity {
             if (!safeEquals(sessionId, target) || !constantTimeEquals(rendererToken, targetRenderer)) return true;
             if (message.what == IsolatedBrowserBrokerService.MSG_RESPONSE_CHUNK) {
                 acceptResponseChunk(data);
+            } else if (message.what == IsolatedBrowserBrokerService.MSG_EVAL_REQUEST) {
+                handleEvalRequest(data);
             } else if (message.what == IsolatedBrowserBrokerService.MSG_PERMISSION_PROMPT) {
                 showPermissionPrompt(data);
             } else if (message.what == IsolatedBrowserBrokerService.MSG_PERMISSION_DISMISS) {
@@ -859,6 +861,45 @@ public final class IsolatedBrowserActivity extends Activity {
         }
         try { broker.send(message); }
         catch (RemoteException error) { showFailure("Could not reach the host NativeKit broker", false); }
+    }
+
+    private void handleEvalRequest(Bundle data) {
+        String evalId = data.getString("evalId", "");
+        String script = data.getString("script", "");
+        if (evalId.isEmpty() || script.isEmpty()) return;
+        WebView view = webView;
+        if (view == null) {
+            sendEvalResponse(evalId, "", "WebView not available");
+            return;
+        }
+        try {
+            runOnUiThread(() -> {
+                try {
+                    view.evaluateJavascript(script, result -> {
+                        // result is JSON-encoded string from evaluateJavascript
+                        sendEvalResponse(evalId, result != null ? result : "null", "");
+                    });
+                } catch (Throwable t) {
+                    sendEvalResponse(evalId, "", t.getMessage() != null ? t.getMessage() : "eval failed");
+                }
+            });
+        } catch (Throwable t) {
+            sendEvalResponse(evalId, "", t.getMessage() != null ? t.getMessage() : "eval failed");
+        }
+    }
+
+    private void sendEvalResponse(String evalId, String result, String error) {
+        Bundle out = new Bundle();
+        out.putString("sessionId", sessionId);
+        out.putString("rendererToken", rendererToken);
+        out.putString("evalId", evalId);
+        out.putString("result", result);
+        out.putString("error", error);
+        Message message = Message.obtain(null, IsolatedBrowserBrokerService.MSG_EVAL_RESPONSE);
+        message.setData(out);
+        try {
+            if (broker != null) broker.send(message);
+        } catch (Throwable ignored) {}
     }
 
     private void deliverToPage(String payload) {

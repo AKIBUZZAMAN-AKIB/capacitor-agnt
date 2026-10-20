@@ -24,6 +24,8 @@ public final class IsolatedBrowserBrokerService extends Service {
     static final int MSG_PERMISSION_PROMPT = 8;
     static final int MSG_PERMISSION_RESULT = 9;
     static final int MSG_PERMISSION_DISMISS = 10;
+    static final int MSG_EVAL_REQUEST = 11;
+    static final int MSG_EVAL_RESPONSE = 12;
 
     static final int MAX_MESSAGE_CHARS = 2_800_000;
     static final int MAX_IPC_CHUNK_CHARS = 120_000;
@@ -73,6 +75,17 @@ public final class IsolatedBrowserBrokerService extends Service {
 
     private static final Map<String, SessionRecord> sessions = new ConcurrentHashMap<>();
     private static final Map<String, PendingPermission> pendingPermissions = new ConcurrentHashMap<>();
+    private static final Map<String, PendingEval> pendingEvals = new ConcurrentHashMap<>();
+
+    interface EvalCallback {
+        void onResult(String result, String error);
+    }
+
+    private static final class PendingEval {
+        final String sessionId;
+        final EvalCallback callback;
+        PendingEval(String sessionId, EvalCallback callback) { this.sessionId = sessionId; this.callback = callback; }
+    }
     private static final Handler mainHandler = new Handler(Looper.getMainLooper());
     private static volatile Listener listener;
 
@@ -88,6 +101,7 @@ public final class IsolatedBrowserBrokerService extends Service {
         SessionRecord record = sessions.remove(sessionId);
         if (record != null) retire(record, closeClient);
         cancelPermissions(sessionId, "The isolated app session was closed");
+        cancelEvals(sessionId, "The isolated app session was closed");
     }
 
     static boolean requestPermission(
@@ -151,6 +165,37 @@ public final class IsolatedBrowserBrokerService extends Service {
         output.setData(data);
         try { client.send(output); return true; }
         catch (RemoteException error) { return false; }
+    }
+
+    static boolean requestEval(String sessionId, String evalId, String script, EvalCallback callback) {
+        SessionRecord record = sessions.get(sessionId);
+        if (record == null || evalId.length() > 100 || script.length() > 200_000) return false;
+        Messenger client;
+        IBinder clientBinder;
+        synchronized (record) {
+            client = record.client;
+            clientBinder = record.clientBinder;
+            if (sessions.get(sessionId) != record || client == null || clientBinder == null) return false;
+        }
+        PendingEval pending = new PendingEval(sessionId, callback);
+        if (pendingEvals.putIfAbsent(evalId, pending) != null) return false;
+        Bundle data = identityBundle(record);
+        data.putString("evalId", evalId);
+        data.putString("script", script);
+        Message output = Message.obtain(null, MSG_EVAL_REQUEST);
+        output.setData(data);
+        try {
+            client.send(output);
+            mainHandler.postDelayed(() -> {
+                PendingEval expired = pendingEvals.remove(evalId);
+                if (expired == pending) expired.callback.onResult(null, "Eval timed out");
+            }, 15_000L);
+            return true;
+        } catch (RemoteException error) {
+            pendingEvals.remove(evalId, pending);
+            reportProcessGone(record, clientBinder, "eval transport failed");
+            return false;
+        }
     }
 
     static boolean deliver(String sessionId, String value) {
@@ -225,6 +270,17 @@ public final class IsolatedBrowserBrokerService extends Service {
         }
         if (message.what == MSG_STATUS) {
             notifyStatus(record, data.getString("state", "unknown"), data.getString("reason", ""));
+            return true;
+        }
+        if (message.what == MSG_EVAL_RESPONSE) {
+            String evalId = data.getString("evalId", "");
+            String result = data.getString("result", "");
+            String error = data.getString("error", "");
+            PendingEval pending = pendingEvals.get(evalId);
+            if (pending != null && pendingEvals.remove(evalId, pending)) {
+                if (error != null && !error.isEmpty()) pending.callback.onResult(null, error);
+                else pending.callback.onResult(result, null);
+            }
             return true;
         }
         if (message.what == MSG_PERMISSION_RESULT) {
@@ -309,11 +365,19 @@ public final class IsolatedBrowserBrokerService extends Service {
         cancelPermissions(record.sessionId, reason);
     }
 
+    private static void cancelEvals(String sessionId, String reason) {
+        for (Map.Entry<String, PendingEval> entry : pendingEvals.entrySet()) {
+            PendingEval pending = entry.getValue();
+            if (pending.sessionId.equals(sessionId) && pendingEvals.remove(entry.getKey(), pending)) pending.callback.onResult(null, reason);
+        }
+    }
+
     private static void cancelPermissions(String sessionId, String reason) {
         for (Map.Entry<String, PendingPermission> entry : pendingPermissions.entrySet()) {
             PendingPermission pending = entry.getValue();
             if (pending.sessionId.equals(sessionId) && pendingPermissions.remove(entry.getKey(), pending)) pending.callback.onResult(null, reason);
         }
+        cancelEvals(sessionId, reason);
     }
 
     private static void retire(SessionRecord record, boolean closeClient) {

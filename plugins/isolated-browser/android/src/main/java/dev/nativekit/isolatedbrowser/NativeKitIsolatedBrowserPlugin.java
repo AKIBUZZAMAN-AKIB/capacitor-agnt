@@ -285,6 +285,55 @@ public final class NativeKitIsolatedBrowserPlugin extends Plugin implements Isol
     }
 
     @PluginMethod
+    public void executeScript(PluginCall call) {
+        if (android.os.Build.VERSION.SDK_INT < 28) { call.reject("Requires API 28+"); return; }
+        String sessionId = required(call, "sessionId");
+        String script = required(call, "script");
+        if (sessionId.isEmpty() || script.isEmpty()) { call.reject("sessionId and script required"); return; }
+        String evalId = java.util.UUID.randomUUID().toString();
+        call.setKeepAlive(true);
+        boolean queued = IsolatedBrowserBrokerService.requestEval(sessionId, evalId, script, (result, error) -> {
+            if (error != null) {
+                call.reject(error);
+            } else {
+                com.getcapacitor.JSObject ret = new com.getcapacitor.JSObject();
+                ret.put("result", result);
+                ret.put("evalId", evalId);
+                call.resolve(ret);
+            }
+        });
+        if (!queued) {
+            call.reject("Failed to queue eval - session not found or transport unavailable");
+        }
+    }
+
+    @PluginMethod
+    public void getSnapshot(PluginCall call) {
+        if (android.os.Build.VERSION.SDK_INT < 28) { call.reject("Requires API 28+"); return; }
+        String sessionId = required(call, "sessionId");
+        String mode = call.getString("mode", "atlas");
+        String script;
+        if ("atlas".equals(mode)) {
+            script = "(function(){ try { const els = Array.from(document.querySelectorAll('a,button,input,form')).slice(0,100).map(e=>{ const r=e.getBoundingClientRect(); return {tag:e.tagName.toLowerCase(), text:(e.innerText||e.value||'').slice(0,200), href:e.href||'', id:e.id||'', className:e.className||'', x:Math.round(r.x), y:Math.round(r.y), w:Math.round(r.width), h:Math.round(r.height)}; }); return JSON.stringify({url:location.href, title:document.title, snapshot:els}); } catch(e){ return JSON.stringify({error:String(e)}); } })()";
+        } else {
+            script = "(function(){ try { return JSON.stringify({url:location.href, title:document.title, html:document.documentElement.outerHTML.slice(0,200000)}); } catch(e){ return JSON.stringify({error:String(e)}); } })()";
+        }
+        String evalId = java.util.UUID.randomUUID().toString();
+        call.setKeepAlive(true);
+        boolean queued = IsolatedBrowserBrokerService.requestEval(sessionId, evalId, script, (result, error) -> {
+            if (error != null) {
+                call.reject(error);
+            } else {
+                com.getcapacitor.JSObject ret = new com.getcapacitor.JSObject();
+                ret.put("snapshot", result);
+                ret.put("mode", mode);
+                call.resolve(ret);
+            }
+        });
+        if (!queued) call.reject("Failed to queue snapshot - session not found");
+    }
+
+    @PluginMethod
     public void postMessage(PluginCall call) {
         try {
             String sessionId = required(call, "sessionId");
