@@ -3,9 +3,9 @@
   "app": {
     "name": "NativeKit TestLab",
     "id": "dev.nativekit.shell",
-    "versionName": "1.4.35-power-harness",
-    "versionCode": 34,
-    "buildNumber": "32",
+    "versionName": "1.4.36-miniapp-artifacts",
+    "versionCode": 50,
+    "buildNumber": "49",
     "description": "A reusable, locally bundled Capacitor application shell",
     "defaultLanguage": "bn",
     "urlScheme": "nativekit"
