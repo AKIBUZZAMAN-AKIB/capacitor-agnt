@@ -1194,7 +1194,7 @@ const NativeKit: any = {
 
 // App Browser is a host-only management API. Uploaded apps receive a separate,
 // token-bound RPC façade inside an opaque-origin sandbox and never this object.
-NativeKit.appBrowser = createAppBrowser(NativeKit, config.appBrowser);
+NativeKit.appBrowser = createAppBrowser(NativeKit, { maxActiveHomeWidgets: 8, ...config.appBrowser });
 Object.freeze(NativeKit);
 
 declare global {

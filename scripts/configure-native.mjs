@@ -75,6 +75,31 @@ function androidPermissions() {
   return [...permissions];
 }
 
+function allHomeWidgetKinds() {
+  const kinds = [...wc.homeScreen.kinds];
+  // Android ComponentNames must exist in the manifest before a Mini App is
+  // installed. Reserve bounded provider slots; the broker later binds each slot
+  // to an owner + artifact ID instead of allowing arbitrary runtime class names.
+  if (config.features.appBrowser && config.appBrowser.enabled) {
+    const count = config.appBrowser.maxActiveHomeWidgets ?? 8;
+    for (let index = 1; index <= count; index += 1) {
+      const suffix = String(index).padStart(2, '0');
+      kinds.push({
+        id: `nativekit-miniapp-slot-${suffix}`,
+        label: `Mini App Widget ${suffix}`,
+        layout: 'medium', minWidthDp: 140, minHeightDp: 140,
+        targetCellWidth: 2, targetCellHeight: 2,
+      });
+    }
+  }
+  const ids = new Set();
+  for (const kind of kinds) {
+    if (ids.has(kind.id)) throw new Error(`Duplicate/reserved widget kind: ${kind.id}`);
+    ids.add(kind.id);
+  }
+  return kinds;
+}
+
 function androidManifest() {
   const permissions = androidPermissions().map((name) => `    <uses-permission android:name="${name}" />`).join('\n');
   // @capacitor/filesystem refuses public/external storage calls unless these are DECLARED
@@ -89,7 +114,7 @@ function androidManifest() {
   // generated provider subclass (a stable ComponentName is required by Android), plus a
   // provider-info XML we write into android/app/src/main/res/xml in configureWidgets().
   const widgetReceivers = widgetFeature && wc.homeScreen.enabled
-    ? wc.homeScreen.kinds.map((kind) => {
+    ? allHomeWidgetKinds().map((kind) => {
         const cls = `${config.app.id}.Widget_${sanitizeKind(kind.id)}`;
         return '\n\n        <receiver' +
                '\n            android:name="' + cls + '"' +
@@ -382,7 +407,7 @@ async function configureWidgets() {
   const javaRoot = path.join(androidDir, 'app/src/main/java', ...config.app.id.split('.'));
   const resize = wc.homeScreen.resizeEnabled ? 'horizontal|vertical' : 'none';
   const period = wc.homeScreen.updatePeriodMinutes * 60_000;
-  for (const kind of wc.homeScreen.kinds) {
+  for (const kind of allHomeWidgetKinds()) {
     const name = sanitizeKind(kind.id);
     const info = [
       '<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"',

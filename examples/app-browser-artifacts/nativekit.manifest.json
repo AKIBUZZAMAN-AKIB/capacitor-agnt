@@ -1,0 +1,9 @@
+{
+  "id": "dev.nativekit.stopwatch.artifacts",
+  "name": "Native Stopwatch Artifacts",
+  "version": "1.0.0",
+  "description": "একই Mini App থেকে আলাদা Mini UI, Floating UI ও static Home Widget publish করার নমুনা",
+  "entry": "index.html",
+  "requestedCapabilities": ["miniUI", "floatingUI", "homeWidget"],
+  "allowedHosts": []
+}

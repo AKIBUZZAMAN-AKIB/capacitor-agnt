@@ -94,6 +94,7 @@
     "maxFiles": 500,
     "auditLogLimit": 2000,
     "maxRequestsPerMinute": 120,
+    "maxActiveHomeWidgets": 8,
     "defaultCapabilities": [],
     "permissionPrompts": {
       "enabled": true,

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="bn">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Native Stopwatch Artifacts</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <p class="eyebrow">THREE SEPARATE NATIVE STORES</p>
+    <h1>Stopwatch artifacts</h1>
+    <p>মূল UI থেকে code পাঠানো হচ্ছে। Host-এর <strong>Native UI Artifacts</strong> section থেকে Mini UI preview করুন।</p>
+    <section><div class="timer" id="main-time">00:00.0</div><div class="row"><button id="main-toggle">Start</button><button id="main-reset" class="secondary">Reset</button></div></section>
+    <section>
+      <h2>১ · Mini UI</h2>
+      <p>Offline broker-less preview-এর জন্য একটি independent stopwatch card.</p>
+      <button id="publish-mini">Publish / update Mini UI</button>
+    </section>
+    <section>
+      <h2>২ · Floating UI</h2>
+      <p>Android live overlay। Auto-start নেই; Show চাপলেই permission যাচাই হবে।</p>
+      <div class="row"><button id="publish-floating">Publish Floating UI</button><button id="show-floating">Show floating</button><button id="hide-floating" class="secondary">Hide</button></div>
+    </section>
+    <section>
+      <h2>৩ · Home Widget</h2>
+      <p>Android static snapshot—live timer নয়। সময় বদলালে আবার snapshot publish করুন।</p>
+      <div class="row"><button id="publish-home">Publish current snapshot</button><button id="pin-home">Activate + request pin</button></div>
+    </section>
+    <button id="delete-all" class="danger">এই app-এর তিন artifact delete</button>
+    <pre id="output">NativeKit ready হওয়ার অপেক্ষা…</pre>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

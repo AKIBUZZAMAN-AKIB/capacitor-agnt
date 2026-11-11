@@ -8,6 +8,8 @@
   let selectedAppId = null;
   let runningSession = null;
   let runningAppId = null;
+  let runningArtifactMount = null;
+  let runningArtifactKey = null;
 
   const node = (tag, className, text) => {
     const element = document.createElement(tag);
@@ -86,7 +88,88 @@
       manager.hidden = true;
       return;
     }
-    await Promise.all([renderApps(), renderAudit(), renderPendingPermissions()]);
+    await Promise.all([renderApps(), renderArtifacts(), renderAudit(), renderPendingPermissions()]);
+  }
+
+  const artifactKey = (artifact) => `${artifact.source.type}:${artifact.source.id}:${artifact.kind}:${artifact.id}`;
+  const artifactSelector = (artifact) => ({ sourceType: artifact.source.type, appId: artifact.source.id, artifactId: artifact.id });
+
+  async function stopArtifactPreview() {
+    if (runningArtifactMount) await runningArtifactMount.stop();
+    runningArtifactMount = null;
+    runningArtifactKey = null;
+    byId('artifact-frame-host').replaceChildren();
+    byId('artifact-preview').hidden = true;
+  }
+
+  async function previewArtifact(artifact) {
+    await stopArtifactPreview();
+    byId('artifact-preview-title').textContent = `${artifact.title} · ${artifact.source.name}`;
+    byId('artifact-preview').hidden = false;
+    runningArtifactMount = await kit.appBrowser.artifacts.mountMiniUI({
+      ...artifactSelector(artifact), target: byId('artifact-frame-host'), replace: true,
+    });
+    runningArtifactKey = artifactKey(artifact);
+    byId('artifact-status').textContent = `Preview: ${artifact.id} · offline, broker-less`;
+  }
+
+  async function renderArtifacts() {
+    if (!kit) return;
+    if (!kit.isNative) {
+      byId('artifacts-list').replaceChildren();
+      byId('artifacts-empty').hidden = false;
+      byId('artifacts-empty').textContent = 'UI artifact storage ও preview/use native Android/iOS app-এ উপলব্ধ; hosted web target-এ নয়।';
+      byId('floating-hide').disabled = true;
+      return;
+    }
+    byId('artifacts-empty').textContent = 'এখনো কোনো UI artifact publish হয়নি।';
+    byId('floating-hide').disabled = kit.platform !== 'android';
+    const artifacts = await kit.appBrowser.artifacts.list();
+    const list = byId('artifacts-list');
+    list.replaceChildren();
+    byId('artifacts-empty').hidden = artifacts.length > 0;
+    for (const artifact of artifacts) {
+      const card = node('article', 'artifact-card');
+      const header = node('div', 'installed-app-head');
+      const titleWrap = node('div');
+      titleWrap.append(node('p', 'app-identity', `${artifact.kind} · ${artifact.source.type}:${artifact.source.id}`), node('h3', '', artifact.title));
+      header.append(titleWrap, node('span', 'state-pill on', `r${artifact.revision}`));
+      const facts = node('div', 'app-facts');
+      facts.append(node('span', '', `${Math.ceil(artifact.bytes / 1024)} KiB`), node('span', '', `SHA-256 ${artifact.integrity.slice(0, 12)}…`), node('span', '', artifact.storage.backend));
+      const actions = node('div', 'app-actions');
+      const use = node('button', '', artifact.kind === 'mini-ui' ? 'Preview' : artifact.kind === 'home-widget' ? 'Activate + pin' : 'Show floating');
+      use.addEventListener('click', async () => {
+        use.disabled = true;
+        try {
+          const selector = artifactSelector(artifact);
+          const result = artifact.kind === 'mini-ui'
+            ? await previewArtifact(artifact)
+            : artifact.kind === 'home-widget'
+              ? await kit.appBrowser.artifacts.requestPinHomeWidget(selector)
+              : await kit.appBrowser.artifacts.showFloatingUI(selector);
+          report(`appBrowser.artifacts.${artifact.kind}.use`, result ?? { preview: true });
+          if (artifact.kind === 'home-widget') byId('artifact-status').textContent = result.requested ? `${result.kind}: launcher pin request পাঠানো হয়েছে` : `${result.kind}: config saved; launcher pin সমর্থিত নয়—picker থেকে যোগ করুন`;
+          if (artifact.kind === 'floating-ui') byId('artifact-status').textContent = result.shown ? 'Floating UI দেখানো হয়েছে' : `Overlay দেখানো যায়নি${result.error ? `: ${result.error}` : ''}`;
+        } catch (error) {
+          byId('artifact-status').textContent = error.message;
+          reportError(`appBrowser.artifacts.${artifact.kind}.use`, error, 'Artifact ব্যবহার করা যায়নি');
+        } finally { use.disabled = false; }
+      });
+      const remove = node('button', 'ghost danger', 'Delete');
+      remove.addEventListener('click', async () => {
+        if (!confirm(`${artifact.source.name}-এর ${artifact.kind}/${artifact.id} delete করবেন? Active surface-ও deactivate হবে।`)) return;
+        remove.disabled = true;
+        try {
+          await kit.appBrowser.artifacts.remove({ ...artifactSelector(artifact), kind: artifact.kind });
+          if (runningArtifactKey === artifactKey(artifact)) await stopArtifactPreview();
+          report('appBrowser.artifacts.remove', { kind: artifact.kind, id: artifact.id, source: artifact.source.id });
+          await renderArtifacts();
+        } catch (error) { reportError('appBrowser.artifacts.remove', error, 'Artifact delete করা যায়নি'); remove.disabled = false; }
+      });
+      actions.append(use, remove);
+      card.append(header, node('p', 'app-description', artifact.description || `${artifact.source.name} · v${artifact.source.version}`), facts, actions);
+      list.append(card);
+    }
   }
 
   async function renderApps() {
@@ -161,6 +244,7 @@
     try {
       await kit.appBrowser.remove(app.id);
       if (selectedAppId === app.id) closePolicy();
+      if (runningArtifactKey?.startsWith(`mini-app:${app.id}:`)) await stopArtifactPreview();
       if (runningAppId === app.id) {
         runningSession = null;
         runningAppId = null;
@@ -168,7 +252,7 @@
         byId('app-stage').hidden = true;
       }
       report('appBrowser.remove', { appId: app.id, cleanup: 'complete' });
-      await Promise.all([renderApps(), renderAudit(), renderPendingPermissions()]);
+      await Promise.all([renderApps(), renderArtifacts(), renderAudit(), renderPendingPermissions()]);
     } catch (error) {
       reportError('appBrowser.remove', error, 'App disable হয়েছে, কিন্তু cleanup সম্পূর্ণ হয়নি; সমস্যা ঠিক করে Remove আবার চেষ্টা করুন');
       await Promise.all([renderApps(), renderAudit(), renderPendingPermissions()]).catch((refreshError) => reportError('appBrowser.refresh after remove failure', refreshError));
@@ -398,7 +482,19 @@
   byId('app-install').addEventListener('click', install);
   byId('remote-url-open').addEventListener('click', () => openRemoteUrl().catch((error) => reportError('appBrowser.openUrl', error)));
   byId('permissions-refresh').addEventListener('click', () => renderPendingPermissions().catch((error) => reportError('appBrowser.permissions refresh', error, 'Permission list refresh করা যায়নি')));
-  byId('apps-refresh').addEventListener('click', () => Promise.all([renderApps(), renderAudit(), renderPendingPermissions()]).catch((error) => reportError('appBrowser.refresh', error, 'App Browser refresh করা যায়নি')));
+  byId('apps-refresh').addEventListener('click', () => Promise.all([renderApps(), renderArtifacts(), renderAudit(), renderPendingPermissions()]).catch((error) => reportError('appBrowser.refresh', error, 'App Browser refresh করা যায়নি')));
+  byId('artifacts-refresh').addEventListener('click', () => renderArtifacts().catch((error) => reportError('appBrowser.artifacts.refresh', error, 'Artifact list refresh করা যায়নি')));
+  byId('artifact-preview-stop').addEventListener('click', () => stopArtifactPreview().catch((error) => reportError('appBrowser.artifacts.preview.stop', error)));
+  byId('floating-hide').addEventListener('click', async () => {
+    try {
+      // Trusted host/user emergency stop; Mini App callers remain owner-bound.
+      await kit.appBrowser.artifacts.hideFloatingUI();
+      byId('artifact-status').textContent = 'Active floating UI বন্ধ হয়েছে';
+    } catch (error) {
+      byId('artifact-status').textContent = error.message;
+      reportError('appBrowser.artifacts.hideFloatingUI', error, 'Floating UI বন্ধ করা যায়নি');
+    }
+  });
   byId('policy-close').addEventListener('click', closePolicy);
   byId('stage-stop').addEventListener('click', () => stopRunning().catch((error) => reportError('appBrowser.stop UI', error, 'Renderer stop/cleanup সম্পূর্ণ হয়নি')));
   byId('method-save').addEventListener('click', saveMethodOverride);
@@ -430,7 +526,11 @@
   });
   window.addEventListener('nativekitappbrowserpermissionrequest', () => renderPendingPermissions().catch((error) => report('appBrowser.permission UI · ERROR', error.message)));
   window.addEventListener('nativekitappbrowserpermissionresolved', () => renderPendingPermissions().catch((error) => report('appBrowser.permission UI · ERROR', error.message)));
-  window.addEventListener('nativekitappbrowseraudit', () => renderAudit().catch(() => undefined));
+  window.addEventListener('nativekitappbrowseraudit', (event) => {
+    renderAudit().catch(() => undefined);
+    const method = event.detail?.method ?? '';
+    if (/^(?:miniUI|floatingUI|homeWidget)\.(?:publish|remove)$/.test(method)) renderArtifacts().catch(() => undefined);
+  });
   window.addEventListener('nativekitappbrowserstatus', (event) => {
     const detail = event.detail ?? {};
     report(`appBrowser.status · ${detail.state ?? 'unknown'}`, detail);

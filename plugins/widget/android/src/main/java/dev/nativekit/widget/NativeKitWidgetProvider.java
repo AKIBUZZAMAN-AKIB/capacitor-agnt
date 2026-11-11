@@ -70,14 +70,18 @@ public abstract class NativeKitWidgetProvider extends AppWidgetProvider {
         try {
             super.onReceive(context, intent);
             if (ACTION_TAP.equals(intent.getAction())) {
-                // Forward the tap to the host plugin's dynamic receiver so it becomes a
-                // "nativeWidgetTap" event in the web bridge. Scoped to our own package so no
-                // other process can spoof it.
+                // The exported provider can receive a forged explicit broadcast.
+                // Trust only the currently persisted action, never caller extras.
+                // Artifact snapshots intentionally have no action and therefore
+                // cannot emit Mini App-controlled host events.
+                JSONObject config = WidgetStore.readConfig(context, kind());
+                String action = config.optString("action", "");
+                if (action.isEmpty()) return;
                 Intent forward = new Intent(ACTION_TAP);
                 forward.setPackage(context.getPackageName());
                 forward.putExtra("kind", kind());
-                if (intent.hasExtra("action")) forward.putExtra("action", intent.getStringExtra("action"));
-                if (intent.hasExtra("value")) forward.putExtra("value", intent.getStringExtra("value"));
+                forward.putExtra("action", action);
+                if (config.has("actionValue")) forward.putExtra("value", config.optString("actionValue"));
                 if (intent.hasExtra("id")) forward.putExtra("id", intent.getIntExtra("id", 0));
                 context.sendBroadcast(forward);
             }

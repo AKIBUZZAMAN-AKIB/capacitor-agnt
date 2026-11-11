@@ -121,11 +121,34 @@ public class NativeKitWidgetPlugin extends Plugin {
         JSObject config = call.getObject("config");
         if (kind == null || kind.isEmpty()) { call.reject("kind is required"); return; }
         if (config == null) { call.reject("config is required"); return; }
+        try { enforceArtifactSlotBinding(getContext(), kind, config); }
+        catch (SecurityException error) { call.reject(error.getMessage()); return; }
         new WidgetStore(getContext()).setConfig(kind, config);
         JSObject result = new JSObject();
         result.put("kind", kind);
         result.put("saved", true);
         call.resolve(result);
+    }
+
+    static void enforceArtifactSlotBinding(Context context, String kind, JSONObject incoming) {
+        if (kind == null || !kind.startsWith("nativekit-miniapp-slot-")) return;
+        JSONObject source = incoming.optJSONObject("extra");
+        if (source == null || !source.optBoolean("nativeKitArtifact", false)) {
+            throw new SecurityException("Reserved Mini App slots require nativeKitArtifact source metadata");
+        }
+        String owner = source.optString("nativeKitAppBrowserId", "");
+        String artifact = source.optString("artifactId", "");
+        if (owner.isEmpty() || artifact.isEmpty()) {
+            throw new SecurityException("Mini App widget source and artifact ID are required");
+        }
+        JSONObject existing = new WidgetStore(context).getConfig(kind);
+        if (existing != null) {
+            JSONObject previousSource = existing.optJSONObject("extra");
+            String previousOwner = previousSource == null ? "" : previousSource.optString("nativeKitAppBrowserId", "");
+            if (!owner.equals(previousOwner)) {
+                throw new SecurityException("This widget slot belongs to another Mini App; release it first");
+            }
+        }
     }
 
     @PluginMethod

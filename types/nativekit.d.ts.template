@@ -20,7 +20,7 @@ type NativeKitAppBrowserCapability =
   | 'permissions' | 'http' | 'camera' | 'location' | 'backgroundLocation' | 'haptics'
   | 'notifications' | 'alarms' | 'background' | 'preferences' | 'secureStorage'
   | 'sqlite' | 'filesystem' | 'fileTransfer' | 'sharing' | 'networkStatus'
-  | 'appInfo' | 'pushNotifications' | 'browser';
+  | 'appInfo' | 'pushNotifications' | 'browser' | 'miniUI' | 'floatingUI' | 'homeWidget';
 
 type NativeKitPermissionDecision = 'ask' | 'allow' | 'block';
 type NativeKitPermissionAction = 'allow_once' | 'allow_always' | 'block_once' | 'block_always';
@@ -389,6 +389,7 @@ interface NativeKitWidgetSpec {
   render?: 'native' | 'html';
   html?: string;
   htmlBaseUrl?: string;
+  sandboxed?: boolean;
   widthPx?: number;
   heightPx?: number;
   action?: string;
@@ -417,6 +418,7 @@ interface NativeKitFloatingWidgetOptions {
     marginX?: number;
     marginY?: number;
   };
+  sandboxed?: boolean;
   data?: unknown;
 }
 
@@ -427,6 +429,7 @@ interface NativeKitAppBrowserConfig {
   maxFiles: number;
   auditLogLimit: number;
   maxRequestsPerMinute: number;
+  maxActiveHomeWidgets: number;
   defaultCapabilities: NativeKitAppBrowserCapability[];
   permissionPrompts?: {
     enabled: boolean;
@@ -746,6 +749,76 @@ interface NativeKitAppUsage {
   active: { sessions: number; subscriptions: number; backgroundLocation: boolean };
 }
 
+type NativeKitArtifactKind = 'mini-ui' | 'floating-ui' | 'home-widget';
+interface NativeKitArtifactInput {
+  id?: string;
+  title?: string;
+  description?: string;
+  /** Self-contained inline HTML/CSS/JS. Network, host files, frames and workers are unavailable. */
+  html: string;
+  config?: {
+    width?: number; height?: number; widthPx?: number; heightPx?: number;
+    collapsed?: boolean; fullscreen?: boolean; focusable?: boolean; touchThrough?: boolean;
+    chrome?: 'bar' | 'none'; draggable?: boolean;
+  };
+}
+interface NativeKitArtifactSource {
+  type: 'mini-app' | 'host';
+  id: string;
+  name: string;
+  version: string;
+}
+interface NativeKitArtifact {
+  schemaVersion: 1;
+  id: string;
+  kind: NativeKitArtifactKind;
+  title: string;
+  description: string;
+  source: NativeKitArtifactSource;
+  appId?: string;
+  nativeKitAppBrowserId?: string;
+  integrity: string;
+  bytes: number;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  config: Record<string, unknown>;
+  storage: { backend: 'native-filesystem'; directory: 'Data'; store: string };
+}
+interface NativeKitArtifactValue { record: NativeKitArtifact; html: string }
+interface NativeKitArtifactActivation { kind: string; artifact: NativeKitArtifact }
+interface NativeKitArtifactMount {
+  id: string;
+  artifact: NativeKitArtifact;
+  frame: HTMLIFrameElement;
+  stop(): Promise<void>;
+}
+interface NativeKitArtifactSelector {
+  sourceType?: 'mini-app' | 'host';
+  appId?: string;
+  artifactId: string;
+}
+interface NativeKitArtifactHostSurface {
+  readonly kinds: readonly NativeKitArtifactKind[];
+  readonly storage: 'native-filesystem';
+  publish(kind: NativeKitArtifactKind, input: NativeKitArtifactInput): Promise<NativeKitArtifact>;
+  list(filter?: { kind?: NativeKitArtifactKind; sourceType?: 'mini-app' | 'host'; appId?: string }): Promise<NativeKitArtifact[]>;
+  read(input: NativeKitArtifactSelector & { kind: NativeKitArtifactKind }): Promise<NativeKitArtifactValue>;
+  remove(input: NativeKitArtifactSelector & { kind: NativeKitArtifactKind }): Promise<{ removed: true; id: string; kind: NativeKitArtifactKind }>;
+  removeOwner(appId: string): Promise<void>;
+  mountMiniUI(input: NativeKitArtifactSelector & { target: HTMLElement; replace?: boolean; className?: string }): Promise<NativeKitArtifactMount>;
+  activateHomeWidget(input: NativeKitArtifactSelector): Promise<NativeKitArtifactActivation>;
+  requestPinHomeWidget(input: NativeKitArtifactSelector): Promise<NativeKitArtifactActivation & { requested: boolean; hint?: string }>;
+  showFloatingUI(input: NativeKitArtifactSelector): Promise<Record<string, unknown>>;
+  hideFloatingUI(input?: Partial<NativeKitArtifactSelector>): Promise<{ hidden: true }>;
+  activations(): Promise<{ home: Array<Record<string, unknown>>; floating: Record<string, unknown> | null; miniUI: Array<Record<string, unknown>> }>;
+  readonly limits: {
+    maxPerKind: number; maxTotalBytes: number; maxConfigBytes: number;
+    htmlBytes: Record<NativeKitArtifactKind, number>;
+    maxActiveHomeWidgets: number; slotPrefix: string;
+  };
+}
+
 interface NativeKitWebComponentInput {
   fileName: string;
   data?: string | Uint8Array;
@@ -758,6 +831,7 @@ interface NativeKitWebComponentInput {
 
 interface NativeKitAppBrowserHostAPI {
   readonly capabilities: readonly NativeKitAppBrowserCapability[];
+  readonly artifacts: NativeKitArtifactHostSurface;
   install(packageValue: { files: NativeKitAppBrowserFileInput[]; manifest?: Partial<NativeKitAppManifest> }): Promise<NativeKitInstalledApp>;
   /**
    * Zero-config quick add: upload a single web component module (.js/.mjs) or an HTML page. For a
@@ -1083,6 +1157,12 @@ interface NativeKitInstalledEventMap {
   'push.received': NativeKitPushNotification;
   'push.action': NativeKitPushAction;
 }
+interface NativeKitInstalledArtifactGroup {
+  publish(input: NativeKitArtifactInput): Promise<NativeKitArtifact>;
+  list(): Promise<{ artifacts: NativeKitArtifact[] }>;
+  get(id?: string): Promise<NativeKitArtifactValue>;
+  remove(id?: string): Promise<{ removed: true; id: string; kind: NativeKitArtifactKind }>;
+}
 interface NativeKitInstalledAPI {
   readonly version: 'app-browser-1.1.0' | string;
   readonly appIdentity: NativeKitInstalledIdentity;
@@ -1183,6 +1263,17 @@ interface NativeKitInstalledAPI {
   };
   network: { status(): Promise<NativeKitNetworkStatus> };
   app: { info(): Promise<NativeKitInstalledAppInfo>; state(): Promise<NativeKitAppState> };
+  miniUI: NativeKitInstalledArtifactGroup;
+  floatingUI: NativeKitInstalledArtifactGroup & {
+    checkPermission(): Promise<{ granted: boolean }>;
+    requestPermission(): Promise<void>;
+    show(id?: string): Promise<Record<string, unknown>>;
+    hide(id?: string): Promise<{ hidden: true }>;
+  };
+  homeWidget: NativeKitInstalledArtifactGroup & {
+    activate(id?: string): Promise<NativeKitArtifactActivation>;
+    requestPin(id?: string): Promise<NativeKitArtifactActivation & { requested: boolean; hint?: string }>;
+  };
 }
 
 declare global {
@@ -1215,6 +1306,16 @@ export {
   NativeKitAppUsage,
   NativeKitPendingPermission,
   NativeKitAuditRecord,
+  NativeKitArtifactKind,
+  NativeKitArtifactInput,
+  NativeKitArtifact,
+  NativeKitArtifactValue,
+  NativeKitArtifactSource,
+  NativeKitArtifactSelector,
+  NativeKitArtifactHostSurface,
+  NativeKitArtifactMount,
+  NativeKitArtifactActivation,
+  NativeKitInstalledArtifactGroup,
   NativeKitWidgetConfig,
   NativeKitWidgetSpec,
   NativeKitFloatingWidgetOptions,

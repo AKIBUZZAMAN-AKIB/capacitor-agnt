@@ -581,6 +581,7 @@ const MINIAPP_CAPABILITIES = [
   'permissions', 'http', 'camera', 'location', 'backgroundLocation', 'haptics',
   'notifications', 'alarms', 'background', 'preferences', 'secureStorage', 'sqlite',
   'filesystem', 'fileTransfer', 'sharing', 'networkStatus', 'appInfo', 'pushNotifications', 'browser',
+  'miniUI', 'floatingUI', 'homeWidget',
 ] as const;
 const CLIPBOARD_LIMIT = { max: 10, windowMs: 60_000 };
 

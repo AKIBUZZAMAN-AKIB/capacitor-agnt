@@ -59,6 +59,8 @@ export interface WidgetConfig {
   html?: string;
   /** Base URL for relative assets in `html` (default the asset-loader host). */
   htmlBaseUrl?: string;
+  /** Untrusted self-contained artifact mode: blocks network/file/content access and uses an isolated base URL. */
+  sandboxed?: boolean;
   /** Snapshot render size in px (default 320x320); scaled to the widget by fitXY. */
   widthPx?: number;
   heightPx?: number;
@@ -112,6 +114,8 @@ export interface FloatingWidgetOptions {
     marginX?: number;
     marginY?: number;
   };
+  /** Untrusted artifact mode: no network/file/content access and no NativeKitFloating JS interface. */
+  sandboxed?: boolean;
   /** Initial data posted into the floating page. */
   data?: unknown;
 }

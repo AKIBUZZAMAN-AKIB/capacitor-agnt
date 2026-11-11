@@ -87,6 +87,7 @@ public class FloatingWidgetService extends Service {
     private String inlineHtml = null;
     private String lastPage = null;
     private boolean htmlDirty = false;
+    private boolean sandboxed = false;
 
     private int lastX, lastY;
     private float initialTouchX, initialTouchY;
@@ -137,6 +138,9 @@ public class FloatingWidgetService extends Service {
             touchThrough = config.optBoolean("touchThrough", false);
             chromeBar = !"none".equalsIgnoreCase(config.optString("chrome", "bar"));
             draggable = config.optBoolean("draggable", true);
+            boolean nextSandboxed = config.optBoolean("sandboxed", false);
+            if (nextSandboxed != sandboxed) htmlDirty = true;
+            sandboxed = nextSandboxed;
 
             org.json.JSONObject pos = config.optJSONObject("position");
             if (pos != null) {
@@ -400,19 +404,24 @@ public class FloatingWidgetService extends Service {
             WebView webView = new WebView(this);
             webView.setLayoutParams(new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             webView.getSettings().setJavaScriptEnabled(true);
-            webView.getSettings().setDomStorageEnabled(true);
-            webView.getSettings().setAllowFileAccess(true);
+            webView.getSettings().setBlockNetworkLoads(sandboxed);
+            webView.getSettings().setDomStorageEnabled(!sandboxed);
+            webView.getSettings().setAllowFileAccess(!sandboxed);
+            webView.getSettings().setAllowContentAccess(!sandboxed);
+            if (sandboxed && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                webView.getSettings().setMixedContentMode(android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+            }
             webView.setBackgroundColor(Color.TRANSPARENT);
             final WebViewAssetLoader assetLoader = new WebViewAssetLoader.Builder()
                     .setDomain("appassets.androidplatform.net")
                     .addPathHandler("/", new WebViewAssetLoader.AssetsPathHandler(this))
                     .build();
             webView.setWebViewClient(createWebViewClient(assetLoader));
-            webView.addJavascriptInterface(new NativeKitFloatingInterface(), "NativeKitFloating");
+            if (!sandboxed) webView.addJavascriptInterface(new NativeKitFloatingInterface(), "NativeKitFloating");
             String page = config.optString("page", "public/widgets/floating.html");
             if (inlineHtml != null) {
-                // Inline HTML: base URL is the asset-loader host so relative ./assets still resolve.
-                webView.loadDataWithBaseURL("https://appassets.androidplatform.net/", inlineHtml,
+                // Artifacts have no host assets or trusted native JS interface.
+                webView.loadDataWithBaseURL(sandboxed ? "https://miniapp.invalid/" : "https://appassets.androidplatform.net/", inlineHtml,
                         "text/html", "UTF-8", null);
             } else if (page != null && !page.isEmpty()) {
                 webView.loadUrl("https://appassets.androidplatform.net/" + page);
@@ -436,12 +445,16 @@ public class FloatingWidgetService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             return new WebViewClient() {
                 @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                    if (sandboxed) return null;
                     try {
                         return assetLoader.shouldInterceptRequest(request.getUrl());
                     } catch (Throwable error) {
                         Log.e(TAG, "shouldInterceptRequest failed", error);
                         return null;
                     }
+                }
+                @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                    return sandboxed;
                 }
                 @Override public void onPageFinished(WebView view, String url) {
                     pushInitialData(view);
@@ -457,12 +470,16 @@ public class FloatingWidgetService extends Service {
         }
         return new WebViewClient() {
             @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                if (sandboxed) return null;
                 try {
                     return assetLoader.shouldInterceptRequest(request.getUrl());
                 } catch (Throwable error) {
                     Log.e(TAG, "shouldInterceptRequest failed", error);
                     return null;
                 }
+            }
+            @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                return sandboxed;
             }
             @Override public void onPageFinished(WebView view, String url) {
                 pushInitialData(view);

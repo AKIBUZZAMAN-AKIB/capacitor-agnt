@@ -254,7 +254,7 @@ describe('App Browser broker security invariants', () => {
 
   it('releases active native side effects on update, final-session close, and renderer failure', () => {
     expect(source).toMatch(/if \(integrityChanged\) \{[\s\S]*?policy\.enabled = false;/);
-    expect(source).toContain('await saveInstalledAppAndPolicy(app, policy)');
+    expect(source).toContain('await saveInstalledAppAndPolicy(app, policy, nativeKit)');
     expect(source).toContain("['native resource revocation', () => releaseOwnedNativeState(app.id)]");
     expect(source).toContain("releaseOwnedNativeState(appId, capability)");
     expect(source).toContain('const hasAnotherAppSession = Array.from(sessions.values()).some');

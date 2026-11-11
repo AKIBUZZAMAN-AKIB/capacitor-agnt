@@ -395,6 +395,21 @@
       <div id="apps-empty" class="empty-state">এখনো কোনো third-party app install করা হয়নি।</div>
       <div id="apps-list" class="apps-list" aria-live="polite"></div>
 
+      <div class="artifact-section">
+        <div class="section-heading compact">
+          <div><p class="eyebrow">NATIVE UI ARTIFACTS</p><h3>Mini UI · Floating UI · Home Widget</h3><p>Mini App-এর পাঠানো code আলাদা native store-ে source ID, revision ও SHA-256-সহ রাখা হয়। Preview/Use করলেও মূল app UI বদলায় না।</p></div>
+          <button id="artifacts-refresh" class="secondary" type="button">Refresh</button>
+        </div>
+        <p class="hint">Mini UI = broker-less offline iframe · Floating UI = Android live sandboxed overlay · Home Widget = Android-এর static snapshot, live WebView নয়। iOS-এ HTML widget activation নেই।</p>
+        <div id="artifacts-empty" class="empty-state">এখনো কোনো UI artifact publish হয়নি।</div>
+        <div id="artifacts-list" class="artifacts-list" aria-live="polite"></div>
+        <div class="import-actions"><button id="floating-hide" class="ghost" type="button">Active floating UI বন্ধ করুন</button><span id="artifact-status" class="muted"></span></div>
+        <div id="artifact-preview" class="artifact-preview" hidden>
+          <div class="section-heading compact"><div><p class="eyebrow">OFFLINE MINI UI PREVIEW</p><h3 id="artifact-preview-title">Mini UI</h3></div><button id="artifact-preview-stop" class="ghost" type="button">Close preview</button></div>
+          <div id="artifact-frame-host" class="artifact-frame-host"></div>
+        </div>
+      </div>
+
       <div id="app-policy" class="policy-editor" hidden>
         <div class="section-heading compact">
           <div><p class="eyebrow">PER-APP POLICY</p><h3 id="policy-title">App policy</h3></div>

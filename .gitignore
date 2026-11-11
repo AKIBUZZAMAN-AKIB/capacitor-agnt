@@ -25,3 +25,6 @@ ios/App/build/
 # and the bytecode the python checkers leave behind
 .ffi-cache/
 __pycache__/
+
+# Native plugin Gradle outputs
+**/build/

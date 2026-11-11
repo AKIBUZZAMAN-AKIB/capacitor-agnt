@@ -5,7 +5,10 @@
 ## দ্রুত রেফারেন্স
 | ডক | এক লাইনে |
 |---|---|
-| [`API-REFERENCE.bn.md`](./API-REFERENCE.bn.md) | `window.NativeKit`-এর সম্পূর্ণ API — তিন trust tier, সব facade; v1.4.x `nearby` গভীর গাইড (মিনি-অ্যাপ এক্সপোজার-নিয়মসহ) |
+| [`FULL-API-REFERENCE.bn.md`](./FULL-API-REFERENCE.bn.md) | **Source-audited সম্পূর্ণ API reference** — host/Mini App trust tiers, Agent/MCP/Nearby/Widget, Android/iOS permission declarations ও runtime/type পার্থক্য |
+| [`MINI-APP-API-GUIDE.bn.md`](./MINI-APP-API-GUIDE.bn.md) | **Mini App developer guide (BN)** — সম্পূর্ণ brokered API, manifest, consent, ১০টি event, quotas, network-mode caveat ও উদাহরণ |
+| [`MINI-APP-UI-ARTIFACTS.bn.md`](./MINI-APP-UI-ARTIFACTS.bn.md) | **নতুন UI artifact implementation** — আলাদা Mini UI/Floating/Home store, native package migration, owner binding, sandbox, reserved providers, lifecycle, host API ও stopwatch sample |
+| [`API-REFERENCE.bn.md`](./API-REFERENCE.bn.md) | পূর্বের `window.NativeKit` reference — তিন trust tier, সব facade; v1.4.x `nearby` গভীর গাইড (মিনি-অ্যাপ এক্সপোজার-নিয়মসহ) |
 | [`BACKGROUND-WAKES.bn.md`](./BACKGROUND-WAKES.bn.md) | OS-শিডিউলড background wake (WorkManager `PeriodicWorkRequest` / iOS `BGProcessingTask`) + surfaced-message ইনবক্স — API চুক্তি, platform floor/সীমা, ডিভাইসে যাচাইয়ের নিয়ম |
 | [`CONFIGURATION.bn.md`](./CONFIGURATION.bn.md) | `app.config.json`-এর প্রতিটি field + `features.*` গেট (v1.4.x: `nearby`) |
 | [`WIDGETS.bn.md`](./WIDGETS.bn.md) | Home-screen (AppWidgetProvider/WidgetKit) + floating (overlay WebView) widget — আর্কিটেকচার, API, config, সীমাবদ্ধতা |

@@ -1,10 +1,25 @@
 import { unzipSync } from 'fflate';
 import { NativeKitIsolatedBrowser } from '@nativekit/isolated-browser';
+import {
+  ARTIFACT_KINDS,
+  NATIVE_ARTIFACT_LIMITS,
+  createNativeArtifactStore,
+  deleteNativePackage,
+  readNativePackage,
+  saveNativePackage,
+  type NativeArtifactKind,
+  type NativeArtifactOwner,
+  type NativeArtifactRecord,
+  type NativeArtifactStore,
+  type NativeObjectKit,
+} from './native-object-store';
+import { createMiniAppArtifactManager, MINI_APP_HOME_WIDGET_SLOT_PREFIX } from './mini-app-artifacts';
 
 export const APP_BROWSER_CAPABILITIES = Object.freeze([
   'permissions', 'http', 'camera', 'location', 'backgroundLocation', 'haptics',
   'notifications', 'alarms', 'background', 'preferences', 'secureStorage', 'sqlite',
   'filesystem', 'fileTransfer', 'sharing', 'networkStatus', 'appInfo', 'pushNotifications', 'browser',
+  'miniUI', 'floatingUI', 'homeWidget',
 ] as const);
 
 export type AppBrowserCapability = typeof APP_BROWSER_CAPABILITIES[number];
@@ -19,6 +34,7 @@ type AppBrowserConfig = {
   maxFiles: number;
   auditLogLimit: number;
   maxRequestsPerMinute: number;
+  maxActiveHomeWidgets: number;
   defaultCapabilities: AppBrowserCapability[];
   allowDirectWebNetwork: boolean;
   urlMode: { enabled: boolean; allowedHosts: string[] };
@@ -61,6 +77,11 @@ type InstalledApp = {
   installedAt: string;
   updatedAt: string;
   totalBytes: number;
+  fileCount?: number;
+};
+type AppMetadata = Omit<InstalledApp, 'files'> & { files?: PackageFile[] };
+type StoredInstalledApp = AppMetadata & {
+  packageStorage?: 'native-filesystem' | 'indexeddb-web';
 };
 type AppPolicy = {
   appId: string;
@@ -251,7 +272,16 @@ async function idbDelete(storeName: string, key: IDBValidKey): Promise<void> {
   await idbRequest<undefined>(storeName, 'readwrite', (store) => store.delete(key));
 }
 
-export async function saveInstalledAppAndPolicy(app: InstalledApp, policy: AppPolicy): Promise<void> {
+export async function saveInstalledAppAndPolicy(app: InstalledApp, policy: AppPolicy, nativeKit?: NativeObjectKit): Promise<void> {
+  // On Android/iOS, package bytes are committed to app-private native storage
+  // first. IndexedDB retains only searchable metadata and the policy, never a
+  // silent second copy of the Mini App's code.
+  const useNativePackage = nativeKit?.isNative === true;
+  if (useNativePackage) await saveNativePackage(nativeKit, app);
+  const { files, ...metadata } = app;
+  const stored: StoredInstalledApp = useNativePackage
+    ? { ...metadata, fileCount: files.length, packageStorage: 'native-filesystem' }
+    : { ...app, fileCount: files.length, packageStorage: 'indexeddb-web' };
   const db = await openDatabase();
   return new Promise<void>((resolve, reject) => {
     const transaction = db.transaction(['apps', 'policies'], 'readwrite');
@@ -264,7 +294,7 @@ export async function saveInstalledAppAndPolicy(app: InstalledApp, policy: AppPo
     };
     let appRequest: IDBRequest<IDBValidKey>; let policyRequest: IDBRequest<IDBValidKey>;
     try {
-      appRequest = transaction.objectStore('apps').put(app);
+      appRequest = transaction.objectStore('apps').put(stored);
       policyRequest = transaction.objectStore('policies').put(policy);
     } catch (error) {
       fail(error);
@@ -610,7 +640,7 @@ function parseManifest(files: PackageFile[], options: Record<string, any>, integ
 
 export function normalizePackagePath(value: string): string { return normalizePath(value); }
 
-function publicApp(app: InstalledApp, policy?: AppPolicy): Record<string, any> {
+function publicApp(app: AppMetadata, policy?: AppPolicy): Record<string, any> {
   return {
     id: app.id,
     manifest: app.manifest,
@@ -618,7 +648,7 @@ function publicApp(app: InstalledApp, policy?: AppPolicy): Record<string, any> {
     installedAt: app.installedAt,
     updatedAt: app.updatedAt,
     totalBytes: app.totalBytes,
-    fileCount: app.files.length,
+    fileCount: app.fileCount ?? app.files?.length ?? 0,
     ...(policy ? { policy } : {}),
   };
 }
@@ -1539,6 +1569,10 @@ function bootstrapSource(token: string, app: InstalledApp): string {
     'secureStorage.set', 'secureStorage.get', 'secureStorage.remove', 'sqlite.open', 'sqlite.execute', 'sqlite.run', 'sqlite.query', 'sqlite.close', 'sqlite.delete',
     'filesystem.readFile', 'filesystem.writeFile', 'filesystem.appendFile', 'filesystem.deleteFile', 'filesystem.mkdir', 'filesystem.rmdir', 'filesystem.readdir', 'filesystem.stat',
     'transfer.download', 'transfer.upload', 'browser.open', 'share.canShare', 'share.show', 'network.status', 'app.info', 'app.state',
+    'miniUI.publish', 'miniUI.list', 'miniUI.get', 'miniUI.remove',
+    'floatingUI.publish', 'floatingUI.list', 'floatingUI.get', 'floatingUI.remove',
+    'floatingUI.checkPermission', 'floatingUI.requestPermission', 'floatingUI.show', 'floatingUI.hide',
+    'homeWidget.publish', 'homeWidget.list', 'homeWidget.get', 'homeWidget.remove', 'homeWidget.activate', 'homeWidget.requestPin',
   ];
   return `(() => {
     'use strict';
@@ -1661,6 +1695,9 @@ export function createAppBrowser(nativeKit: any, config: AppBrowserConfig): any 
   const sessions = new Map<string, RpcSession>();
   const remoteUrlSessions = new Map<string, { id: string; url: string; native: boolean; window?: Window | null }>();
   const configuredDatabases = new Set<string>();
+  const packageCache = new Map<string, { integrity: string; files: PackageFile[] }>();
+  const artifactStore = createNativeArtifactStore(nativeKit as NativeObjectKit);
+  const artifactManager = createMiniAppArtifactManager(nativeKit, artifactStore, config);
   const methods = createAppBrowserMethodTable(nativeKit, configuredDatabases);
   const stoppingSessions = new Set<string>();
   const pendingPermissions = new Map<string, PendingPermissionInternal>();
@@ -1718,6 +1755,7 @@ export function createAppBrowser(nativeKit: any, config: AppBrowserConfig): any 
     notifications: 'localNotifications', alarms: 'advancedAlarms', background: 'backgroundRunner', sqlite: 'sqlite',
     secureStorage: 'secureStorage', filesystem: 'filesystem', fileTransfer: 'fileTransfer', sharing: 'sharing',
     networkStatus: 'networkStatus', pushNotifications: 'pushNotificationsReady', browser: 'inAppBrowser',
+    floatingUI: 'widget', homeWidget: 'widget',
   };
 
   function publicPendingPermission(request: PendingPermissionInternal): AppBrowserPendingPermission {
@@ -1956,12 +1994,62 @@ export function createAppBrowser(nativeKit: any, config: AppBrowserConfig): any 
     } catch { return false; }
   }
 
-  async function getApp(appId: string): Promise<InstalledApp> {
-    const app = await idbGet<InstalledApp>('apps', appId);
-    if (!app) throw new Error(`Third-party app not found: ${appId}`);
-    return app;
+  async function getApp(appId: string, loadFiles = true): Promise<InstalledApp> {
+    const stored = await idbGet<StoredInstalledApp>('apps', appId);
+    if (!stored) throw new Error(`Third-party app not found: ${appId}`);
+    if (!loadFiles) return { ...stored, files: packageCache.get(appId)?.files ?? stored.files ?? [] };
+    if (!nativeKit.isNative) return { ...stored, files: stored.files ?? [] };
+
+    const cached = packageCache.get(appId);
+    if (cached?.integrity === stored.integrity) return { ...stored, files: cached.files };
+    let files: PackageFile[];
+    if (stored.packageStorage === 'native-filesystem') {
+      files = await readNativePackage(nativeKit, appId, stored.integrity);
+    } else {
+      // One-time migration of legacy IndexedDB packages. The native copy is
+      // committed before the metadata stops referencing the web copy.
+      files = stored.files ?? [];
+      const legacyApp = { ...stored, files } as InstalledApp;
+      await saveNativePackage(nativeKit, legacyApp);
+      const { files: _legacyFiles, ...metadata } = legacyApp;
+      await idbPut('apps', { ...metadata, fileCount: files.length, packageStorage: 'native-filesystem' } satisfies StoredInstalledApp);
+    }
+    packageCache.set(appId, { integrity: stored.integrity, files });
+    return { ...stored, files, fileCount: files.length, packageStorage: undefined } as InstalledApp;
   }
-  async function getPolicy(app: InstalledApp): Promise<AppPolicy> {
+  function artifactOwner(app: AppMetadata): NativeArtifactOwner {
+    return { type: 'mini-app', id: app.id, name: app.manifest.name, version: app.manifest.version };
+  }
+  function hostArtifactOwner(): NativeArtifactOwner {
+    return { type: 'host', id: nativeKit.config.app.id, name: nativeKit.config.app.name, version: nativeKit.config.app.versionName };
+  }
+  async function resolveArtifactOwner(sourceType: unknown, appId?: string): Promise<NativeArtifactOwner> {
+    if (sourceType === 'host') return hostArtifactOwner();
+    if (sourceType !== 'mini-app') throw new Error("Artifact sourceType must be 'mini-app' or 'host'");
+    return artifactOwner(await getApp(String(appId ?? ''), false));
+  }
+  function registerArtifactBrokerMethods(): void {
+    const definitions: Array<[string, NativeArtifactKind, 'miniUI' | 'floatingUI' | 'homeWidget']> = [
+      ['miniUI', 'mini-ui', 'miniUI'],
+      ['floatingUI', 'floating-ui', 'floatingUI'],
+      ['homeWidget', 'home-widget', 'homeWidget'],
+    ];
+    for (const [group, kind, capability] of definitions) {
+      methods[`${group}.publish`] = { capability, run: async (ctx, [input]) => artifactManager.publish(artifactOwner(ctx.app), kind, input ?? {}) };
+      methods[`${group}.list`] = { capability, run: async (ctx) => ({ artifacts: await artifactManager.list(artifactOwner(ctx.app), kind) }) };
+      methods[`${group}.get`] = { capability, run: async (ctx, [id]) => artifactManager.read(artifactOwner(ctx.app), kind, String(id ?? 'main')) };
+      methods[`${group}.remove`] = { capability, run: async (ctx, [id]) => artifactManager.remove(artifactOwner(ctx.app), kind, String(id ?? 'main')) };
+    }
+    methods['floatingUI.checkPermission'] = { capability: 'floatingUI', run: async () => artifactManager.checkFloatingPermission() };
+    methods['floatingUI.requestPermission'] = { capability: 'floatingUI', run: async () => artifactManager.requestFloatingPermission() };
+    methods['floatingUI.show'] = { capability: 'floatingUI', run: async (ctx, [id]) => artifactManager.showFloating(artifactOwner(ctx.app), String(id ?? 'main')) };
+    methods['floatingUI.hide'] = { capability: 'floatingUI', run: async (ctx, [id]) => { await artifactManager.hideFloating(artifactOwner(ctx.app), id == null ? undefined : String(id)); return { hidden: true }; } };
+    methods['homeWidget.activate'] = { capability: 'homeWidget', run: async (ctx, [id]) => artifactManager.activateHomeWidget(artifactOwner(ctx.app), String(id ?? 'main')) };
+    methods['homeWidget.requestPin'] = { capability: 'homeWidget', run: async (ctx, [id]) => artifactManager.requestPinHomeWidget(artifactOwner(ctx.app), String(id ?? 'main')) };
+  }
+  registerArtifactBrokerMethods();
+
+  async function getPolicy(app: AppMetadata): Promise<AppPolicy> {
     const stored = await idbGet<AppPolicy>('policies', app.id);
     if (stored) {
       const migrated = normalizePolicy(stored);
@@ -2205,10 +2293,10 @@ export function createAppBrowser(nativeKit: any, config: AppBrowserConfig): any 
     for (const file of files) { if (unique.has(file.path)) throw new Error(`Duplicate package path: ${file.path}`); unique.add(file.path); totalBytes += file.bytes.length; }
     if (!files.length || files.length > config.maxFiles) throw new Error(`Package must contain 1–${config.maxFiles} files`);
     if (totalBytes > config.maxPackageBytes) throw new Error(`Package exceeds ${config.maxPackageBytes} bytes`);
-    const installed = await idbGetAll<InstalledApp>('apps');
+    const installed = await idbGetAll<StoredInstalledApp>('apps');
     const integrity = await sha256(files);
     const manifest = parseManifest(files, options, integrity);
-    const existing = await idbGet<InstalledApp>('apps', manifest.id);
+    const existing = await idbGet<StoredInstalledApp>('apps', manifest.id);
     if (!existing && installed.length >= config.maxApps) throw new Error(`At most ${config.maxApps} third-party apps can be installed`);
     const now = new Date().toISOString();
     const app: InstalledApp = { id: manifest.id, manifest, files, integrity, totalBytes: files.reduce((sum, file) => sum + file.bytes.length, 0), installedAt: existing?.installedAt ?? now, updatedAt: now };
@@ -2226,11 +2314,18 @@ export function createAppBrowser(nativeKit: any, config: AppBrowserConfig): any 
     }
     policy.updatedAt = now;
     // Commit changed bytes and their disabled policy atomically so a crash cannot launch new code under an old enabled policy.
-    await saveInstalledAppAndPolicy(app, policy);
+    await saveInstalledAppAndPolicy(app, policy, nativeKit);
+    packageCache.set(app.id, { integrity: app.integrity, files: app.files });
+    if (existing && integrityChanged && nativeKit.isNative) {
+      // The new commit is already durable. An old, unreachable package may be
+      // removed afterwards without putting the newly installed app at risk.
+      try { await deleteNativePackage(nativeKit, app.id, existing.integrity); } catch { /* Orphan cleanup can be retried on removal. */ }
+    }
     if (integrityChanged) {
       await runCleanupOperations(`Changed package ${app.id} was disabled, but some active resources could not be revoked`, [
         ['session shutdown', () => stopAppSessions(app.id)],
         ['native resource revocation', () => releaseOwnedNativeState(app.id)],
+        ['UI artifact deactivation', () => artifactManager.deactivateOwner(artifactOwner(app))],
       ]);
     }
     return publicApp(app, policy);
@@ -2444,6 +2539,8 @@ export function createAppBrowser(nativeKit: any, config: AppBrowserConfig): any 
     if (decision !== 'allow') await runCleanupOperations(`Capability ${capability} was revoked, but some active resources could not be released`, [
       ['subscription revocation', () => removeSubscriptions(appId, (subscription) => subscription.capability === capability)],
       ['native resource revocation', () => releaseOwnedNativeState(appId, capability)],
+      ...((capability === 'miniUI' || capability === 'floatingUI' || capability === 'homeWidget')
+        ? [['UI artifact deactivation', () => artifactManager.deactivateOwner(artifactOwner(app), capability === 'miniUI' ? 'mini-ui' : capability === 'floatingUI' ? 'floating-ui' : 'home-widget')] as [string, () => Promise<void>]] : []),
     ]);
     return normalized;
   }
@@ -2460,6 +2557,8 @@ export function createAppBrowser(nativeKit: any, config: AppBrowserConfig): any 
       const resourceCapability = method === 'backgroundLocation.start' ? 'backgroundLocation' : method === 'notifications.schedule' ? 'notifications' : method === 'alarms.schedule' ? 'alarms' : undefined;
       const operations: Array<[string, () => Promise<void>]> = [['subscription revocation', () => removeSubscriptions(appId, (subscription) => subscription.method === method)]];
       if (resourceCapability) operations.push(['native resource revocation', () => releaseOwnedNativeState(appId, resourceCapability)]);
+      if (method === 'floatingUI.show') operations.push(['floating artifact deactivation', () => artifactManager.deactivateOwner(artifactOwner(app), 'floating-ui')]);
+      if (method === 'homeWidget.activate' || method === 'homeWidget.requestPin') operations.push(['home widget artifact deactivation', () => artifactManager.deactivateOwner(artifactOwner(app), 'home-widget')]);
       await runCleanupOperations(`Method ${method} was revoked, but some active resources could not be released`, operations);
     }
     return normalized;
@@ -2474,6 +2573,37 @@ export function createAppBrowser(nativeKit: any, config: AppBrowserConfig): any 
     });
     if (!session || !Number.isSafeInteger(message.id) || typeof message.method !== 'string') return;
     void execute(session, message.id, message.method, message.args);
+  });
+
+  const artifactHostSurface = Object.freeze({
+    kinds: ARTIFACT_KINDS,
+    limits: Object.freeze({ ...NATIVE_ARTIFACT_LIMITS, maxActiveHomeWidgets: artifactManager.limits.maxActiveHomeWidgets, slotPrefix: MINI_APP_HOME_WIDGET_SLOT_PREFIX }),
+    storage: 'native-filesystem',
+    publish: (kind: NativeArtifactKind, input: Record<string, any>) => artifactManager.publish(hostArtifactOwner(), kind, input as any),
+    list: async (filter: { sourceType?: 'mini-app' | 'host'; appId?: string; kind?: NativeArtifactKind } = {}) => {
+      let owners: NativeArtifactOwner[];
+      if (filter.sourceType || filter.appId) owners = [await resolveArtifactOwner(filter.sourceType ?? 'mini-app', filter.appId)];
+      else owners = [hostArtifactOwner(), ...(await idbGetAll<StoredInstalledApp>('apps')).map(artifactOwner)];
+      const nested = await Promise.all(owners.map((owner) => artifactManager.list(owner, filter.kind)));
+      return nested.flat();
+    },
+    read: async (input: { sourceType?: 'mini-app' | 'host'; appId?: string; kind: NativeArtifactKind; artifactId: string }) => artifactManager.read(await resolveArtifactOwner(input.sourceType ?? 'mini-app', input.appId), input.kind, input.artifactId),
+    remove: async (input: { sourceType?: 'mini-app' | 'host'; appId?: string; kind: NativeArtifactKind; artifactId: string }) => artifactManager.remove(await resolveArtifactOwner(input.sourceType ?? 'mini-app', input.appId), input.kind, input.artifactId),
+    removeOwner: async (appId: string) => artifactManager.removeOwner(artifactOwner(await getApp(appId, false))),
+    mountMiniUI: async (input: { sourceType?: 'mini-app' | 'host'; appId?: string; artifactId: string; target: HTMLElement; replace?: boolean; className?: string }) => artifactManager.mountMiniUI(await resolveArtifactOwner(input.sourceType ?? 'mini-app', input.appId), input.artifactId, input.target, input),
+    activateHomeWidget: async (input: { sourceType?: 'mini-app' | 'host'; appId?: string; artifactId: string }) => artifactManager.activateHomeWidget(await resolveArtifactOwner(input.sourceType ?? 'mini-app', input.appId), input.artifactId),
+    requestPinHomeWidget: async (input: { sourceType?: 'mini-app' | 'host'; appId?: string; artifactId: string }) => artifactManager.requestPinHomeWidget(await resolveArtifactOwner(input.sourceType ?? 'mini-app', input.appId), input.artifactId),
+    showFloatingUI: async (input: { sourceType?: 'mini-app' | 'host'; appId?: string; artifactId: string }) => artifactManager.showFloating(await resolveArtifactOwner(input.sourceType ?? 'mini-app', input.appId), input.artifactId),
+    hideFloatingUI: async (input: { sourceType?: 'mini-app' | 'host'; appId?: string; artifactId?: string } = {}) => {
+      // A trusted host/user emergency stop may omit the selector. A supplied
+      // selector remains owner-checked, matching the untrusted broker behavior.
+      if (input.sourceType || input.appId || input.artifactId) {
+        const owner = await resolveArtifactOwner(input.sourceType ?? (input.appId ? 'mini-app' : 'host'), input.appId);
+        await artifactManager.hideFloating(owner, input.artifactId);
+      } else await artifactManager.hideFloating();
+      return { hidden: true };
+    },
+    activations: () => artifactManager.listActivations(),
   });
 
   const hostSurface = Object.freeze({
@@ -2522,7 +2652,7 @@ export function createAppBrowser(nativeKit: any, config: AppBrowserConfig): any 
     },
     installFromFiles,
     installFromZip,
-    list: async () => Promise.all((await idbGetAll<InstalledApp>('apps')).map(async (app) => publicApp(app, await getPolicy(app)))),
+    list: async () => Promise.all((await idbGetAll<StoredInstalledApp>('apps')).map(async (app) => publicApp(app, await getPolicy(app)))),
     get: async (appId: string) => { const app = await getApp(appId); return publicApp(app, await getPolicy(app)); },
     usage: appUsage,
     cleanup: cleanupApp,
@@ -2533,10 +2663,12 @@ export function createAppBrowser(nativeKit: any, config: AppBrowserConfig): any 
       await runCleanupOperations(`App ${appId} was disabled but could not be fully removed; retry removal after resolving the reported native cleanup failures`, [
         ['session shutdown', () => stopAppSessions(appId)],
         ['native resource revocation', () => releaseOwnedNativeState(appId)],
+        ['UI artifact activation and native-store deletion', () => artifactManager.removeOwner(artifactOwner(app))],
         ['database deletion', () => deleteOwnedDatabases(appId)],
         ['storage and filesystem deletion', () => deleteOwnedStorageAndFiles(appId)],
-        ...(nativeKit.isNative ? [['isolated package and web-storage deletion', () => NativeKitIsolatedBrowser.removeStagedApp({ appId })] as [string, () => Promise<void>]] : []),
+        ...(nativeKit.isNative ? [['native package deletion', () => deleteNativePackage(nativeKit, appId)] as [string, () => Promise<void>], ['isolated package and web-storage deletion', () => NativeKitIsolatedBrowser.removeStagedApp({ appId })] as [string, () => Promise<void>]] : []),
       ]);
+      packageCache.delete(appId);
       await deleteAppResources(appId); await idbDelete('apps', appId); await idbDelete('policies', appId);
     },
     openUrl: async (input: string, options: { title?: string } = {}) => {
@@ -2642,6 +2774,7 @@ export function createAppBrowser(nativeKit: any, config: AppBrowserConfig): any 
       if (!enabled) await runCleanupOperations(`App ${appId} was disabled, but some active resources could not be revoked`, [
         ['session shutdown', () => stopAppSessions(appId)],
         ['native resource revocation', () => releaseOwnedNativeState(appId)],
+        ['UI artifact deactivation', () => artifactManager.deactivateOwner(artifactOwner(app))],
       ]);
       return normalized;
     },
@@ -2675,6 +2808,7 @@ export function createAppBrowser(nativeKit: any, config: AppBrowserConfig): any 
       if (appId) return (await idbGet<NetUsageRecord>('netstats', appId)) ?? { appId, count: 0, hosts: {}, updatedAt: '' };
       return idbGetAll<NetUsageRecord>('netstats');
     },
+    artifacts: artifactHostSurface,
     audit: Object.freeze({
       list: async (filter: { appId?: string; capability?: string; outcome?: AuditOutcome; limit?: number } = {}) => (await idbGetAll<AuditRecord>('audit')).filter((row) => (!filter.appId || row.appId === filter.appId) && (!filter.capability || row.capability === filter.capability) && (!filter.outcome || row.outcome === filter.outcome)).sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp))).slice(0, Math.min(1000, Math.max(1, filter.limit ?? 100))),
       summary: async (appId?: string) => { const rows = (await idbGetAll<AuditRecord>('audit')).filter((row) => !appId || row.appId === appId); const summary: Record<string, any> = {}; for (const row of rows) { const key = `${row.appId}|${row.method}`; const item = summary[key] ??= { appId: row.appId, appName: row.appName, method: row.method, capability: row.capability, calls: 0, success: 0, denied: 0, errors: 0, lastUsedAt: row.timestamp }; item.calls += 1; if (row.outcome === 'success') item.success += 1; else if (row.outcome === 'denied' || row.outcome === 'rate_limited') item.denied += 1; else item.errors += 1; if (row.timestamp > item.lastUsedAt) item.lastUsedAt = row.timestamp; } return Object.values(summary).sort((a: any, b: any) => b.lastUsedAt.localeCompare(a.lastUsedAt)); },

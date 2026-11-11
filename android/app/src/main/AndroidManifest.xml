@@ -88,6 +88,110 @@
                 android:resource="@xml/nativekit_widget_widget_provider" />
         </receiver>
 
+        <receiver
+            android:name="dev.nativekit.shell.Widget_nativekit_miniapp_slot_01"
+            android:enabled="true"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/nativekit_miniapp_slot_01_widget_provider" />
+        </receiver>
+
+        <receiver
+            android:name="dev.nativekit.shell.Widget_nativekit_miniapp_slot_02"
+            android:enabled="true"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/nativekit_miniapp_slot_02_widget_provider" />
+        </receiver>
+
+        <receiver
+            android:name="dev.nativekit.shell.Widget_nativekit_miniapp_slot_03"
+            android:enabled="true"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/nativekit_miniapp_slot_03_widget_provider" />
+        </receiver>
+
+        <receiver
+            android:name="dev.nativekit.shell.Widget_nativekit_miniapp_slot_04"
+            android:enabled="true"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/nativekit_miniapp_slot_04_widget_provider" />
+        </receiver>
+
+        <receiver
+            android:name="dev.nativekit.shell.Widget_nativekit_miniapp_slot_05"
+            android:enabled="true"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/nativekit_miniapp_slot_05_widget_provider" />
+        </receiver>
+
+        <receiver
+            android:name="dev.nativekit.shell.Widget_nativekit_miniapp_slot_06"
+            android:enabled="true"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/nativekit_miniapp_slot_06_widget_provider" />
+        </receiver>
+
+        <receiver
+            android:name="dev.nativekit.shell.Widget_nativekit_miniapp_slot_07"
+            android:enabled="true"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/nativekit_miniapp_slot_07_widget_provider" />
+        </receiver>
+
+        <receiver
+            android:name="dev.nativekit.shell.Widget_nativekit_miniapp_slot_08"
+            android:enabled="true"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/nativekit_miniapp_slot_08_widget_provider" />
+        </receiver>
+
         <service
             android:name="dev.nativekit.widget.FloatingWidgetService"
             android:exported="false"

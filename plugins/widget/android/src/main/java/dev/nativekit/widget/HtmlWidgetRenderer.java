@@ -112,11 +112,17 @@ public final class HtmlWidgetRenderer {
                     wv.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
 
                     WebSettings s = wv.getSettings();
+                    final boolean sandboxed = cfg.optBoolean("sandboxed", false);
                     s.setJavaScriptEnabled(true);
-                    s.setDomStorageEnabled(true);
-                    s.setAllowFileAccess(true);
+                    // Mini App artifacts are self-contained untrusted HTML. They must not
+                    // read host assets/files or exfiltrate data over the network. Trusted
+                    // host widgets retain the legacy asset-loader behavior.
+                    s.setBlockNetworkLoads(sandboxed);
+                    s.setDomStorageEnabled(!sandboxed);
+                    s.setAllowFileAccess(!sandboxed);
+                    s.setAllowContentAccess(!sandboxed);
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                        s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+                        s.setMixedContentMode(sandboxed ? WebSettings.MIXED_CONTENT_NEVER_ALLOW : WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
                     }
 
                     final int w = Math.max(1, widthPx);
@@ -133,8 +139,12 @@ public final class HtmlWidgetRenderer {
                     final WebView finalWv = wv;
                     wv.setWebViewClient(new WebViewClient() {
                         @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                            if (sandboxed) return null;
                             try { return assets.shouldInterceptRequest(request.getUrl()); }
                             catch (Throwable error) { return null; }
+                        }
+                        @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                            return sandboxed;
                         }
                         @Override public void onPageFinished(WebView view, String url) {
                             // Wait a short beat so the page has actually painted before capture, then
@@ -150,7 +160,7 @@ public final class HtmlWidgetRenderer {
 
                     final String html = cfg.optString("html", null);
                     final String page = cfg.optString("page", null);
-                    String base = cfg.optString("htmlBaseUrl", HTML_DEFAULT_BASE);
+                    String base = sandboxed ? "https://miniapp.invalid/" : cfg.optString("htmlBaseUrl", HTML_DEFAULT_BASE);
                     if (html != null && !html.isEmpty()) {
                         finalWv.loadDataWithBaseURL(base, html, "text/html", "UTF-8", null);
                     } else if (page != null && !page.isEmpty()) {
